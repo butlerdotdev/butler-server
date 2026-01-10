@@ -1,0 +1,41 @@
+secrets/
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+server
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Dependencies
+vendor/
+
+# Build artifacts
+dist/
+
+# Static files (built from butler-console)
+internal/static/files/*
+!internal/static/files/.gitkeep
+
+# Local config
+*.local
+.env
+.env.*
