@@ -31,7 +31,6 @@ vendor/
 dist/
 
 # Static files (built from butler-console)
-internal/static/files/*
 !internal/static/files/.gitkeep
 
 # Local config
