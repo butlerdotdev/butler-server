@@ -27,7 +27,7 @@ jobs:
         run: git clone https://github.com/butlerdotdev/butler-api.git ../butler-api
 
       - name: Build
-        run: CGO_ENABLED=0 go build -o bin/butler-server ./cmd/server
+        run: CGO_ENABLED=0 go build -buildvcs=false -o bin/butler-server ./cmd/server
 
   image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
