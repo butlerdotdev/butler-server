@@ -733,3 +733,193 @@ func detectOSType(name string) string {
 		return "linux"
 	}
 }
+
+// NetworkInfo represents an available network.
+type NetworkInfo struct {
+	Name        string `json:"name"`
+	ID          string `json:"id"`
+	VLAN        int    `json:"vlan,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// ListNetworks returns available networks for a provider.
+func (h *ProvidersHandler) ListNetworks(w http.ResponseWriter, r *http.Request) {
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+	ctx := r.Context()
+
+	provider, err := h.k8sClient.GetProviderConfig(ctx, namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("provider not found: %v", err))
+		return
+	}
+
+	providerType, _, _ := unstructured.NestedString(provider.Object, "spec", "provider")
+
+	// Get credentials
+	credentialsRef, _, _ := unstructured.NestedMap(provider.Object, "spec", "credentialsRef")
+	secretName, _ := credentialsRef["name"].(string)
+	secretNamespace, _ := credentialsRef["namespace"].(string)
+	if secretNamespace == "" {
+		secretNamespace = namespace
+	}
+
+	secret, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get credentials: %v", err))
+		return
+	}
+
+	var networks []NetworkInfo
+
+	switch providerType {
+	case "harvester":
+		kubeconfig := secret.Data["kubeconfig"]
+		networks, err = h.listHarvesterNetworks(ctx, kubeconfig)
+	case "nutanix":
+		endpoint, _, _ := unstructured.NestedString(provider.Object, "spec", "nutanix", "endpoint")
+		port, _, _ := unstructured.NestedInt64(provider.Object, "spec", "nutanix", "port")
+		insecure, _, _ := unstructured.NestedBool(provider.Object, "spec", "nutanix", "insecure")
+		username := string(secret.Data["username"])
+		password := string(secret.Data["password"])
+		networks, err = h.listNutanixNetworks(ctx, endpoint, int32(port), username, password, insecure)
+	default:
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("network listing not supported for provider: %s", providerType))
+		return
+	}
+
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list networks: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"networks": networks})
+}
+
+// listHarvesterNetworks fetches VM networks from Harvester.
+func (h *ProvidersHandler) listHarvesterNetworks(ctx context.Context, kubeconfig []byte) ([]NetworkInfo, error) {
+	if len(kubeconfig) == 0 {
+		return nil, fmt.Errorf("kubeconfig is required")
+	}
+
+	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("invalid kubeconfig: %w", err)
+	}
+	restConfig.Timeout = 15 * time.Second
+
+	client, err := k8s.NewClientFromRESTConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create client: %w", err)
+	}
+
+	// List NetworkAttachmentDefinitions (Multus networks used by Harvester)
+	nadGVR := schema.GroupVersionResource{
+		Group:    "k8s.cni.cncf.io",
+		Version:  "v1",
+		Resource: "network-attachment-definitions",
+	}
+
+	nadList, err := client.Dynamic().Resource(nadGVR).Namespace("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list networks: %w", err)
+	}
+
+	networks := make([]NetworkInfo, 0, len(nadList.Items))
+	for _, nad := range nadList.Items {
+		name, _, _ := unstructured.NestedString(nad.Object, "metadata", "name")
+		namespace, _, _ := unstructured.NestedString(nad.Object, "metadata", "namespace")
+
+		// Parse VLAN from config if available
+		vlan := 0
+		configStr, _, _ := unstructured.NestedString(nad.Object, "spec", "config")
+		if strings.Contains(configStr, "vlan") {
+			// Simple extraction - could be more robust
+			// Config is JSON like: {"cniVersion":"0.3.1","name":"vlan40","type":"bridge","vlan":40,...}
+			var config map[string]interface{}
+			if json.Unmarshal([]byte(configStr), &config) == nil {
+				if v, ok := config["vlan"].(float64); ok {
+					vlan = int(v)
+				}
+			}
+		}
+
+		id := fmt.Sprintf("%s/%s", namespace, name)
+
+		networks = append(networks, NetworkInfo{
+			Name:        name,
+			ID:          id,
+			VLAN:        vlan,
+			Description: fmt.Sprintf("%s (VLAN %d)", name, vlan),
+		})
+	}
+
+	return networks, nil
+}
+
+// listNutanixNetworks fetches subnets from Nutanix Prism Central.
+func (h *ProvidersHandler) listNutanixNetworks(ctx context.Context, endpoint string, port int32, username, password string, insecure bool) ([]NetworkInfo, error) {
+	if port == 0 {
+		port = 9440
+	}
+
+	apiURL := fmt.Sprintf("%s:%d/api/nutanix/v3/subnets/list", endpoint, port)
+
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: insecure,
+			},
+		},
+	}
+
+	reqBody := strings.NewReader(`{"kind":"subnet","length":500}`)
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.SetBasicAuth(username, password)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Entities []struct {
+			Metadata struct {
+				UUID string `json:"uuid"`
+			} `json:"metadata"`
+			Spec struct {
+				Name      string `json:"name"`
+				Resources struct {
+					VlanID int `json:"vlan_id"`
+				} `json:"resources"`
+			} `json:"spec"`
+		} `json:"entities"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	networks := make([]NetworkInfo, 0, len(result.Entities))
+	for _, entity := range result.Entities {
+		networks = append(networks, NetworkInfo{
+			Name:        entity.Spec.Name,
+			ID:          entity.Metadata.UUID,
+			VLAN:        entity.Spec.Resources.VlanID,
+			Description: fmt.Sprintf("%s (VLAN %d)", entity.Spec.Name, entity.Spec.Resources.VlanID),
+		})
+	}
+
+	return networks, nil
+}
