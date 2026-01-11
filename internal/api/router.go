@@ -116,6 +116,7 @@ func NewRouter(cfg RouterConfig) http.Handler {
 			r.Get("/providers", providerHandler.List)
 			r.Post("/providers", providerHandler.Create)
 			r.Post("/providers/test", providerHandler.TestConnection)
+			r.Get("/providers/{namespace}/{name}/images", providerHandler.ListImages)
 			r.Get("/providers/{namespace}/{name}", providerHandler.Get)
 			r.Delete("/providers/{namespace}/{name}", providerHandler.Delete)
 			r.Post("/providers/{namespace}/{name}/validate", providerHandler.Validate)

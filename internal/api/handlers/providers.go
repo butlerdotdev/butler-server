@@ -17,10 +17,12 @@ limitations under the License.
 package handlers
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/butlerdotdev/butler-server/internal/config"
@@ -30,6 +32,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -523,5 +526,210 @@ func testProxmoxConnection(endpoint, username, password, tokenId, tokenSecret st
 	return ValidateResponse{
 		Valid:   true,
 		Message: "Connected to Proxmox VE successfully",
+	}
+}
+
+// ImageInfo represents an available image.
+type ImageInfo struct {
+	Name        string `json:"name"`
+	ID          string `json:"id"`
+	Description string `json:"description,omitempty"`
+	OS          string `json:"os,omitempty"`
+}
+
+// ListImages returns available images for a provider.
+func (h *ProvidersHandler) ListImages(w http.ResponseWriter, r *http.Request) {
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+	ctx := r.Context()
+
+	provider, err := h.k8sClient.GetProviderConfig(ctx, namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("provider not found: %v", err))
+		return
+	}
+
+	providerType, _, _ := unstructured.NestedString(provider.Object, "spec", "provider")
+
+	// Get credentials
+	credentialsRef, _, _ := unstructured.NestedMap(provider.Object, "spec", "credentialsRef")
+	secretName, _ := credentialsRef["name"].(string)
+	secretNamespace, _ := credentialsRef["namespace"].(string)
+	if secretNamespace == "" {
+		secretNamespace = namespace
+	}
+
+	secret, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get credentials: %v", err))
+		return
+	}
+
+	var images []ImageInfo
+
+	switch providerType {
+	case "harvester":
+		kubeconfig := secret.Data["kubeconfig"]
+		images, err = h.listHarvesterImages(ctx, kubeconfig)
+	case "nutanix":
+		endpoint, _, _ := unstructured.NestedString(provider.Object, "spec", "nutanix", "endpoint")
+		port, _, _ := unstructured.NestedInt64(provider.Object, "spec", "nutanix", "port")
+		insecure, _, _ := unstructured.NestedBool(provider.Object, "spec", "nutanix", "insecure")
+		username := string(secret.Data["username"])
+		password := string(secret.Data["password"])
+		images, err = h.listNutanixImages(ctx, endpoint, int32(port), username, password, insecure)
+	default:
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("image listing not supported for provider: %s", providerType))
+		return
+	}
+
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list images: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"images": images})
+}
+
+// listHarvesterImages fetches VM images from Harvester.
+func (h *ProvidersHandler) listHarvesterImages(ctx context.Context, kubeconfig []byte) ([]ImageInfo, error) {
+	if len(kubeconfig) == 0 {
+		return nil, fmt.Errorf("kubeconfig is required")
+	}
+
+	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("invalid kubeconfig: %w", err)
+	}
+	restConfig.Timeout = 15 * time.Second
+
+	client, err := k8s.NewClientFromRESTConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create client: %w", err)
+	}
+
+	// List VirtualMachineImages from Harvester
+	imageGVR := schema.GroupVersionResource{
+		Group:    "harvesterhci.io",
+		Version:  "v1beta1",
+		Resource: "virtualmachineimages",
+	}
+
+	imageList, err := client.Dynamic().Resource(imageGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list images: %w", err)
+	}
+
+	images := make([]ImageInfo, 0, len(imageList.Items))
+	for _, img := range imageList.Items {
+		name, _, _ := unstructured.NestedString(img.Object, "metadata", "name")
+		namespace, _, _ := unstructured.NestedString(img.Object, "metadata", "namespace")
+		displayName, _, _ := unstructured.NestedString(img.Object, "spec", "displayName")
+		description, _, _ := unstructured.NestedString(img.Object, "spec", "description")
+
+		// Determine OS type from name/displayName
+		osType := detectOSType(strings.ToLower(name + " " + displayName))
+
+		id := fmt.Sprintf("%s/%s", namespace, name)
+		if displayName == "" {
+			displayName = name
+		}
+
+		images = append(images, ImageInfo{
+			Name:        displayName,
+			ID:          id,
+			Description: description,
+			OS:          osType,
+		})
+	}
+
+	return images, nil
+}
+
+// listNutanixImages fetches images from Nutanix Prism Central.
+func (h *ProvidersHandler) listNutanixImages(ctx context.Context, endpoint string, port int32, username, password string, insecure bool) ([]ImageInfo, error) {
+	if port == 0 {
+		port = 9440
+	}
+
+	apiURL := fmt.Sprintf("%s:%d/api/nutanix/v3/images/list", endpoint, port)
+
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: insecure,
+			},
+		},
+	}
+
+	reqBody := strings.NewReader(`{"kind":"image","length":500}`)
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.SetBasicAuth(username, password)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Entities []struct {
+			Metadata struct {
+				UUID string `json:"uuid"`
+			} `json:"metadata"`
+			Spec struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			} `json:"spec"`
+		} `json:"entities"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	images := make([]ImageInfo, 0, len(result.Entities))
+	for _, entity := range result.Entities {
+		osType := detectOSType(strings.ToLower(entity.Spec.Name))
+		images = append(images, ImageInfo{
+			Name:        entity.Spec.Name,
+			ID:          entity.Metadata.UUID,
+			Description: entity.Spec.Description,
+			OS:          osType,
+		})
+	}
+
+	return images, nil
+}
+
+// detectOSType guesses OS type from image name.
+func detectOSType(name string) string {
+	switch {
+	case strings.Contains(name, "talos"):
+		return "talos"
+	case strings.Contains(name, "rocky"):
+		return "rocky"
+	case strings.Contains(name, "ubuntu"):
+		return "ubuntu"
+	case strings.Contains(name, "debian"):
+		return "debian"
+	case strings.Contains(name, "centos"):
+		return "centos"
+	case strings.Contains(name, "rhel") || strings.Contains(name, "redhat"):
+		return "rhel"
+	case strings.Contains(name, "flatcar"):
+		return "flatcar"
+	default:
+		return "linux"
 	}
 }
