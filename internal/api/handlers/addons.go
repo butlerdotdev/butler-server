@@ -681,7 +681,7 @@ func (h *AddonsHandler) UninstallManagementAddon(w http.ResponseWriter, r *http.
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, map[string]string{"message": "addon uninstall initiated"})
 }
 
 func (h *AddonsHandler) addonDefinitionToResponse(ad *unstructured.Unstructured) AddonDefinitionResponse {
