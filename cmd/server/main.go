@@ -88,13 +88,17 @@ func main() {
 
 	staticHandler := createStaticHandler(devMode)
 
-	router := api.NewRouter(api.RouterConfig{
+	router, err := api.NewRouter(api.RouterConfig{
 		K8sClient:     k8sClient,
 		Config:        cfg,
 		DevMode:       devMode,
 		StaticHandler: staticHandler,
 		Logger:        logger,
 	})
+	if err != nil {
+		slog.Error("Failed to create router", "error", err)
+		os.Exit(1)
+	}
 
 	// Create listener first to fail fast on port conflicts
 	listener, err := net.Listen("tcp", addr)
