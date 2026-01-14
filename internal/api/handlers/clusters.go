@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/butlerdotdev/butler-server/internal/auth"
 	"github.com/butlerdotdev/butler-server/internal/config"
 	"github.com/butlerdotdev/butler-server/internal/k8s"
 
@@ -51,9 +52,40 @@ type ClusterListResponse struct {
 	Clusters []map[string]interface{} `json:"clusters"`
 }
 
+// checkClusterAccess verifies the user has access to a cluster based on its teamRef.
+// Returns nil if access is granted, or an error message if denied.
+// Admins have access to all clusters.
+func (h *ClusterHandler) checkClusterAccess(user *auth.UserSession, cluster *unstructured.Unstructured) error {
+	// Admins can access all clusters
+	if user.IsAdmin() {
+		return nil
+	}
+
+	// Get the cluster's team reference
+	teamRef, found, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+
+	// If cluster has no teamRef, it's a platform-level cluster
+	// Only admins should see these (already checked above)
+	if !found || teamRef == "" {
+		return fmt.Errorf("forbidden: cluster is not associated with any team")
+	}
+
+	// Check if user is a member of the cluster's team
+	if !user.HasTeamMembership(teamRef) {
+		return fmt.Errorf("forbidden: you don't have access to team '%s'", teamRef)
+	}
+
+	return nil
+}
+
 // List returns all tenant clusters.
+// Query params:
+//   - namespace: filter by namespace
+//   - team: filter by spec.teamRef.name (for team-scoped views)
 func (h *ClusterHandler) List(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
 	namespace := r.URL.Query().Get("namespace")
+	team := r.URL.Query().Get("team")
 
 	clusters, err := h.k8sClient.ListTenantClusters(r.Context(), namespace)
 	if err != nil {
@@ -66,6 +98,27 @@ func (h *ClusterHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, cluster := range clusters.Items {
+		clusterTeam, _, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+
+		// If team filter is provided, only include clusters belonging to that team
+		if team != "" {
+			if clusterTeam != team {
+				continue
+			}
+		}
+
+		// Authorization check: non-admins can only see clusters from their teams
+		if user != nil && !user.IsAdmin() {
+			// Skip clusters without teamRef (platform-level)
+			if clusterTeam == "" {
+				continue
+			}
+			// Skip clusters from teams user doesn't belong to
+			if !user.HasTeamMembership(clusterTeam) {
+				continue
+			}
+		}
+
 		response.Clusters = append(response.Clusters, cluster.Object)
 	}
 
@@ -84,6 +137,9 @@ type CreateClusterRequest struct {
 	WorkerDiskSize    string `json:"workerDiskSize"`
 	LoadBalancerStart string `json:"loadBalancerStart"`
 	LoadBalancerEnd   string `json:"loadBalancerEnd"`
+
+	// Team association - when set, cluster belongs to this team
+	TeamRef string `json:"teamRef,omitempty"`
 
 	// Harvester-specific
 	HarvesterNamespace   string `json:"harvesterNamespace,omitempty"`
@@ -104,6 +160,8 @@ type CreateClusterRequest struct {
 
 // Create creates a new tenant cluster.
 func (h *ClusterHandler) Create(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+
 	var req CreateClusterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -117,6 +175,18 @@ func (h *ClusterHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if req.ProviderConfigRef == "" {
 		writeError(w, http.StatusBadRequest, "providerConfigRef is required")
 		return
+	}
+
+	// Authorization: non-admins can only create clusters for teams they belong to
+	if user != nil && !user.IsAdmin() {
+		if req.TeamRef == "" {
+			writeError(w, http.StatusForbidden, "teamRef is required for non-admin users")
+			return
+		}
+		if !user.CanOperateTeam(req.TeamRef) {
+			writeError(w, http.StatusForbidden, fmt.Sprintf("you don't have permission to create clusters for team '%s'", req.TeamRef))
+			return
+		}
 	}
 
 	if req.Namespace == "" {
@@ -157,6 +227,13 @@ func (h *ClusterHandler) Create(w http.ResponseWriter, r *http.Request) {
 				"end":   req.LoadBalancerEnd,
 			},
 		},
+	}
+
+	// Add teamRef if provided - this associates the cluster with a team
+	if req.TeamRef != "" {
+		spec["teamRef"] = map[string]interface{}{
+			"name": req.TeamRef,
+		}
 	}
 
 	if req.HarvesterNetworkName != "" {
@@ -234,6 +311,7 @@ func (h *ClusterHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 // Get returns a specific tenant cluster.
 func (h *ClusterHandler) Get(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
 
@@ -243,13 +321,44 @@ func (h *ClusterHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// SECURITY: Check team access before returning cluster data
+	if user != nil {
+		if err := h.checkClusterAccess(user, cluster); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusOK, cluster.Object)
 }
 
 // Delete deletes a tenant cluster.
 func (h *ClusterHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
+
+	// Get cluster first to check access
+	cluster, err := h.k8sClient.GetTenantCluster(r.Context(), namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+
+	// SECURITY: Check team access before allowing delete
+	if user != nil {
+		if err := h.checkClusterAccess(user, cluster); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+
+		// Additionally, check if user can operate (not just view) - delete requires operator role
+		teamRef, _, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+		if teamRef != "" && !user.IsAdmin() && !user.CanOperateTeam(teamRef) {
+			writeError(w, http.StatusForbidden, "insufficient permissions: operator role required to delete clusters")
+			return
+		}
+	}
 
 	if err := h.k8sClient.DeleteTenantCluster(r.Context(), namespace, name); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete cluster: %v", err))
@@ -266,8 +375,31 @@ type ScaleRequest struct {
 
 // Scale scales cluster workers.
 func (h *ClusterHandler) Scale(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
+
+	// Get cluster first to check access
+	cluster, err := h.k8sClient.GetTenantCluster(r.Context(), namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+
+	// SECURITY: Check team access before allowing scale
+	if user != nil {
+		if err := h.checkClusterAccess(user, cluster); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+
+		// Scale requires operator role
+		teamRef, _, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+		if teamRef != "" && !user.IsAdmin() && !user.CanOperateTeam(teamRef) {
+			writeError(w, http.StatusForbidden, "insufficient permissions: operator role required to scale clusters")
+			return
+		}
+	}
 
 	var req ScaleRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -282,19 +414,35 @@ func (h *ClusterHandler) Scale(w http.ResponseWriter, r *http.Request) {
 
 	patch := []byte(fmt.Sprintf(`{"spec":{"workers":{"replicas":%d}}}`, req.Replicas))
 
-	cluster, err := h.k8sClient.PatchTenantCluster(r.Context(), namespace, name, patch)
+	patched, err := h.k8sClient.PatchTenantCluster(r.Context(), namespace, name, patch)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to scale cluster: %v", err))
 		return
 	}
 
-	writeJSON(w, http.StatusOK, cluster.Object)
+	writeJSON(w, http.StatusOK, patched.Object)
 }
 
 // GetKubeconfig returns the kubeconfig for a cluster.
 func (h *ClusterHandler) GetKubeconfig(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
+
+	// Get cluster first to check access
+	cluster, err := h.k8sClient.GetTenantCluster(r.Context(), namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+
+	// SECURITY: Check team access before returning kubeconfig
+	if user != nil {
+		if err := h.checkClusterAccess(user, cluster); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
 
 	kubeconfig, err := h.k8sClient.GetClusterKubeconfig(r.Context(), namespace, name)
 	if err != nil {
@@ -307,6 +455,7 @@ func (h *ClusterHandler) GetKubeconfig(w http.ResponseWriter, r *http.Request) {
 
 // GetNodes returns the nodes for a cluster.
 func (h *ClusterHandler) GetNodes(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
 
@@ -314,6 +463,14 @@ func (h *ClusterHandler) GetNodes(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
 		return
+	}
+
+	// SECURITY: Check team access
+	if user != nil {
+		if err := h.checkClusterAccess(user, tc); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
 	}
 
 	tenantNS, _, _ := unstructured.NestedString(tc.Object, "status", "tenantNamespace")
@@ -350,6 +507,7 @@ func (h *ClusterHandler) GetNodes(w http.ResponseWriter, r *http.Request) {
 
 // GetAddons returns addons for a cluster.
 func (h *ClusterHandler) GetAddons(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
 
@@ -357,6 +515,14 @@ func (h *ClusterHandler) GetAddons(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
 		return
+	}
+
+	// SECURITY: Check team access
+	if user != nil {
+		if err := h.checkClusterAccess(user, tc); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
 	}
 
 	observedState, _, _ := unstructured.NestedMap(tc.Object, "status", "observedState")
@@ -385,6 +551,7 @@ func (h *ClusterHandler) GetAddons(w http.ResponseWriter, r *http.Request) {
 
 // GetEvents returns events for a cluster.
 func (h *ClusterHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
 
@@ -392,6 +559,14 @@ func (h *ClusterHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
 		return
+	}
+
+	// SECURITY: Check team access
+	if user != nil {
+		if err := h.checkClusterAccess(user, tc); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
 	}
 
 	tenantNS, _, _ := unstructured.NestedString(tc.Object, "status", "tenantNamespace")
