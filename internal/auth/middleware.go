@@ -18,68 +18,114 @@ package auth
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 )
 
 type contextKey string
 
-const (
-	// UserContextKey is the context key for the authenticated user.
-	UserContextKey contextKey = "user"
-)
+const userContextKey contextKey = "user"
 
-// SessionMiddleware creates authentication middleware using the session service.
-func SessionMiddleware(sessionService *SessionService) func(http.Handler) http.Handler {
+// UserFromContext retrieves the authenticated user from the request context.
+func UserFromContext(ctx context.Context) *UserSession {
+	user, _ := ctx.Value(userContextKey).(*UserSession)
+	return user
+}
+
+// SessionMiddlewareConfig holds dependencies for the session middleware.
+type SessionMiddlewareConfig struct {
+	SessionService *SessionService
+	TeamResolver   *TeamResolver
+	UserService    *UserService // Added: for checking disabled status
+	Logger         *slog.Logger
+}
+
+// SessionMiddleware validates the session token and re-resolves team membership on every request.
+// This ensures that when a user is removed from a team or disabled, they immediately lose access.
+func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			var tokenString string
+			// Get session token from cookie or header
+			var token string
 
-			// Try to get token from cookie first (preferred for web clients)
-			cookie, err := r.Cookie("butler_session")
-			if err == nil && cookie.Value != "" {
-				tokenString = cookie.Value
+			// Try cookie first
+			if cookie, err := r.Cookie("butler_session"); err == nil {
+				token = cookie.Value
 			}
 
-			// Fall back to Authorization header (for API clients)
-			if tokenString == "" {
-				authHeader := r.Header.Get("Authorization")
-				if strings.HasPrefix(authHeader, "Bearer ") {
-					tokenString = strings.TrimPrefix(authHeader, "Bearer ")
+			// Fall back to Authorization header
+			if token == "" {
+				auth := r.Header.Get("Authorization")
+				if strings.HasPrefix(auth, "Bearer ") {
+					token = strings.TrimPrefix(auth, "Bearer ")
 				}
 			}
 
-			if tokenString == "" {
+			if token == "" {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
 
 			// Validate session
-			user, err := sessionService.ValidateSession(tokenString)
+			user, err := cfg.SessionService.ValidateSession(token)
 			if err != nil {
-				http.Error(w, `{"error":"invalid or expired session"}`, http.StatusUnauthorized)
+				http.Error(w, `{"error":"invalid session"}`, http.StatusUnauthorized)
 				return
 			}
 
-			// Add user to context
-			ctx := context.WithValue(r.Context(), UserContextKey, user)
+			// SECURITY: Check if user is disabled in User CRD
+			if cfg.UserService != nil {
+				userCRD, err := cfg.UserService.GetUserByEmail(r.Context(), user.Email)
+				if err != nil {
+					// User CRD not found - this could happen for legacy admin
+					// Log but don't block (legacy admin has no User CRD)
+					if cfg.Logger != nil {
+						cfg.Logger.Debug("User CRD not found during auth check",
+							"email", user.Email,
+							"error", err,
+						)
+					}
+				} else if userCRD.Disabled {
+					// User is disabled - reject the request
+					if cfg.Logger != nil {
+						cfg.Logger.Warn("Disabled user attempted access",
+							"email", user.Email,
+							"username", userCRD.Name,
+						)
+					}
+					http.Error(w, `{"error":"account disabled"}`, http.StatusForbidden)
+					return
+				}
+			}
+
+			if cfg.TeamResolver != nil {
+				freshTeams, err := cfg.TeamResolver.ResolveTeams(r.Context(), user.Email, user.Groups)
+				if err != nil {
+					// Log but don't fail - will check for empty teams below
+					if cfg.Logger != nil {
+						cfg.Logger.Warn("Failed to re-resolve teams", "email", user.Email, "error", err)
+					}
+					freshTeams = []TeamMembership{}
+				}
+				user.Teams = freshTeams
+			}
+
+			// Check if user has any team membership (required for access)
+			if len(user.Teams) == 0 {
+				http.Error(w, `{"error":"no team access - contact your administrator"}`, http.StatusForbidden)
+				return
+			}
+
+			// Add user to context with fresh team data
+			ctx := context.WithValue(r.Context(), userContextKey, user)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
 
-// UserFromContext extracts the user session from the request context.
-func UserFromContext(ctx context.Context) *UserSession {
-	user, ok := ctx.Value(UserContextKey).(*UserSession)
-	if !ok {
-		return nil
-	}
-	return user
-}
-
-// RequireTeamAccess creates middleware that requires access to a specific team.
-// The team name is extracted from the URL parameter specified by teamParam.
-func RequireTeamAccess(teamParam string) func(http.Handler) http.Handler {
+// RequireTeam creates middleware that requires membership in a specific team.
+func RequireTeam(teamName string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			user := UserFromContext(r.Context())
@@ -88,50 +134,16 @@ func RequireTeamAccess(teamParam string) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Extract team from URL or query parameter
-			// This is a simplified version - in practice you'd use chi.URLParam
-			teamName := r.URL.Query().Get(teamParam)
-			if teamName == "" {
-				// No team specified, allow access (cluster may not have team ownership)
-				next.ServeHTTP(w, r)
-				return
+			hasAccess := false
+			for _, team := range user.Teams {
+				if team.Name == teamName {
+					hasAccess = true
+					break
+				}
 			}
 
-			if !user.HasTeamMembership(teamName) {
-				http.Error(w, `{"error":"forbidden: not a member of this team"}`, http.StatusForbidden)
-				return
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-// RequireTeamRole creates middleware that requires a specific role in a team.
-func RequireTeamRole(teamParam, requiredRole string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			user := UserFromContext(r.Context())
-			if user == nil {
-				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-				return
-			}
-
-			teamName := r.URL.Query().Get(teamParam)
-			if teamName == "" {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			membership := user.GetTeamMembership(teamName)
-			if membership == nil {
-				http.Error(w, `{"error":"forbidden: not a member of this team"}`, http.StatusForbidden)
-				return
-			}
-
-			// Check if user's role is sufficient
-			if !RoleHierarchy(membership.Role, requiredRole) {
-				http.Error(w, `{"error":"forbidden: insufficient role"}`, http.StatusForbidden)
+			if !hasAccess {
+				http.Error(w, `{"error":"forbidden: team access required"}`, http.StatusForbidden)
 				return
 			}
 
@@ -160,8 +172,12 @@ func RequireAdmin() func(http.Handler) http.Handler {
 	}
 }
 
+// AdminMiddleware is an alias for RequireAdmin for API consistency.
+func AdminMiddleware() func(http.Handler) http.Handler {
+	return RequireAdmin()
+}
+
 // ClusterTeamAuthz is middleware that checks team access for cluster operations.
-// It expects the cluster's team label to be passed or extracted from the cluster.
 type ClusterTeamAuthz struct {
 	GetClusterTeam func(ctx context.Context, namespace, name string) (string, error)
 }
@@ -182,41 +198,6 @@ func (c *ClusterTeamAuthz) RequireAccess() func(http.Handler) http.Handler {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
-
-			// For now, just pass through - actual team extraction requires
-			// integration with the cluster handler
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-// OptionalAuth creates middleware that sets user context if authenticated,
-// but allows unauthenticated requests to proceed.
-func OptionalAuth(sessionService *SessionService) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			var tokenString string
-
-			cookie, err := r.Cookie("butler_session")
-			if err == nil && cookie.Value != "" {
-				tokenString = cookie.Value
-			}
-
-			if tokenString == "" {
-				authHeader := r.Header.Get("Authorization")
-				if strings.HasPrefix(authHeader, "Bearer ") {
-					tokenString = strings.TrimPrefix(authHeader, "Bearer ")
-				}
-			}
-
-			// If we have a token, try to validate it
-			if tokenString != "" {
-				if user, err := sessionService.ValidateSession(tokenString); err == nil {
-					ctx := context.WithValue(r.Context(), UserContextKey, user)
-					r = r.WithContext(ctx)
-				}
-			}
-
 			next.ServeHTTP(w, r)
 		})
 	}

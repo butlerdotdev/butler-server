@@ -20,22 +20,25 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/butlerdotdev/butler-server/internal/auth"
 	"github.com/butlerdotdev/butler-server/internal/k8s"
+
 	"github.com/go-chi/chi/v5"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// TeamHandler handles team management endpoints.
+// TeamHandler handles team-related endpoints.
 type TeamHandler struct {
 	k8sClient    *k8s.Client
 	teamResolver *auth.TeamResolver
 	logger       *slog.Logger
 }
 
-// NewTeamHandler creates a new team handler.
+// NewTeamHandler creates a new teams handler.
 func NewTeamHandler(k8sClient *k8s.Client, teamResolver *auth.TeamResolver, logger *slog.Logger) *TeamHandler {
 	return &TeamHandler{
 		k8sClient:    k8sClient,
@@ -47,46 +50,26 @@ func NewTeamHandler(k8sClient *k8s.Client, teamResolver *auth.TeamResolver, logg
 // TeamResponse represents a team in API responses.
 type TeamResponse struct {
 	Name         string            `json:"name"`
-	DisplayName  string            `json:"displayName"`
+	DisplayName  string            `json:"displayName,omitempty"`
 	Description  string            `json:"description,omitempty"`
-	Users        []TeamUserAccess  `json:"users,omitempty"`
-	Groups       []TeamGroupAccess `json:"groups,omitempty"`
-	ClusterCount int               `json:"clusterCount"`
+	Namespace    string            `json:"namespace,omitempty"`
 	Phase        string            `json:"phase"`
-	CreatedAt    string            `json:"createdAt"`
+	ClusterCount int               `json:"clusterCount"`
+	MemberCount  int               `json:"memberCount"`
+	Labels       map[string]string `json:"labels,omitempty"`
+	CreatedAt    string            `json:"createdAt,omitempty"`
 }
 
-// TeamUserAccess represents a user's access to a team.
-type TeamUserAccess struct {
-	Name string `json:"name"`
-	Role string `json:"role"`
+// TeamMemberResponse represents a team member in API responses.
+type TeamMemberResponse struct {
+	Email string `json:"email"`
+	Name  string `json:"name,omitempty"`
+	Role  string `json:"role"`
 }
 
-// TeamGroupAccess represents a group's access to a team.
-type TeamGroupAccess struct {
-	Name string `json:"name"`
-	Role string `json:"role"`
-}
-
-// CreateTeamRequest is the request body for creating a team.
-type CreateTeamRequest struct {
-	Name        string            `json:"name"`
-	DisplayName string            `json:"displayName"`
-	Description string            `json:"description,omitempty"`
-	Users       []TeamUserAccess  `json:"users,omitempty"`
-	Groups      []TeamGroupAccess `json:"groups,omitempty"`
-}
-
-// List returns all teams the current user has access to.
+// List returns all teams.
 // GET /api/teams
 func (h *TeamHandler) List(w http.ResponseWriter, r *http.Request) {
-	user := auth.UserFromContext(r.Context())
-	if user == nil {
-		writeError(w, http.StatusUnauthorized, "Not authenticated")
-		return
-	}
-
-	// List all teams
 	teams, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).List(r.Context(), metav1.ListOptions{})
 	if err != nil {
 		h.logger.Error("Failed to list teams", "error", err)
@@ -94,17 +77,66 @@ func (h *TeamHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Filter to teams user has access to and convert to response
-	var response []TeamResponse
-	for _, team := range teams.Items {
-		teamName := team.GetName()
+	// Get all clusters to count per team
+	allClusters, err := h.k8sClient.Dynamic().Resource(k8s.TenantClusterGVR).List(r.Context(), metav1.ListOptions{})
+	if err != nil {
+		h.logger.Warn("Failed to list clusters for counting", "error", err)
+		// Continue without cluster counts
+	}
 
-		// Check if user has access to this team
-		if !user.HasTeamMembership(teamName) && !user.IsAdmin() {
-			continue
+	// Build cluster count map by team using spec.teamRef.name
+	clusterCountByTeam := make(map[string]int)
+	if allClusters != nil {
+		for _, cluster := range allClusters.Items {
+			// Check spec.teamRef.name for team association
+			teamRefName, found, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+			if found && teamRefName != "" {
+				clusterCountByTeam[teamRefName]++
+			}
+		}
+	}
+
+	response := make([]TeamResponse, 0, len(teams.Items))
+	for _, team := range teams.Items {
+		displayName, _, _ := unstructured.NestedString(team.Object, "spec", "displayName")
+		description, _, _ := unstructured.NestedString(team.Object, "spec", "description")
+		namespace, _, _ := unstructured.NestedString(team.Object, "status", "namespace")
+		phase, _, _ := unstructured.NestedString(team.Object, "status", "phase")
+
+		// Fallback namespace to team name if not set
+		if namespace == "" {
+			namespace = team.GetName()
 		}
 
-		response = append(response, h.teamToResponse(&team))
+		// Count members from spec.access.users
+		memberCount := 0
+		if users, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users"); found {
+			memberCount = len(users)
+		}
+
+		if displayName == "" {
+			displayName = team.GetName()
+		}
+
+		// Default phase if not set
+		if phase == "" {
+			phase = "Ready"
+		}
+
+		// Get cluster count from map
+		clusterCount := clusterCountByTeam[team.GetName()]
+
+		response = append(response, TeamResponse{
+			Name:         team.GetName(),
+			DisplayName:  displayName,
+			Description:  description,
+			Namespace:    namespace,
+			Phase:        phase,
+			ClusterCount: clusterCount,
+			MemberCount:  memberCount,
+			Labels:       team.GetLabels(),
+			CreatedAt:    team.GetCreationTimestamp().Format("2006-01-02T15:04:05Z"),
+		})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -115,45 +147,80 @@ func (h *TeamHandler) List(w http.ResponseWriter, r *http.Request) {
 // Get returns a specific team.
 // GET /api/teams/{name}
 func (h *TeamHandler) Get(w http.ResponseWriter, r *http.Request) {
-	user := auth.UserFromContext(r.Context())
-	if user == nil {
-		writeError(w, http.StatusUnauthorized, "Not authenticated")
-		return
-	}
+	name := chi.URLParam(r, "name")
 
-	teamName := chi.URLParam(r, "name")
-
-	// Check access
-	if !user.HasTeamMembership(teamName) && !user.IsAdmin() {
-		writeError(w, http.StatusForbidden, "Access denied to this team")
-		return
-	}
-
-	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), teamName, metav1.GetOptions{})
+	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
 	if err != nil {
-		h.logger.Error("Failed to get team", "name", teamName, "error", err)
-		writeError(w, http.StatusNotFound, "Team not found")
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "Team not found")
+			return
+		}
+		h.logger.Error("Failed to get team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get team")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, h.teamToResponse(team))
+	displayName, _, _ := unstructured.NestedString(team.Object, "spec", "displayName")
+	description, _, _ := unstructured.NestedString(team.Object, "spec", "description")
+	namespace, _, _ := unstructured.NestedString(team.Object, "status", "namespace")
+	phase, _, _ := unstructured.NestedString(team.Object, "status", "phase")
+
+	// Fallback namespace to team name if not set
+	if namespace == "" {
+		namespace = team.GetName()
+	}
+
+	// Count members from spec.access.users
+	memberCount := 0
+	if users, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users"); found {
+		memberCount = len(users)
+	}
+
+	// Count clusters by checking spec.teamRef.name
+	clusterCount := 0
+	allClusters, err := h.k8sClient.Dynamic().Resource(k8s.TenantClusterGVR).List(r.Context(), metav1.ListOptions{})
+	if err == nil && allClusters != nil {
+		for _, cluster := range allClusters.Items {
+			teamRefName, found, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+			if found && teamRefName == name {
+				clusterCount++
+			}
+		}
+	}
+
+	if displayName == "" {
+		displayName = team.GetName()
+	}
+
+	// Default phase if not set
+	if phase == "" {
+		phase = "Ready"
+	}
+
+	writeJSON(w, http.StatusOK, TeamResponse{
+		Name:         team.GetName(),
+		DisplayName:  displayName,
+		Description:  description,
+		Namespace:    namespace,
+		Phase:        phase,
+		ClusterCount: clusterCount,
+		MemberCount:  memberCount,
+		Labels:       team.GetLabels(),
+		CreatedAt:    team.GetCreationTimestamp().Format("2006-01-02T15:04:05Z"),
+	})
+}
+
+// CreateTeamRequest represents the request body for creating a team.
+type CreateTeamRequest struct {
+	Name        string `json:"name"`
+	DisplayName string `json:"displayName,omitempty"`
+	Description string `json:"description,omitempty"`
+	Namespace   string `json:"namespace,omitempty"`
 }
 
 // Create creates a new team.
 // POST /api/teams
 func (h *TeamHandler) Create(w http.ResponseWriter, r *http.Request) {
-	user := auth.UserFromContext(r.Context())
-	if user == nil {
-		writeError(w, http.StatusUnauthorized, "Not authenticated")
-		return
-	}
-
-	// Only admins can create teams
-	if !user.IsAdmin() {
-		writeError(w, http.StatusForbidden, "Admin role required to create teams")
-		return
-	}
-
 	var req CreateTeamRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -180,58 +247,41 @@ func (h *TeamHandler) Create(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	// Add users if specified
-	if len(req.Users) > 0 {
-		users := make([]interface{}, len(req.Users))
-		for i, u := range req.Users {
-			users[i] = map[string]interface{}{
-				"name": u.Name,
-				"role": u.Role,
-			}
+	if req.Namespace != "" {
+		if err := unstructured.SetNestedField(team.Object, req.Namespace, "spec", "namespace"); err != nil {
+			h.logger.Error("Failed to set namespace", "error", err)
 		}
-		unstructured.SetNestedSlice(team.Object, users, "spec", "access", "users")
 	}
 
-	// Add groups if specified
-	if len(req.Groups) > 0 {
-		groups := make([]interface{}, len(req.Groups))
-		for i, g := range req.Groups {
-			groups[i] = map[string]interface{}{
-				"name": g.Name,
-				"role": g.Role,
-			}
-		}
-		unstructured.SetNestedSlice(team.Object, groups, "spec", "access", "groups")
-	}
-
-	// Create the team
 	created, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Create(r.Context(), team, metav1.CreateOptions{})
 	if err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			writeError(w, http.StatusConflict, "Team already exists")
+			return
+		}
 		h.logger.Error("Failed to create team", "name", req.Name, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to create team")
 		return
 	}
 
-	h.logger.Info("Team created", "name", req.Name, "by", user.Email)
-	writeJSON(w, http.StatusCreated, h.teamToResponse(created))
+	h.logger.Info("Team created", "name", req.Name)
+
+	displayName, _, _ := unstructured.NestedString(created.Object, "spec", "displayName")
+	if displayName == "" {
+		displayName = created.GetName()
+	}
+
+	writeJSON(w, http.StatusCreated, TeamResponse{
+		Name:        created.GetName(),
+		DisplayName: displayName,
+		CreatedAt:   created.GetCreationTimestamp().Format("2006-01-02T15:04:05Z"),
+	})
 }
 
 // Update updates a team.
 // PUT /api/teams/{name}
 func (h *TeamHandler) Update(w http.ResponseWriter, r *http.Request) {
-	user := auth.UserFromContext(r.Context())
-	if user == nil {
-		writeError(w, http.StatusUnauthorized, "Not authenticated")
-		return
-	}
-
-	teamName := chi.URLParam(r, "name")
-
-	// Check if user is admin of this team
-	if !user.IsAdminOfTeam(teamName) && !user.IsAdmin() {
-		writeError(w, http.StatusForbidden, "Admin role required to update team")
-		return
-	}
+	name := chi.URLParam(r, "name")
 
 	var req CreateTeamRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -240,9 +290,14 @@ func (h *TeamHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get existing team
-	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), teamName, metav1.GetOptions{})
+	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
 	if err != nil {
-		writeError(w, http.StatusNotFound, "Team not found")
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "Team not found")
+			return
+		}
+		h.logger.Error("Failed to get team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get team")
 		return
 	}
 
@@ -254,113 +309,83 @@ func (h *TeamHandler) Update(w http.ResponseWriter, r *http.Request) {
 		unstructured.SetNestedField(team.Object, req.Description, "spec", "description")
 	}
 
-	// Update users if specified
-	if len(req.Users) > 0 {
-		users := make([]interface{}, len(req.Users))
-		for i, u := range req.Users {
-			users[i] = map[string]interface{}{
-				"name": u.Name,
-				"role": u.Role,
-			}
-		}
-		unstructured.SetNestedSlice(team.Object, users, "spec", "access", "users")
-	}
-
-	// Update groups if specified
-	if len(req.Groups) > 0 {
-		groups := make([]interface{}, len(req.Groups))
-		for i, g := range req.Groups {
-			groups[i] = map[string]interface{}{
-				"name": g.Name,
-				"role": g.Role,
-			}
-		}
-		unstructured.SetNestedSlice(team.Object, groups, "spec", "access", "groups")
-	}
-
-	// Apply update
 	updated, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Update(r.Context(), team, metav1.UpdateOptions{})
 	if err != nil {
-		h.logger.Error("Failed to update team", "name", teamName, "error", err)
+		h.logger.Error("Failed to update team", "name", name, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to update team")
 		return
 	}
 
-	h.logger.Info("Team updated", "name", teamName, "by", user.Email)
-	writeJSON(w, http.StatusOK, h.teamToResponse(updated))
+	h.logger.Info("Team updated", "name", name)
+
+	displayName, _, _ := unstructured.NestedString(updated.Object, "spec", "displayName")
+	if displayName == "" {
+		displayName = updated.GetName()
+	}
+
+	writeJSON(w, http.StatusOK, TeamResponse{
+		Name:        updated.GetName(),
+		DisplayName: displayName,
+	})
 }
 
 // Delete deletes a team.
 // DELETE /api/teams/{name}
 func (h *TeamHandler) Delete(w http.ResponseWriter, r *http.Request) {
-	user := auth.UserFromContext(r.Context())
-	if user == nil {
-		writeError(w, http.StatusUnauthorized, "Not authenticated")
-		return
-	}
+	name := chi.URLParam(r, "name")
 
-	teamName := chi.URLParam(r, "name")
-
-	// Only admins can delete teams
-	if !user.IsAdmin() {
-		writeError(w, http.StatusForbidden, "Admin role required to delete teams")
-		return
-	}
-
-	err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Delete(r.Context(), teamName, metav1.DeleteOptions{})
+	err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Delete(r.Context(), name, metav1.DeleteOptions{})
 	if err != nil {
-		h.logger.Error("Failed to delete team", "name", teamName, "error", err)
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "Team not found")
+			return
+		}
+		h.logger.Error("Failed to delete team", "name", name, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to delete team")
 		return
 	}
 
-	h.logger.Info("Team deleted", "name", teamName, "by", user.Email)
+	h.logger.Info("Team deleted", "name", name)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// ListClusters returns clusters belonging to a team.
+// ListClusters returns clusters owned by a team.
 // GET /api/teams/{name}/clusters
 func (h *TeamHandler) ListClusters(w http.ResponseWriter, r *http.Request) {
-	user := auth.UserFromContext(r.Context())
-	if user == nil {
-		writeError(w, http.StatusUnauthorized, "Not authenticated")
+	name := chi.URLParam(r, "name")
+
+	// Get team's cluster selector
+	selector, err := h.teamResolver.GetTeamClusterSelector(r.Context(), name)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "Team not found")
+			return
+		}
+		h.logger.Error("Failed to get team cluster selector", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get team")
 		return
 	}
 
-	teamName := chi.URLParam(r, "name")
-
-	// Check access
-	if !user.HasTeamMembership(teamName) && !user.IsAdmin() {
-		writeError(w, http.StatusForbidden, "Access denied to this team")
-		return
+	// Build label selector string
+	var labelParts []string
+	for k, v := range selector {
+		labelParts = append(labelParts, k+"="+v)
 	}
+	labelSelector := strings.Join(labelParts, ",")
 
-	// Get clusters with team label
-	labelSelector := "butler.butlerlabs.dev/team=" + teamName
+	// List clusters with label selector
 	clusters, err := h.k8sClient.Dynamic().Resource(k8s.TenantClusterGVR).List(r.Context(), metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
 	if err != nil {
-		h.logger.Error("Failed to list team clusters", "team", teamName, "error", err)
+		h.logger.Error("Failed to list team clusters", "name", name, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to list clusters")
 		return
 	}
 
-	// Convert to response format
-	var response []map[string]interface{}
+	response := make([]map[string]interface{}, 0, len(clusters.Items))
 	for _, cluster := range clusters.Items {
-		name := cluster.GetName()
-		namespace := cluster.GetNamespace()
-
-		phase, _, _ := unstructured.NestedString(cluster.Object, "status", "phase")
-		k8sVersion, _, _ := unstructured.NestedString(cluster.Object, "spec", "kubernetesVersion")
-
-		response = append(response, map[string]interface{}{
-			"name":              name,
-			"namespace":         namespace,
-			"phase":             phase,
-			"kubernetesVersion": k8sVersion,
-		})
+		response = append(response, cluster.Object)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -368,61 +393,341 @@ func (h *TeamHandler) ListClusters(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// teamToResponse converts a Team CRD to API response format.
-func (h *TeamHandler) teamToResponse(team *unstructured.Unstructured) TeamResponse {
-	displayName, _, _ := unstructured.NestedString(team.Object, "spec", "displayName")
-	if displayName == "" {
-		displayName = team.GetName()
+// ListMembers returns members of a team.
+// GET /api/teams/{name}/members
+func (h *TeamHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	// Check if requesting user has access to this team
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "Not authenticated")
+		return
 	}
 
-	description, _, _ := unstructured.NestedString(team.Object, "spec", "description")
-	phase, _, _ := unstructured.NestedString(team.Object, "status", "phase")
-	if phase == "" {
-		phase = "Ready"
+	// User must be a member of the team to view members (or be admin)
+	if !user.HasTeamMembership(name) && !user.IsAdmin() {
+		writeError(w, http.StatusForbidden, "Access denied to team")
+		return
 	}
 
-	clusterCount, _, _ := unstructured.NestedInt64(team.Object, "status", "clusterCount")
+	// Get the team CRD
+	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "Team not found")
+			return
+		}
+		h.logger.Error("Failed to get team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get team")
+		return
+	}
 
-	// Extract users
-	var users []TeamUserAccess
-	usersRaw, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users")
+	// Extract spec.access.users[]
+	users, found, err := unstructured.NestedSlice(team.Object, "spec", "access", "users")
+	if err != nil {
+		h.logger.Error("Failed to get team users", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get team members")
+		return
+	}
+
+	members := make([]TeamMemberResponse, 0)
 	if found {
-		for _, u := range usersRaw {
-			if userMap, ok := u.(map[string]interface{}); ok {
-				name, _, _ := unstructured.NestedString(userMap, "name")
-				role, _, _ := unstructured.NestedString(userMap, "role")
-				if role == "" {
-					role = "viewer"
-				}
-				users = append(users, TeamUserAccess{Name: name, Role: role})
+		for _, u := range users {
+			userMap, ok := u.(map[string]interface{})
+			if !ok {
+				continue
 			}
+
+			email, _, _ := unstructured.NestedString(userMap, "name")
+			role, _, _ := unstructured.NestedString(userMap, "role")
+			displayName, _, _ := unstructured.NestedString(userMap, "displayName")
+
+			if email == "" {
+				continue
+			}
+			if role == "" {
+				role = auth.RoleViewer
+			}
+
+			members = append(members, TeamMemberResponse{
+				Email: email,
+				Name:  displayName,
+				Role:  role,
+			})
 		}
 	}
 
-	// Extract groups
-	var groups []TeamGroupAccess
-	groupsRaw, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "groups")
-	if found {
-		for _, g := range groupsRaw {
-			if groupMap, ok := g.(map[string]interface{}); ok {
-				name, _, _ := unstructured.NestedString(groupMap, "name")
-				role, _, _ := unstructured.NestedString(groupMap, "role")
-				if role == "" {
-					role = "viewer"
-				}
-				groups = append(groups, TeamGroupAccess{Name: name, Role: role})
-			}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"members": members,
+	})
+}
+
+// AddMemberRequest represents the request body for adding a team member.
+type AddMemberRequest struct {
+	Email string `json:"email"`
+	Role  string `json:"role,omitempty"`
+}
+
+// AddMember adds a member to a team.
+// POST /api/admin/teams/{name}/members
+func (h *TeamHandler) AddMember(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	var req AddMemberRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Email == "" {
+		writeError(w, http.StatusBadRequest, "Email is required")
+		return
+	}
+
+	if req.Role == "" {
+		req.Role = auth.RoleViewer
+	}
+
+	// Validate role
+	if req.Role != auth.RoleAdmin && req.Role != auth.RoleOperator && req.Role != auth.RoleViewer {
+		writeError(w, http.StatusBadRequest, "Invalid role. Must be admin, operator, or viewer")
+		return
+	}
+
+	// Get existing team
+	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "Team not found")
+			return
+		}
+		h.logger.Error("Failed to get team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get team")
+		return
+	}
+
+	// Get existing users
+	users, _, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users")
+	if users == nil {
+		users = []interface{}{}
+	}
+
+	// Check if user already exists
+	emailLower := strings.ToLower(req.Email)
+	for _, u := range users {
+		userMap, ok := u.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		existingEmail, _, _ := unstructured.NestedString(userMap, "name")
+		if strings.EqualFold(existingEmail, emailLower) {
+			writeError(w, http.StatusConflict, "User is already a member of this team")
+			return
 		}
 	}
 
-	return TeamResponse{
-		Name:         team.GetName(),
-		DisplayName:  displayName,
-		Description:  description,
-		Users:        users,
-		Groups:       groups,
-		ClusterCount: int(clusterCount),
-		Phase:        phase,
-		CreatedAt:    team.GetCreationTimestamp().Format("2006-01-02T15:04:05Z"),
+	// Add new user
+	newUser := map[string]interface{}{
+		"name": emailLower,
+		"role": req.Role,
 	}
+	users = append(users, newUser)
+
+	// Ensure spec.access exists
+	access, _, _ := unstructured.NestedMap(team.Object, "spec", "access")
+	if access == nil {
+		unstructured.SetNestedMap(team.Object, map[string]interface{}{}, "spec", "access")
+	}
+
+	// Update team
+	if err := unstructured.SetNestedSlice(team.Object, users, "spec", "access", "users"); err != nil {
+		h.logger.Error("Failed to update team users", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to add member")
+		return
+	}
+
+	_, err = h.k8sClient.Dynamic().Resource(auth.TeamGVR).Update(r.Context(), team, metav1.UpdateOptions{})
+	if err != nil {
+		h.logger.Error("Failed to update team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to add member")
+		return
+	}
+
+	h.logger.Info("Member added to team", "team", name, "email", req.Email, "role", req.Role)
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"status": "added",
+		"email":  req.Email,
+		"role":   req.Role,
+	})
+}
+
+// UpdateMemberRoleRequest represents the request body for updating a member's role.
+type UpdateMemberRoleRequest struct {
+	Role string `json:"role"`
+}
+
+// UpdateMemberRole updates a team member's role.
+// PATCH /api/admin/teams/{name}/members/{email}
+func (h *TeamHandler) UpdateMemberRole(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	email := chi.URLParam(r, "email")
+
+	// URL decode the email
+	decodedEmail, err := url.QueryUnescape(email)
+	if err != nil {
+		decodedEmail = email
+	}
+
+	var req UpdateMemberRoleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Role == "" {
+		writeError(w, http.StatusBadRequest, "Role is required")
+		return
+	}
+
+	// Validate role
+	if req.Role != auth.RoleAdmin && req.Role != auth.RoleOperator && req.Role != auth.RoleViewer {
+		writeError(w, http.StatusBadRequest, "Invalid role. Must be admin, operator, or viewer")
+		return
+	}
+
+	// Get existing team
+	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "Team not found")
+			return
+		}
+		h.logger.Error("Failed to get team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get team")
+		return
+	}
+
+	// Get existing users
+	users, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users")
+	if !found || users == nil {
+		writeError(w, http.StatusNotFound, "Member not found")
+		return
+	}
+
+	// Find and update user
+	memberFound := false
+	for i, u := range users {
+		userMap, ok := u.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		existingEmail, _, _ := unstructured.NestedString(userMap, "name")
+		if strings.EqualFold(existingEmail, decodedEmail) {
+			userMap["role"] = req.Role
+			users[i] = userMap
+			memberFound = true
+			break
+		}
+	}
+
+	if !memberFound {
+		writeError(w, http.StatusNotFound, "Member not found")
+		return
+	}
+
+	// Update team
+	if err := unstructured.SetNestedSlice(team.Object, users, "spec", "access", "users"); err != nil {
+		h.logger.Error("Failed to update team users", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to update member role")
+		return
+	}
+
+	_, err = h.k8sClient.Dynamic().Resource(auth.TeamGVR).Update(r.Context(), team, metav1.UpdateOptions{})
+	if err != nil {
+		h.logger.Error("Failed to update team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to update member role")
+		return
+	}
+
+	h.logger.Info("Member role updated", "team", name, "email", decodedEmail, "role", req.Role)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "updated",
+		"email":  decodedEmail,
+		"role":   req.Role,
+	})
+}
+
+// RemoveMember removes a member from a team.
+// DELETE /api/admin/teams/{name}/members/{email}
+func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	email := chi.URLParam(r, "email")
+
+	// URL decode the email
+	decodedEmail, err := url.QueryUnescape(email)
+	if err != nil {
+		decodedEmail = email
+	}
+
+	// Get existing team
+	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "Team not found")
+			return
+		}
+		h.logger.Error("Failed to get team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get team")
+		return
+	}
+
+	// Get existing users
+	users, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users")
+	if !found || users == nil {
+		writeError(w, http.StatusNotFound, "Member not found")
+		return
+	}
+
+	// Find and remove user
+	memberFound := false
+	newUsers := make([]interface{}, 0, len(users)-1)
+	for _, u := range users {
+		userMap, ok := u.(map[string]interface{})
+		if !ok {
+			newUsers = append(newUsers, u)
+			continue
+		}
+		existingEmail, _, _ := unstructured.NestedString(userMap, "name")
+		if strings.EqualFold(existingEmail, decodedEmail) {
+			memberFound = true
+			continue // Skip this user (remove)
+		}
+		newUsers = append(newUsers, u)
+	}
+
+	if !memberFound {
+		writeError(w, http.StatusNotFound, "Member not found")
+		return
+	}
+
+	// Update team
+	if err := unstructured.SetNestedSlice(team.Object, newUsers, "spec", "access", "users"); err != nil {
+		h.logger.Error("Failed to update team users", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to remove member")
+		return
+	}
+
+	_, err = h.k8sClient.Dynamic().Resource(auth.TeamGVR).Update(r.Context(), team, metav1.UpdateOptions{})
+	if err != nil {
+		h.logger.Error("Failed to update team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to remove member")
+		return
+	}
+
+	h.logger.Info("Member removed from team", "team", name, "email", decodedEmail)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "removed",
+		"email":  decodedEmail,
+	})
 }

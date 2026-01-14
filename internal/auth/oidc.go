@@ -133,6 +133,8 @@ func (p *OIDCProvider) AuthCodeURL() (string, string, error) {
 
 	opts := []oauth2.AuthCodeOption{
 		oauth2.AccessTypeOffline,
+		// Always show account picker so user can choose correct account
+		oauth2.SetAuthURLParam("prompt", "select_account"),
 	}
 
 	// Add Google-specific hosted domain restriction

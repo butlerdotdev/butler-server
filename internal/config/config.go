@@ -24,10 +24,20 @@ import (
 
 // Config holds the server configuration.
 type Config struct {
+	Server          ServerConfig
 	Auth            AuthConfig
 	OIDC            OIDCConfig
 	TenantNamespace string
 	SystemNamespace string
+	FrontendURL     string // For dev mode when frontend runs separately
+}
+
+// ServerConfig holds general server configuration.
+type ServerConfig struct {
+	// BaseURL is the public URL of the Butler Console
+	// Used for generating invite links, OAuth redirects, etc.
+	// Example: https://butler.example.com
+	BaseURL string
 }
 
 // AuthConfig holds authentication configuration.
@@ -85,6 +95,9 @@ type OIDCConfig struct {
 // Load loads configuration from environment variables.
 func Load() *Config {
 	cfg := &Config{
+		Server: ServerConfig{
+			BaseURL: getEnv("BUTLER_BASE_URL", "http://localhost:8080"),
+		},
 		Auth: AuthConfig{
 			JWTSecret:     getEnv("BUTLER_JWT_SECRET", "butler-dev-secret-change-me-in-production"),
 			SessionExpiry: getDurationEnv("BUTLER_SESSION_EXPIRY", 24*time.Hour),
@@ -105,6 +118,7 @@ func Load() *Config {
 		},
 		TenantNamespace: getEnv("BUTLER_TENANT_NAMESPACE", "butler-tenants"),
 		SystemNamespace: getEnv("BUTLER_SYSTEM_NAMESPACE", "butler-system"),
+		FrontendURL:     getEnv("BUTLER_FRONTEND_URL", ""), // e.g., http://localhost:3000 for dev
 	}
 
 	// Auto-enable OIDC if issuer URL is set

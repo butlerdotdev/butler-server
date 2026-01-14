@@ -49,6 +49,18 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	sessionService := auth.NewSessionService(cfg.Config.Auth.JWTSecret, cfg.Config.Auth.SessionExpiry)
 	teamResolver := auth.NewTeamResolver(cfg.K8sClient.Dynamic(), cfg.Logger.With("component", "teams"))
 
+	// User service for internal user management
+	baseURL := cfg.Config.Server.BaseURL
+	if baseURL == "" {
+		baseURL = "http://localhost:8080" // Default for dev
+	}
+	userService := auth.NewUserService(
+		cfg.K8sClient.Dynamic(),
+		cfg.K8sClient.Clientset(),
+		baseURL,
+		cfg.Logger.With("component", "users"),
+	)
+
 	// Initialize OIDC provider if configured
 	var oidcProvider *auth.OIDCProvider
 	if cfg.Config.IsOIDCConfigured() {
@@ -65,7 +77,6 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 		})
 		if err != nil {
 			cfg.Logger.Error("Failed to initialize OIDC provider", "error", err)
-			// Don't fail startup - auth will return appropriate errors
 		} else {
 			cfg.Logger.Info("OIDC provider initialized",
 				"issuer", cfg.Config.OIDC.IssuerURL,
@@ -103,31 +114,52 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 		oidcProvider,
 		sessionService,
 		teamResolver,
+		userService,
 		cfg.Config,
 		cfg.Logger.With("component", "auth"),
+	)
+	userHandler := handlers.NewUserHandler(
+		userService,
+		sessionService,
+		teamResolver,
+		cfg.Config,
+		cfg.Logger.With("component", "users"),
 	)
 	clusterHandler := handlers.NewClusterHandler(cfg.K8sClient, cfg.Config)
 	providerHandler := handlers.NewProvidersHandler(cfg.K8sClient, cfg.Config)
 	addonsHandler := handlers.NewAddonsHandler(cfg.K8sClient, cfg.Config)
 	teamHandler := handlers.NewTeamHandler(cfg.K8sClient, teamResolver, cfg.Logger.With("component", "teams"))
 
-	// Auth middleware
-	authMiddleware := auth.SessionMiddleware(sessionService)
+	// Auth middleware - SECURITY: Now re-validates team membership on every request
+	authMiddleware := auth.SessionMiddleware(auth.SessionMiddlewareConfig{
+		SessionService: sessionService,
+		TeamResolver:   teamResolver,
+		UserService:    userService,
+		Logger:         cfg.Logger.With("component", "auth-middleware"),
+	})
+	adminMiddleware := auth.AdminMiddleware()
 
 	r.Route("/api", func(r chi.Router) {
 		// Public auth routes (no authentication required)
 		r.Route("/auth", func(r chi.Router) {
-			// SSO login flow
-			r.Get("/login", authHandler.Login)
-			r.Get("/callback", authHandler.Callback)
-
 			// Get available providers (for login page)
 			r.Get("/providers", authHandler.GetProviders)
 
-			// Legacy login for development (when OIDC not configured)
-			if cfg.Config.IsLegacyAuthEnabled() {
-				r.Post("/login/legacy", authHandler.LegacyLogin)
+			// SSO login flow (redirects to IdP)
+			if oidcProvider != nil {
+				r.Get("/login/sso", authHandler.Login)
+				r.Get("/callback", authHandler.Callback)
 			}
+
+			// Username/password login (internal users + legacy admin)
+			r.Post("/login", authHandler.InternalUserLogin)
+
+			// Legacy endpoint for backward compatibility
+			r.Post("/login/legacy", authHandler.LegacyLogin)
+
+			// Invite flow (public - user clicking invite link)
+			r.Get("/invite/{token}", userHandler.ValidateInvite)
+			r.Post("/set-password", userHandler.SetPassword)
 		})
 
 		// Protected routes (authentication required)
@@ -183,13 +215,37 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Delete("/providers/{namespace}/{name}", providerHandler.Delete)
 			r.Post("/providers/{namespace}/{name}/validate", providerHandler.Validate)
 
-			// Teams (new)
+			// Teams
 			r.Get("/teams", teamHandler.List)
 			r.Post("/teams", teamHandler.Create)
 			r.Get("/teams/{name}", teamHandler.Get)
 			r.Put("/teams/{name}", teamHandler.Update)
 			r.Delete("/teams/{name}", teamHandler.Delete)
 			r.Get("/teams/{name}/clusters", teamHandler.ListClusters)
+			r.Get("/teams/{name}/members", teamHandler.ListMembers)
+
+			// User listing (any authenticated user can view)
+			r.Get("/users", userHandler.ListUsers)
+
+			// Admin routes (require admin role for management actions)
+			r.Route("/admin", func(r chi.Router) {
+				r.Use(adminMiddleware)
+
+				// User management (admin only)
+				r.Post("/users", userHandler.CreateUser)
+				r.Get("/users/{username}", userHandler.GetUser)
+				r.Delete("/users/{username}", userHandler.DeleteUser)
+				r.Post("/users/{username}/disable", userHandler.DisableUser)
+				r.Post("/users/{username}/enable", userHandler.EnableUser)
+				r.Post("/users/{username}/invite", userHandler.RegenerateInvite)
+
+				// Team management (admin only)
+				r.Post("/teams", teamHandler.Create)
+				r.Delete("/teams/{name}", teamHandler.Delete)
+				r.Post("/teams/{name}/members", teamHandler.AddMember)
+				r.Patch("/teams/{name}/members/{email}", teamHandler.UpdateMemberRole)
+				r.Delete("/teams/{name}/members/{email}", teamHandler.RemoveMember)
+			})
 		})
 	})
 

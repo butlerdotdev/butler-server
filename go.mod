@@ -9,6 +9,7 @@ require (
 	github.com/go-chi/cors v1.2.1
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
+	golang.org/x/crypto v0.36.0
 	golang.org/x/oauth2 v0.28.0
 	k8s.io/api v0.34.1
 	k8s.io/apimachinery v0.34.1

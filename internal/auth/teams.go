@@ -238,10 +238,11 @@ func (r *TeamResolver) ListTeamsForUser(ctx context.Context, email string, idpGr
 		team, err := r.client.Resource(TeamGVR).Get(ctx, m.Name, metav1.GetOptions{})
 		if err != nil {
 			r.logger.Warn("Failed to get team details", "team", m.Name, "error", err)
-			// Include basic info anyway
+			// Include basic info anyway - use team name as namespace fallback
 			teams = append(teams, TeamInfo{
-				Name: m.Name,
-				Role: m.Role,
+				Name:      m.Name,
+				Namespace: m.Name, // Fallback to team name
+				Role:      m.Role,
 			})
 			continue
 		}
@@ -251,11 +252,18 @@ func (r *TeamResolver) ListTeamsForUser(ctx context.Context, email string, idpGr
 			displayName = m.Name
 		}
 
+		// Get namespace from status.namespace, fallback to team name
+		namespace, _, _ := unstructured.NestedString(team.Object, "status", "namespace")
+		if namespace == "" {
+			namespace = m.Name
+		}
+
 		clusterCount, _, _ := unstructured.NestedInt64(team.Object, "status", "clusterCount")
 
 		teams = append(teams, TeamInfo{
 			Name:         m.Name,
 			DisplayName:  displayName,
+			Namespace:    namespace,
 			Role:         m.Role,
 			ClusterCount: int(clusterCount),
 		})
@@ -265,9 +273,11 @@ func (r *TeamResolver) ListTeamsForUser(ctx context.Context, email string, idpGr
 }
 
 // TeamInfo contains information about a team for display purposes.
+// TeamInfo contains information about a team for display purposes.
 type TeamInfo struct {
 	Name         string `json:"name"`
 	DisplayName  string `json:"displayName"`
+	Namespace    string `json:"namespace"`
 	Role         string `json:"role"`
 	ClusterCount int    `json:"clusterCount"`
 }
@@ -283,4 +293,67 @@ func (r *TeamResolver) ValidateTeamExists(ctx context.Context, teamName string) 
 		return false, err
 	}
 	return true, nil
+}
+
+// MemberInfo contains aggregated membership info for a user across all teams.
+type MemberInfo struct {
+	Email string
+	Teams []string
+	Roles map[string]string // team -> role
+}
+
+// ListAllMembers returns all users from all Team CRDs with their team memberships.
+// This aggregates all users across all teams for the admin users list.
+func (r *TeamResolver) ListAllMembers(ctx context.Context) map[string]*MemberInfo {
+	members := make(map[string]*MemberInfo)
+
+	// List all Team CRDs
+	teams, err := r.client.Resource(TeamGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		r.logger.Debug("Could not list teams for member aggregation", "error", err)
+		return members
+	}
+
+	for _, team := range teams.Items {
+		teamName := team.GetName()
+
+		// Check spec.access.users[]
+		users, found, err := unstructured.NestedSlice(team.Object, "spec", "access", "users")
+		if err != nil || !found {
+			continue
+		}
+
+		for _, u := range users {
+			user, ok := u.(map[string]interface{})
+			if !ok {
+				continue
+			}
+
+			// Get user email
+			email, _, _ := unstructured.NestedString(user, "name")
+			if email == "" {
+				continue
+			}
+			email = strings.ToLower(email)
+
+			// Get role
+			role, _, _ := unstructured.NestedString(user, "role")
+			if role == "" {
+				role = RoleViewer
+			}
+
+			// Add to members map
+			if members[email] == nil {
+				members[email] = &MemberInfo{
+					Email: email,
+					Teams: []string{},
+					Roles: make(map[string]string),
+				}
+			}
+			members[email].Teams = append(members[email].Teams, teamName)
+			members[email].Roles[teamName] = role
+		}
+	}
+
+	return members
 }
