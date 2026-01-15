@@ -53,6 +53,13 @@ type UserSession struct {
 
 	// Teams are the resolved team memberships
 	Teams []TeamMembership `json:"teams"`
+
+	// IsPlatformAdmin grants full platform access, bypassing team checks.
+	// This is set for:
+	// - Bootstrap/legacy admin users (from config)
+	// - Users with spec.isPlatformAdmin=true in their User CRD
+	// Platform admins can manage all teams, users, clusters, and settings.
+	IsPlatformAdmin bool `json:"isPlatformAdmin,omitempty"`
 }
 
 // SessionClaims are the JWT claims for a user session.
@@ -128,6 +135,10 @@ func (s *SessionService) RefreshSession(tokenString string) (string, error) {
 
 // HasTeamMembership checks if a user belongs to a specific team.
 func (u *UserSession) HasTeamMembership(teamName string) bool {
+	// Platform admins have implicit membership in all teams
+	if u.IsPlatformAdmin {
+		return true
+	}
 	for _, team := range u.Teams {
 		if team.Name == teamName {
 			return true
@@ -138,6 +149,13 @@ func (u *UserSession) HasTeamMembership(teamName string) bool {
 
 // GetTeamMembership returns the user's membership for a specific team, or nil.
 func (u *UserSession) GetTeamMembership(teamName string) *TeamMembership {
+	// Platform admins get synthetic admin membership for any team
+	if u.IsPlatformAdmin {
+		return &TeamMembership{
+			Name: teamName,
+			Role: RoleAdmin,
+		}
+	}
 	for _, team := range u.Teams {
 		if team.Name == teamName {
 			return &team
@@ -148,6 +166,10 @@ func (u *UserSession) GetTeamMembership(teamName string) *TeamMembership {
 
 // HasRole checks if the user has the specified role in any team.
 func (u *UserSession) HasRole(role string) bool {
+	// Platform admins have all roles
+	if u.IsPlatformAdmin {
+		return true
+	}
 	for _, team := range u.Teams {
 		if team.Role == role {
 			return true
@@ -158,6 +180,10 @@ func (u *UserSession) HasRole(role string) bool {
 
 // HasRoleInTeam checks if the user has the specified role in a specific team.
 func (u *UserSession) HasRoleInTeam(teamName, role string) bool {
+	// Platform admins have admin role in all teams
+	if u.IsPlatformAdmin {
+		return true
+	}
 	membership := u.GetTeamMembership(teamName)
 	if membership == nil {
 		return false
@@ -165,29 +191,47 @@ func (u *UserSession) HasRoleInTeam(teamName, role string) bool {
 	return membership.Role == role
 }
 
-// IsAdmin checks if the user is an admin in any team.
+// IsAdmin checks if the user has admin privileges.
+// Returns true if:
+// - User is a platform admin (full platform access)
+// - User is an admin of any team (team-scoped admin)
 func (u *UserSession) IsAdmin() bool {
-	return u.HasRole("admin")
+	if u.IsPlatformAdmin {
+		return true
+	}
+	return u.HasRole(RoleAdmin)
 }
 
 // IsAdminOfTeam checks if the user is an admin of a specific team.
 func (u *UserSession) IsAdminOfTeam(teamName string) bool {
-	return u.HasRoleInTeam(teamName, "admin")
+	// Platform admins are admins of all teams
+	if u.IsPlatformAdmin {
+		return true
+	}
+	return u.HasRoleInTeam(teamName, RoleAdmin)
 }
 
 // CanOperateTeam checks if the user can perform operations on a team's resources.
 // Admins and operators can perform operations.
 func (u *UserSession) CanOperateTeam(teamName string) bool {
+	// Platform admins can operate on all teams
+	if u.IsPlatformAdmin {
+		return true
+	}
 	membership := u.GetTeamMembership(teamName)
 	if membership == nil {
 		return false
 	}
-	return membership.Role == "admin" || membership.Role == "operator"
+	return membership.Role == RoleAdmin || membership.Role == RoleOperator
 }
 
 // CanViewTeam checks if the user can view a team's resources.
 // All team members (admin, operator, viewer) can view.
 func (u *UserSession) CanViewTeam(teamName string) bool {
+	// Platform admins can view all teams
+	if u.IsPlatformAdmin {
+		return true
+	}
 	return u.HasTeamMembership(teamName)
 }
 
