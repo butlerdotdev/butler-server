@@ -43,6 +43,7 @@ type SessionMiddlewareConfig struct {
 
 // SessionMiddleware validates the session token and re-resolves team membership on every request.
 // This ensures that when a user is removed from a team or disabled, they immediately lose access.
+// Platform admins bypass team checks entirely.
 func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +75,22 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 				return
 			}
 
+			// Platform admins bypass all further checks
+			// They have full access to the entire platform regardless of team membership
+			if user.IsPlatformAdmin {
+				if cfg.Logger != nil {
+					cfg.Logger.Debug("Platform admin access granted",
+						"email", user.Email,
+						"subject", user.Subject,
+					)
+				}
+				ctx := context.WithValue(r.Context(), userContextKey, user)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
 			// SECURITY: Check if user is disabled in User CRD
+			// This only applies to non-platform-admin users
 			if cfg.UserService != nil {
 				userCRD, err := cfg.UserService.GetUserByEmail(r.Context(), user.Email)
 				if err != nil {
@@ -99,6 +115,8 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 				}
 			}
 
+			// Re-resolve team memberships on every request for non-platform-admins
+			// This ensures team removal takes effect immediately
 			if cfg.TeamResolver != nil {
 				freshTeams, err := cfg.TeamResolver.ResolveTeams(r.Context(), user.Email, user.Groups)
 				if err != nil {
@@ -112,6 +130,7 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 			}
 
 			// Check if user has any team membership (required for access)
+			// Platform admins already bypassed above, so this only affects regular users
 			if len(user.Teams) == 0 {
 				http.Error(w, `{"error":"no team access - contact your administrator"}`, http.StatusForbidden)
 				return
@@ -134,6 +153,12 @@ func RequireTeam(teamName string) func(http.Handler) http.Handler {
 				return
 			}
 
+			// Platform admins have access to all teams
+			if user.IsPlatformAdmin {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			hasAccess := false
 			for _, team := range user.Teams {
 				if team.Name == teamName {
@@ -153,6 +178,7 @@ func RequireTeam(teamName string) func(http.Handler) http.Handler {
 }
 
 // RequireAdmin creates middleware that requires admin role in any team.
+// Platform admins always pass this check.
 func RequireAdmin() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +190,28 @@ func RequireAdmin() func(http.Handler) http.Handler {
 
 			if !user.IsAdmin() {
 				http.Error(w, `{"error":"forbidden: admin role required"}`, http.StatusForbidden)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// RequirePlatformAdmin creates middleware that requires platform admin privileges.
+// Use this for operations that should only be available to platform-level admins,
+// not team-level admins.
+func RequirePlatformAdmin() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			user := UserFromContext(r.Context())
+			if user == nil {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+
+			if !user.IsPlatformAdmin {
+				http.Error(w, `{"error":"forbidden: platform admin required"}`, http.StatusForbidden)
 				return
 			}
 
@@ -198,6 +246,13 @@ func (c *ClusterTeamAuthz) RequireAccess() func(http.Handler) http.Handler {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
+
+			// Platform admins have access to all clusters
+			if user.IsPlatformAdmin {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			next.ServeHTTP(w, r)
 		})
 	}

@@ -65,15 +65,16 @@ type CreateUserRequest struct {
 
 // UserListResponse represents a user in the list API response.
 type UserListResponse struct {
-	Username    string   `json:"username"`
-	Email       string   `json:"email"`
-	DisplayName string   `json:"displayName,omitempty"`
-	Avatar      string   `json:"avatar,omitempty"`
-	Phase       string   `json:"phase"`
-	Disabled    bool     `json:"disabled"`
-	AuthType    string   `json:"authType"` // "internal" or "sso"
-	SSOProvider string   `json:"ssoProvider,omitempty"`
-	Teams       []string `json:"teams,omitempty"`
+	Username        string   `json:"username"`
+	Email           string   `json:"email"`
+	DisplayName     string   `json:"displayName,omitempty"`
+	Avatar          string   `json:"avatar,omitempty"`
+	Phase           string   `json:"phase"`
+	Disabled        bool     `json:"disabled"`
+	AuthType        string   `json:"authType"` // "internal" or "sso"
+	SSOProvider     string   `json:"ssoProvider,omitempty"`
+	Teams           []string `json:"teams,omitempty"`
+	IsPlatformAdmin bool     `json:"isPlatformAdmin,omitempty"`
 }
 
 // CreateUserResponseBody is the response for user creation.
@@ -116,14 +117,15 @@ func (h *UserHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 
 	for _, u := range users {
 		userResp := UserListResponse{
-			Username:    u.Name,
-			Email:       u.Email,
-			DisplayName: u.DisplayName,
-			Avatar:      u.Avatar,
-			Phase:       u.Phase,
-			Disabled:    u.Disabled,
-			AuthType:    u.AuthType,
-			SSOProvider: u.SSOProvider,
+			Username:        u.Name,
+			Email:           u.Email,
+			DisplayName:     u.DisplayName,
+			Avatar:          u.Avatar,
+			Phase:           u.Phase,
+			Disabled:        u.Disabled,
+			AuthType:        u.AuthType,
+			SSOProvider:     u.SSOProvider,
+			IsPlatformAdmin: u.IsPlatformAdmin,
 		}
 
 		// Add team membership info
@@ -179,12 +181,13 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusCreated, CreateUserResponseBody{
 		User: UserListResponse{
-			Username:    result.User.Name,
-			Email:       result.User.Email,
-			DisplayName: result.User.DisplayName,
-			Phase:       result.User.Phase,
-			Disabled:    result.User.Disabled,
-			AuthType:    result.User.AuthType,
+			Username:        result.User.Name,
+			Email:           result.User.Email,
+			DisplayName:     result.User.DisplayName,
+			Phase:           result.User.Phase,
+			Disabled:        result.User.Disabled,
+			AuthType:        result.User.AuthType,
+			IsPlatformAdmin: result.User.IsPlatformAdmin,
 		},
 		InviteURL: result.InviteURL,
 	})
@@ -215,15 +218,16 @@ func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, UserListResponse{
-		Username:    user.Name,
-		Email:       user.Email,
-		DisplayName: user.DisplayName,
-		Avatar:      user.Avatar,
-		Phase:       user.Phase,
-		Disabled:    user.Disabled,
-		AuthType:    user.AuthType,
-		SSOProvider: user.SSOProvider,
-		Teams:       teams,
+		Username:        user.Name,
+		Email:           user.Email,
+		DisplayName:     user.DisplayName,
+		Avatar:          user.Avatar,
+		Phase:           user.Phase,
+		Disabled:        user.Disabled,
+		AuthType:        user.AuthType,
+		SSOProvider:     user.SSOProvider,
+		Teams:           teams,
+		IsPlatformAdmin: user.IsPlatformAdmin,
 	})
 }
 
@@ -386,12 +390,13 @@ func (h *UserHandler) SetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session := &auth.UserSession{
-		Subject:  "internal:" + user.Name,
-		Email:    user.Email,
-		Name:     user.DisplayName,
-		Picture:  user.Avatar,
-		Provider: "internal",
-		Teams:    teams,
+		Subject:         "internal:" + user.Name,
+		Email:           user.Email,
+		Name:            user.DisplayName,
+		Picture:         user.Avatar,
+		Provider:        "internal",
+		Teams:           teams,
+		IsPlatformAdmin: user.IsPlatformAdmin,
 	}
 
 	if session.Name == "" {
@@ -423,11 +428,12 @@ func (h *UserHandler) SetPassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status": "success",
 		"user": UserListResponse{
-			Username:    user.Name,
-			Email:       user.Email,
-			DisplayName: user.DisplayName,
-			Phase:       user.Phase,
-			AuthType:    user.AuthType,
+			Username:        user.Name,
+			Email:           user.Email,
+			DisplayName:     user.DisplayName,
+			Phase:           user.Phase,
+			AuthType:        user.AuthType,
+			IsPlatformAdmin: user.IsPlatformAdmin,
 		},
 	})
 }

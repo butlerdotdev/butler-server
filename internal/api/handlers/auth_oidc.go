@@ -64,10 +64,11 @@ type LoginResponse struct {
 
 // UserResponse represents the user data returned to the client.
 type UserResponse struct {
-	Email   string                `json:"email"`
-	Name    string                `json:"name"`
-	Picture string                `json:"picture,omitempty"`
-	Teams   []auth.TeamMembership `json:"teams"`
+	Email           string                `json:"email"`
+	Name            string                `json:"name"`
+	Picture         string                `json:"picture,omitempty"`
+	Teams           []auth.TeamMembership `json:"teams"`
+	IsPlatformAdmin bool                  `json:"isPlatformAdmin,omitempty"`
 }
 
 // Login initiates the OIDC login flow.
@@ -138,6 +139,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	// IMPORTANT: Ensure User CRD exists for this SSO user
 	// This is called on EVERY SSO login to create/update the user record
+	var isPlatformAdmin bool
 	user, err := h.userService.EnsureSSOUser(r.Context(), auth.EnsureSSOUserRequest{
 		Email:       claims.Email,
 		DisplayName: claims.Name,
@@ -162,6 +164,9 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, errorURL, http.StatusFound)
 			return
 		}
+
+		// Check if user has platform admin privileges from User CRD
+		isPlatformAdmin = user.IsPlatformAdmin
 	}
 
 	// Resolve team memberships
@@ -173,13 +178,14 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	// Create user session
 	session := &auth.UserSession{
-		Subject:  claims.Subject,
-		Email:    claims.Email,
-		Name:     claims.Name,
-		Picture:  claims.Picture,
-		Provider: h.oidcProvider.GetDisplayName(),
-		Groups:   claims.Groups,
-		Teams:    teams,
+		Subject:         claims.Subject,
+		Email:           claims.Email,
+		Name:            claims.Name,
+		Picture:         claims.Picture,
+		Provider:        h.oidcProvider.GetDisplayName(),
+		Groups:          claims.Groups,
+		Teams:           teams,
+		IsPlatformAdmin: isPlatformAdmin,
 	}
 
 	// Generate session token
@@ -208,6 +214,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("User logged in via SSO",
 		"email", claims.Email,
 		"teams", len(teams),
+		"isPlatformAdmin", isPlatformAdmin,
 	)
 
 	// Redirect to app
@@ -287,12 +294,13 @@ func (h *AuthHandler) InternalUserLogin(w http.ResponseWriter, r *http.Request) 
 
 	// Create session
 	session := &auth.UserSession{
-		Subject:  "internal:" + user.Name,
-		Email:    user.Email,
-		Name:     user.DisplayName,
-		Picture:  user.Avatar,
-		Provider: "internal",
-		Teams:    teams,
+		Subject:         "internal:" + user.Name,
+		Email:           user.Email,
+		Name:            user.DisplayName,
+		Picture:         user.Avatar,
+		Provider:        "internal",
+		Teams:           teams,
+		IsPlatformAdmin: user.IsPlatformAdmin, // Propagate from User CRD
 	}
 
 	if session.Name == "" {
@@ -319,14 +327,16 @@ func (h *AuthHandler) InternalUserLogin(w http.ResponseWriter, r *http.Request) 
 	h.logger.Info("User logged in via password",
 		"email", user.Email,
 		"teams", len(teams),
+		"isPlatformAdmin", user.IsPlatformAdmin,
 	)
 
 	writeJSON(w, http.StatusOK, LoginResponse{
 		User: UserResponse{
-			Email:   user.Email,
-			Name:    session.Name,
-			Picture: user.Avatar,
-			Teams:   teams,
+			Email:           user.Email,
+			Name:            session.Name,
+			Picture:         user.Avatar,
+			Teams:           teams,
+			IsPlatformAdmin: user.IsPlatformAdmin,
 		},
 	})
 }
@@ -349,43 +359,7 @@ func (h *AuthHandler) LegacyLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create admin session with full access
-	session := &auth.UserSession{
-		Subject:  "legacy:admin",
-		Email:    "admin@localhost",
-		Name:     "Administrator",
-		Provider: "legacy",
-		Teams: []auth.TeamMembership{
-			{Name: "platform-team", Role: "admin"},
-		},
-	}
-
-	token, err := h.sessionService.CreateSession(session)
-	if err != nil {
-		h.logger.Error("Failed to create session", "error", err)
-		writeError(w, http.StatusInternalServerError, "Login failed")
-		return
-	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "butler_session",
-		Value:    token,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   r.TLS != nil || h.config.Auth.SecureCookies,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(h.config.Auth.SessionExpiry.Seconds()),
-	})
-
-	h.logger.Warn("Legacy admin login used")
-
-	writeJSON(w, http.StatusOK, LoginResponse{
-		User: UserResponse{
-			Email: session.Email,
-			Name:  session.Name,
-			Teams: session.Teams,
-		},
-	})
+	h.createLegacyAdminSession(w, r)
 }
 
 // Logout handles user logout.
@@ -443,10 +417,11 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, UserResponse{
-		Email:   user.Email,
-		Name:    user.Name,
-		Picture: user.Picture,
-		Teams:   user.Teams,
+		Email:           user.Email,
+		Name:            user.Name,
+		Picture:         user.Picture,
+		Teams:           user.Teams,
+		IsPlatformAdmin: user.IsPlatformAdmin,
 	})
 }
 
@@ -460,7 +435,8 @@ func (h *AuthHandler) Teams(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"teams": user.Teams,
+		"teams":           user.Teams,
+		"isPlatformAdmin": user.IsPlatformAdmin,
 	})
 }
 
@@ -493,17 +469,18 @@ func (h *AuthHandler) GetProviders(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// createLegacyAdminSession creates a session for the legacy admin user (dev mode).
+// createLegacyAdminSession creates a session for the legacy admin user (bootstrap/dev mode).
+// The legacy admin is a PLATFORM ADMIN with full access to everything.
 func (h *AuthHandler) createLegacyAdminSession(w http.ResponseWriter, r *http.Request) {
-	// Create session for the admin user with full access
+	// Create session for the admin user with PLATFORM ADMIN privileges
+	// Platform admins bypass team checks entirely
 	session := &auth.UserSession{
-		Subject:  "legacy:admin",
-		Email:    "admin@localhost",
-		Name:     "Administrator",
-		Provider: "legacy",
-		Teams: []auth.TeamMembership{
-			{Name: "platform-team", Role: auth.RoleAdmin},
-		},
+		Subject:         "legacy:admin",
+		Email:           "admin@butler.local",
+		Name:            "Platform Administrator",
+		Provider:        "legacy",
+		IsPlatformAdmin: true,                    // THIS IS THE KEY FIX
+		Teams:           []auth.TeamMembership{}, // No teams needed for platform admin
 	}
 
 	token, err := h.sessionService.CreateSession(session)
@@ -523,13 +500,14 @@ func (h *AuthHandler) createLegacyAdminSession(w http.ResponseWriter, r *http.Re
 		MaxAge:   int(h.config.Auth.SessionExpiry.Seconds()),
 	})
 
-	h.logger.Warn("Legacy admin login used")
+	h.logger.Info("Platform admin logged in via legacy auth")
 
 	writeJSON(w, http.StatusOK, LoginResponse{
 		User: UserResponse{
-			Email: session.Email,
-			Name:  session.Name,
-			Teams: session.Teams,
+			Email:           session.Email,
+			Name:            session.Name,
+			Teams:           session.Teams,
+			IsPlatformAdmin: true,
 		},
 	})
 }
