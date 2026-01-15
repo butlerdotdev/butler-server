@@ -66,7 +66,7 @@ type UserInfo struct {
 	Disabled        bool
 	AuthType        string
 	SSOProvider     string
-	IsPlatformAdmin bool // NEW: Platform admin flag from User CRD
+	IsPlatformAdmin bool
 }
 
 // UserService handles user management operations using User CRDs.
@@ -590,8 +590,9 @@ func (s *UserService) AuthenticateInternal(ctx context.Context, identifier, pass
 		return nil, ErrUserLocked
 	}
 
-	// Get password from secret
-	secretRef, _, _ := unstructured.NestedStringMap(user.Object, "status", "passwordSecretRef")
+	// Get password secret reference
+	// Check spec first (bootstrap admin from Helm), then status (invited users)
+	secretRef := s.getPasswordSecretRef(user)
 	if secretRef == nil || secretRef["name"] == "" {
 		return nil, ErrInvalidCredentials
 	}
@@ -603,7 +604,7 @@ func (s *UserService) AuthenticateInternal(ctx context.Context, identifier, pass
 
 	secret, err := s.clientset.CoreV1().Secrets(namespace).Get(ctx, secretRef["name"], metav1.GetOptions{})
 	if err != nil {
-		s.logger.Error("Failed to get password secret", "error", err)
+		s.logger.Error("Failed to get password secret", "error", err, "secret", secretRef["name"], "namespace", namespace)
 		return nil, ErrInvalidCredentials
 	}
 
@@ -613,6 +614,11 @@ func (s *UserService) AuthenticateInternal(ctx context.Context, identifier, pass
 	}
 
 	storedHash := secret.Data[key]
+	if len(storedHash) == 0 {
+		s.logger.Error("Password hash is empty in secret", "secret", secretRef["name"], "key", key)
+		return nil, ErrInvalidCredentials
+	}
+
 	if err := bcrypt.CompareHashAndPassword(storedHash, []byte(password)); err != nil {
 		// TODO: Increment failed login counter
 		return nil, ErrInvalidCredentials
@@ -633,6 +639,20 @@ func (s *UserService) AuthenticateInternal(ctx context.Context, identifier, pass
 	}
 
 	return s.userFromUnstructured(user), nil
+}
+
+// getPasswordSecretRef gets the password secret reference from a User CRD.
+// Checks spec.passwordSecretRef first (bootstrap admin), then status.passwordSecretRef (invited users).
+func (s *UserService) getPasswordSecretRef(user *unstructured.Unstructured) map[string]string {
+	// Check spec first (bootstrap admin created by Helm)
+	specRef, found, _ := unstructured.NestedStringMap(user.Object, "spec", "passwordSecretRef")
+	if found && specRef != nil && specRef["name"] != "" {
+		return specRef
+	}
+
+	// Fall back to status (invited users who set password via invite flow)
+	statusRef, _, _ := unstructured.NestedStringMap(user.Object, "status", "passwordSecretRef")
+	return statusRef
 }
 
 // userFromUnstructured converts an unstructured User to UserInfo.

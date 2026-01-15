@@ -61,6 +61,22 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 		cfg.Logger.With("component", "users"),
 	)
 
+	// Sync bootstrap admin password hash to Secret
+	// The Secret is created by butler-console Helm chart
+	// The User CRD (created by butler-addons) references this Secret
+	if cfg.Config.Auth.AdminPassword != "" {
+		if err := userService.SyncBootstrapAdminPassword(context.Background(), auth.BootstrapAdminConfig{
+			Username:        cfg.Config.Auth.AdminUsername,
+			Password:        cfg.Config.Auth.AdminPassword,
+			SecretName:      "butler-console-admin", // Matches butler-console chart
+			SecretNamespace: cfg.Config.SystemNamespace,
+			HashKey:         "password-hash",
+		}); err != nil {
+			cfg.Logger.Error("Failed to sync bootstrap admin password", "error", err)
+			// Don't fail startup - admin can still auth via legacy path
+		}
+	}
+
 	// Initialize OIDC provider if configured
 	var oidcProvider *auth.OIDCProvider
 	if cfg.Config.IsOIDCConfigured() {
