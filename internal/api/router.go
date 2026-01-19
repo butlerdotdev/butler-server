@@ -145,6 +145,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	providerHandler := handlers.NewProvidersHandler(cfg.K8sClient, cfg.Config)
 	addonsHandler := handlers.NewAddonsHandler(cfg.K8sClient, cfg.Config)
 	teamHandler := handlers.NewTeamHandler(cfg.K8sClient, teamResolver, cfg.Logger.With("component", "teams"))
+	certificateHandler := handlers.NewCertificateHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "certificates"))
 
 	// Auth middleware - SECURITY: Now re-validates team membership on every request
 	authMiddleware := auth.SessionMiddleware(auth.SessionMiddlewareConfig{
@@ -220,6 +221,12 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Get("/clusters/{namespace}/{name}/addons/{addon}", addonsHandler.GetAddonDetails)
 			r.Put("/clusters/{namespace}/{name}/addons/{addon}", addonsHandler.UpdateAddonValues)
 			r.Delete("/clusters/{namespace}/{name}/addons/{addon}", addonsHandler.UninstallAddon)
+
+			// Cluster certificates
+			r.Get("/clusters/{namespace}/{name}/certificates", certificateHandler.GetCertificates)
+			r.Post("/clusters/{namespace}/{name}/certificates/rotate", certificateHandler.RotateCertificates)
+			r.Get("/clusters/{namespace}/{name}/certificates/rotation-status", certificateHandler.GetRotationStatus)
+			r.Get("/clusters/{namespace}/{name}/certificates/{category}", certificateHandler.GetCertificatesByCategory)
 
 			// Providers
 			r.Get("/providers", providerHandler.List)
