@@ -4,9 +4,22 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - '**'
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - 'Makefile'
   pull_request:
     branches: [main]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile'
+      - 'Makefile'
 
 env:
   REGISTRY: ghcr.io
@@ -34,6 +47,7 @@ jobs:
 
   image:
     needs: build
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: butler-runners
     permissions:
       contents: read
@@ -63,12 +77,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # Latest only on main branch
             type=raw,value=latest,enable={{is_default_branch}}
-            # SHA for every build (traceability)
             type=sha,prefix=sha-
-            # PR number for PR builds (e.g., pr-42)
             type=ref,event=pr,prefix=pr-
+            type=ref,event=branch,prefix=branch-
 
       - name: Build and push
         uses: docker/build-push-action@v6
