@@ -310,7 +310,7 @@ func TestIsCertificateKey(t *testing.T) {
 		{"tls.key", false},
 		{"ca.key", false},
 		{"config", false},
-		{"kubeconfig", false},
+		{"kubeconfig", true},
 		{"", false},
 	}
 

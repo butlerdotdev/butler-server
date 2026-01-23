@@ -32,18 +32,18 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// TenantControlPlane GVR for Kamaji
+// TenantControlPlane GVR for Steward
 var TenantControlPlaneGVR = schema.GroupVersionResource{
-	Group:    "kamaji.clastix.io",
+	Group:    "steward.butlerlabs.dev",
 	Version:  "v1alpha1",
 	Resource: "tenantcontrolplanes",
 }
 
 const (
-	// KamajiNamespace is the namespace where Kamaji controller runs
-	KamajiNamespace = "kamaji-system"
-	// KamajiDeploymentName is the name of the Kamaji controller deployment
-	KamajiDeploymentName = "kamaji"
+	// StewardNamespace is the namespace where Steward controller runs
+	StewardNamespace = "steward-system"
+	// StewardDeploymentName is the name of the Steward controller deployment
+	StewardDeploymentName = "steward"
 
 	// ButlerRotationAnnotation tracks when Butler initiated a rotation
 	ButlerRotationAnnotation = "butler.butlerlabs.dev/rotation-initiated"
@@ -77,7 +77,7 @@ func NewService(clientset kubernetes.Interface, dynamicClient dynamic.Interface,
 
 // GetClusterCertificates retrieves all certificate information for a cluster.
 func (s *Service) GetClusterCertificates(ctx context.Context, namespace, clusterName string) (*ClusterCertificates, error) {
-	// Find the TCP namespace (where Kamaji resources live)
+	// Find the TCP namespace (where Steward resources live)
 	tcpNamespace, err := s.findTCPNamespace(ctx, namespace, clusterName)
 	if err != nil {
 		s.logger.Warn("Could not find TCP namespace, using cluster namespace",
@@ -93,9 +93,9 @@ func (s *Service) GetClusterCertificates(ctx context.Context, namespace, cluster
 		"tcpNamespace", tcpNamespace,
 	)
 
-	// List all secrets with Kamaji project label
+	// List all secrets with Steward project label
 	secrets, err := s.clientset.CoreV1().Secrets(tcpNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("%s=kamaji", KamajiProjectLabel),
+		LabelSelector: fmt.Sprintf("%s=steward", StewardProjectLabel),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list certificate secrets: %w", err)
@@ -234,7 +234,7 @@ func (s *Service) checkRotationStatus(ctx context.Context, tcpNamespace, cluster
 	)
 
 	// Check if secrets have been recreated after rotation started
-	// This is the real completion signal - Kamaji has regenerated the certs
+	// This is the real completion signal - Steward has regenerated the certs
 	secretsRecreated, recreationTime := s.checkSecretsRecreated(ctx, tcpNamespace, affectedSecrets, rotationTime)
 
 	if secretsRecreated {
@@ -343,7 +343,7 @@ func (s *Service) checkSecretsRecreated(ctx context.Context, tcpNamespace string
 	return false, nil
 }
 
-// RotateCertificates triggers certificate rotation by deleting secrets and restarting Kamaji.
+// RotateCertificates triggers certificate rotation by deleting secrets and restarting Steward.
 func (s *Service) RotateCertificates(ctx context.Context, namespace, clusterName string, rotationType RotationType, initiatedBy string) (*RotationEvent, error) {
 	tcpNamespace, err := s.findTCPNamespace(ctx, namespace, clusterName)
 	if err != nil {
@@ -403,16 +403,16 @@ func (s *Service) RotateCertificates(ctx context.Context, namespace, clusterName
 		)
 	}
 
-	// Restart Kamaji deployment to trigger fresh certificate generation
-	s.logger.Info("Attempting to restart Kamaji deployment")
-	if err := s.restartKamajiDeployment(ctx); err != nil {
-		s.logger.Error("Failed to restart Kamaji deployment",
+	// Restart Steward deployment to trigger fresh certificate generation
+	s.logger.Info("Attempting to restart Steward deployment")
+	if err := s.restartStewardDeployment(ctx); err != nil {
+		s.logger.Error("Failed to restart Steward deployment",
 			"error", err,
 		)
-		event.Message = fmt.Sprintf("Secrets deleted but Kamaji restart failed: %v. Manual restart may be required.", err)
+		event.Message = fmt.Sprintf("Secrets deleted but Steward restart failed: %v. Manual restart may be required.", err)
 		// Don't fail the rotation - secrets are deleted, but warn the user
 	} else {
-		s.logger.Info("Kamaji deployment restart triggered successfully")
+		s.logger.Info("Steward deployment restart triggered successfully")
 	}
 
 	return event, nil
@@ -461,13 +461,13 @@ func (s *Service) markRotationStarted(ctx context.Context, tcpNamespace, cluster
 	return err
 }
 
-// restartKamajiDeployment triggers a rollout restart of the Kamaji controller deployment.
-// This forces Kamaji to regenerate certificates with fresh key material instead of
+// restartStewardDeployment triggers a rollout restart of the Steward controller deployment.
+// This forces Steward to regenerate certificates with fresh key material instead of
 // restoring from its internal cache.
-func (s *Service) restartKamajiDeployment(ctx context.Context) error {
-	s.logger.Debug("Patching Kamaji deployment to trigger restart",
-		"namespace", KamajiNamespace,
-		"deployment", KamajiDeploymentName,
+func (s *Service) restartStewardDeployment(ctx context.Context) error {
+	s.logger.Debug("Patching Steward deployment to trigger restart",
+		"namespace", StewardNamespace,
+		"deployment", StewardDeploymentName,
 	)
 
 	// Patch the deployment to trigger a rollout restart
@@ -475,20 +475,20 @@ func (s *Service) restartKamajiDeployment(ctx context.Context) error {
 	patch := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"%s"}}}}}`,
 		time.Now().Format(time.RFC3339))
 
-	_, err := s.clientset.AppsV1().Deployments(KamajiNamespace).Patch(
+	_, err := s.clientset.AppsV1().Deployments(StewardNamespace).Patch(
 		ctx,
-		KamajiDeploymentName,
+		StewardDeploymentName,
 		types.StrategicMergePatchType,
 		[]byte(patch),
 		metav1.PatchOptions{},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to patch Kamaji deployment: %w", err)
+		return fmt.Errorf("failed to patch Steward deployment: %w", err)
 	}
 
-	s.logger.Info("Triggered Kamaji deployment rollout restart",
-		"namespace", KamajiNamespace,
-		"deployment", KamajiDeploymentName,
+	s.logger.Info("Triggered Steward deployment rollout restart",
+		"namespace", StewardNamespace,
+		"deployment", StewardDeploymentName,
 	)
 
 	return nil
@@ -523,7 +523,7 @@ func (s *Service) GetSecretsForCategory(ctx context.Context, namespace, clusterN
 	}
 
 	secrets, err := s.clientset.CoreV1().Secrets(tcpNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("%s=kamaji", KamajiProjectLabel),
+		LabelSelector: fmt.Sprintf("%s=steward", StewardProjectLabel),
 	})
 	if err != nil {
 		return nil, err
@@ -567,15 +567,15 @@ func (s *Service) findTCPNamespace(ctx context.Context, tcNamespace, clusterName
 	return fmt.Sprintf("%s-%s", clusterName, tcNamespace), nil
 }
 
-// getTenantControlPlane retrieves the Kamaji TenantControlPlane resource.
+// getTenantControlPlane retrieves the Steward TenantControlPlane resource.
 func (s *Service) getTenantControlPlane(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
 	return s.dynamicClient.Resource(TenantControlPlaneGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 }
 
 // secretBelongsToCluster checks if a secret belongs to a specific cluster.
 func (s *Service) secretBelongsToCluster(secret corev1.Secret, clusterName string) bool {
-	// Check Kamaji tenant label
-	if tenantName, ok := secret.Labels[KamajiTenantLabel]; ok {
+	// Check Steward tenant label
+	if tenantName, ok := secret.Labels[StewardTenantLabel]; ok {
 		return tenantName == clusterName
 	}
 
@@ -586,7 +586,7 @@ func (s *Service) secretBelongsToCluster(secret corev1.Secret, clusterName strin
 // categorizeSecret determines the category of a certificate secret.
 func (s *Service) categorizeSecret(secret corev1.Secret) CertificateCategory {
 	// Prefer using the component label if available
-	component := secret.Labels[KamajiComponentLabel]
+	component := secret.Labels[StewardComponentLabel]
 	if component != "" {
 		switch {
 		case strings.HasSuffix(component, "-kubeconfig"):
@@ -632,7 +632,7 @@ func (s *Service) categorizeSecret(secret corev1.Secret) CertificateCategory {
 // getSecretsForRotation returns the list of secrets to rotate based on rotation type.
 func (s *Service) getSecretsForRotation(ctx context.Context, namespace, clusterName string, rotationType RotationType) ([]string, error) {
 	secrets, err := s.clientset.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("%s=kamaji", KamajiProjectLabel),
+		LabelSelector: fmt.Sprintf("%s=steward", StewardProjectLabel),
 	})
 	if err != nil {
 		return nil, err
