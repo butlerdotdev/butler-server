@@ -77,7 +77,7 @@ func TestService_CategorizeSecret(t *testing.T) {
 			}
 			if tt.component != "" {
 				secret.Labels = map[string]string{
-					KamajiComponentLabel: tt.component,
+					StewardComponentLabel: tt.component,
 				}
 			}
 
@@ -105,7 +105,7 @@ func TestService_SecretBelongsToCluster(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "my-cluster-api-server",
 					Labels: map[string]string{
-						KamajiTenantLabel: "my-cluster",
+						StewardTenantLabel: "my-cluster",
 					},
 				},
 			},
@@ -128,7 +128,7 @@ func TestService_SecretBelongsToCluster(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "other-cluster-api-server",
 					Labels: map[string]string{
-						KamajiTenantLabel: "other-cluster",
+						StewardTenantLabel: "other-cluster",
 					},
 				},
 			},
@@ -161,15 +161,15 @@ func TestService_GetSecretsForRotation(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	// Create fake secrets with proper Kamaji labels
+	// Create fake secrets with proper Steward labels
 	secrets := []runtime.Object{
 		&corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-cluster-api-server-certificate",
 				Namespace: "test-ns",
 				Labels: map[string]string{
-					KamajiProjectLabel:   "kamaji",
-					KamajiComponentLabel: "api-server-certificate",
+					StewardProjectLabel:   "steward",
+					StewardComponentLabel: "api-server-certificate",
 				},
 			},
 		},
@@ -178,8 +178,8 @@ func TestService_GetSecretsForRotation(t *testing.T) {
 				Name:      "test-cluster-admin-kubeconfig",
 				Namespace: "test-ns",
 				Labels: map[string]string{
-					KamajiProjectLabel:   "kamaji",
-					KamajiComponentLabel: "admin-kubeconfig",
+					StewardProjectLabel:   "steward",
+					StewardComponentLabel: "admin-kubeconfig",
 				},
 			},
 		},
@@ -188,8 +188,8 @@ func TestService_GetSecretsForRotation(t *testing.T) {
 				Name:      "test-cluster-ca",
 				Namespace: "test-ns",
 				Labels: map[string]string{
-					KamajiProjectLabel:   "kamaji",
-					KamajiComponentLabel: "ca",
+					StewardProjectLabel:   "steward",
+					StewardComponentLabel: "ca",
 				},
 			},
 		},
@@ -198,8 +198,8 @@ func TestService_GetSecretsForRotation(t *testing.T) {
 				Name:      "other-cluster-api-server",
 				Namespace: "test-ns",
 				Labels: map[string]string{
-					KamajiProjectLabel:   "kamaji",
-					KamajiComponentLabel: "api-server-certificate",
+					StewardProjectLabel:   "steward",
+					StewardComponentLabel: "api-server-certificate",
 				},
 			},
 		},
@@ -230,11 +230,11 @@ func TestService_GetSecretsForRotation(t *testing.T) {
 			wantExcludes: []string{"test-cluster-api-server-certificate", "test-cluster-ca"},
 		},
 		{
-			name:         "CA only",
+			name:         "CA - includes all certs",
 			rotationType: RotateCA,
-			wantCount:    1,
-			wantContains: []string{"test-cluster-ca"},
-			wantExcludes: []string{"test-cluster-api-server-certificate", "test-cluster-admin-kubeconfig"},
+			wantCount:    3,
+			wantContains: []string{"test-cluster-ca", "test-cluster-api-server-certificate", "test-cluster-admin-kubeconfig"},
+			wantExcludes: []string{},
 		},
 	}
 
@@ -246,7 +246,7 @@ func TestService_GetSecretsForRotation(t *testing.T) {
 			}
 
 			if len(secrets) != tt.wantCount {
-				t.Errorf("got %d secrets, want %d", len(secrets), tt.wantCount)
+				t.Errorf("got %d secrets, want %d: %v", len(secrets), tt.wantCount, secrets)
 			}
 
 			for _, want := range tt.wantContains {
@@ -258,7 +258,7 @@ func TestService_GetSecretsForRotation(t *testing.T) {
 					}
 				}
 				if !found {
-					t.Errorf("expected secrets to contain %q", want)
+					t.Errorf("expected secrets to contain %q, got %v", want, secrets)
 				}
 			}
 
@@ -298,8 +298,8 @@ func TestService_RotateCertificates(t *testing.T) {
 			Name:      "test-cluster-api-server-certificate",
 			Namespace: "test-ns",
 			Labels: map[string]string{
-				KamajiProjectLabel:   "kamaji",
-				KamajiComponentLabel: "api-server-certificate",
+				StewardProjectLabel:   "steward",
+				StewardComponentLabel: "api-server-certificate",
 			},
 		},
 		Data: map[string][]byte{
@@ -333,14 +333,10 @@ func TestService_RotateCertificates(t *testing.T) {
 		t.Errorf("expected 1 affected secret, got %d", len(event.AffectedSecrets))
 	}
 
-	// Verify annotation was applied
-	updated, err := client.CoreV1().Secrets("test-ns").Get(ctx, secret.Name, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("failed to get updated secret: %v", err)
-	}
-
-	if _, ok := updated.Annotations[KamajiRotateAnnotation]; !ok {
-		t.Error("expected rotation annotation to be set")
+	// Verify secret was deleted (rotation now deletes secrets instead of annotating)
+	_, err = client.CoreV1().Secrets("test-ns").Get(ctx, secret.Name, metav1.GetOptions{})
+	if err == nil {
+		t.Error("expected secret to be deleted after rotation")
 	}
 }
 
@@ -370,8 +366,8 @@ func TestService_GetClusterCertificates(t *testing.T) {
 				Name:      "test-cluster-api-server-certificate",
 				Namespace: "test-ns",
 				Labels: map[string]string{
-					KamajiProjectLabel:   "kamaji",
-					KamajiComponentLabel: "api-server-certificate",
+					StewardProjectLabel:   "steward",
+					StewardComponentLabel: "api-server-certificate",
 				},
 			},
 			Data: map[string][]byte{
@@ -383,8 +379,8 @@ func TestService_GetClusterCertificates(t *testing.T) {
 				Name:      "test-cluster-admin-kubeconfig",
 				Namespace: "test-ns",
 				Labels: map[string]string{
-					KamajiProjectLabel:   "kamaji",
-					KamajiComponentLabel: "admin-kubeconfig",
+					StewardProjectLabel:   "steward",
+					StewardComponentLabel: "admin-kubeconfig",
 				},
 			},
 			Data: map[string][]byte{
@@ -396,8 +392,8 @@ func TestService_GetClusterCertificates(t *testing.T) {
 				Name:      "test-cluster-ca",
 				Namespace: "test-ns",
 				Labels: map[string]string{
-					KamajiProjectLabel:   "kamaji",
-					KamajiComponentLabel: "ca",
+					StewardProjectLabel:   "steward",
+					StewardComponentLabel: "ca",
 				},
 			},
 			Data: map[string][]byte{

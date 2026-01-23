@@ -623,7 +623,7 @@ func (h *ClusterHandler) GetManagement(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	systemNamespaces := []string{"butler-system", "kamaji-system", "capi-system", "cert-manager", "kube-system"}
+	systemNamespaces := []string{"butler-system", "steward-system", "capi-system", "cert-manager", "kube-system"}
 	namespaceStats := make([]map[string]interface{}, 0)
 
 	for _, ns := range systemNamespaces {

@@ -20,19 +20,16 @@ import (
 	"time"
 )
 
-// Kamaji-specific labels and annotations
+// Steward-specific labels and annotations
 const (
-	// KamajiProjectLabel identifies secrets belonging to Kamaji
-	KamajiProjectLabel = "kamaji.clastix.io/project"
+	// StewardProjectLabel identifies secrets belonging to Steward
+	StewardProjectLabel = "steward.butlerlabs.dev/project"
 
-	// KamajiTenantLabel identifies which tenant a secret belongs to
-	KamajiTenantLabel = "kamaji.clastix.io/name"
+	// StewardTenantLabel identifies which tenant a secret belongs to
+	StewardTenantLabel = "steward.butlerlabs.dev/name"
 
-	// KamajiComponentLabel identifies the certificate component type
-	KamajiComponentLabel = "kamaji.clastix.io/component"
-
-	// KamajiRotateAnnotation triggers certificate rotation (documented but broken in edge)
-	KamajiRotateAnnotation = "certs.kamaji.clastix.io/rotate"
+	// StewardComponentLabel identifies the certificate component type
+	StewardComponentLabel = "steward.butlerlabs.dev/component"
 
 	// RotationTimeoutMinutes is how long to wait for rotation to complete
 	RotationTimeoutMinutes = 5
@@ -141,7 +138,7 @@ type ClusterCertificates struct {
 	// Namespace is the Butler namespace where TenantCluster lives
 	Namespace string `json:"namespace"`
 
-	// TCPNamespace is the Kamaji namespace where TenantControlPlane lives
+	// TCPNamespace is the Steward namespace where TenantControlPlane lives
 	TCPNamespace string `json:"tcpNamespace,omitempty"`
 
 	// Categories maps certificate category to list of certs
