@@ -6,6 +6,8 @@ on:
   push:
     branches:
       - '**'
+    tags:
+      - 'v*'
     paths:
       - '**.go'
       - 'go.mod'
@@ -83,6 +85,8 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=${{ steps.timestamp.outputs.ts }}-sha-{{sha}},enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
             type=ref,event=pr,prefix=pr-
             type=ref,event=branch,prefix=branch-
