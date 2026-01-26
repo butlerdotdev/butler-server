@@ -71,6 +71,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Generate timestamp
+        id: timestamp
+        run: echo "ts=$(date -u +%Y%m%d%H%M%S)" >> $GITHUB_OUTPUT
+
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -78,6 +82,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.timestamp.outputs.ts }}-sha-{{sha}},enable={{is_default_branch}}
             type=sha,prefix=sha-
             type=ref,event=pr,prefix=pr-
             type=ref,event=branch,prefix=branch-
