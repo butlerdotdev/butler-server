@@ -146,6 +146,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	addonsHandler := handlers.NewAddonsHandler(cfg.K8sClient, cfg.Config)
 	teamHandler := handlers.NewTeamHandler(cfg.K8sClient, teamResolver, cfg.Logger.With("component", "teams"))
 	certificateHandler := handlers.NewCertificateHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "certificates"))
+	gitopsHandler := handlers.NewGitOpsHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "gitops"))
 
 	// Auth middleware - SECURITY: Now re-validates team membership on every request
 	authMiddleware := auth.SessionMiddleware(auth.SessionMiddlewareConfig{
@@ -201,6 +202,15 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Put("/management/addons/{name}", addonsHandler.UpdateManagementAddon)
 			r.Delete("/management/addons/{name}", addonsHandler.UninstallManagementAddon)
 
+			// Management GitOps
+			r.Get("/management/gitops/status", gitopsHandler.GetManagementStatus)
+			r.Post("/management/gitops/enable", gitopsHandler.EnableManagementGitOps)
+			r.Delete("/management/gitops", gitopsHandler.DisableManagementGitOps)
+			r.Get("/management/gitops/discover", gitopsHandler.DiscoverManagementReleases)
+			r.Post("/management/gitops/export", gitopsHandler.ExportManagementAddon)
+			r.Post("/management/gitops/export-catalog", gitopsHandler.ExportManagementCatalogAddon)
+			r.Post("/management/gitops/migrate", gitopsHandler.ExportAllManagementAddons)
+
 			// Addon catalog
 			r.Get("/addons/catalog", addonsHandler.GetCatalog)
 			r.Get("/addons/catalog/{name}", addonsHandler.GetAddonDefinition)
@@ -221,6 +231,24 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Get("/clusters/{namespace}/{name}/addons/{addon}", addonsHandler.GetAddonDetails)
 			r.Put("/clusters/{namespace}/{name}/addons/{addon}", addonsHandler.UpdateAddonValues)
 			r.Delete("/clusters/{namespace}/{name}/addons/{addon}", addonsHandler.UninstallAddon)
+
+			// GitOps global configuration (Git provider setup)
+			r.Route("/gitops", func(r chi.Router) {
+				r.Get("/config", gitopsHandler.GetConfig)
+				r.Post("/config", gitopsHandler.SaveConfig)
+				r.Get("/repos", gitopsHandler.ListRepositories)
+				r.Get("/repos/{owner}/{repo}/branches", gitopsHandler.ListBranches)
+				r.Post("/preview", gitopsHandler.PreviewManifest)
+			})
+
+			// Cluster GitOps
+			r.Get("/clusters/{namespace}/{name}/gitops/status", gitopsHandler.GetStatus)
+			r.Post("/clusters/{namespace}/{name}/gitops/enable", gitopsHandler.EnableGitOps)
+			r.Delete("/clusters/{namespace}/{name}/gitops", gitopsHandler.DisableGitOps)
+			r.Get("/clusters/{namespace}/{name}/gitops/discover", gitopsHandler.DiscoverReleases)
+			r.Post("/clusters/{namespace}/{name}/gitops/export", gitopsHandler.ExportAddon)
+			r.Post("/clusters/{namespace}/{name}/gitops/export-release", gitopsHandler.ExportRelease)
+			r.Post("/clusters/{namespace}/{name}/gitops/migrate", gitopsHandler.ExportAllAddons)
 
 			// Cluster certificates
 			r.Get("/clusters/{namespace}/{name}/certificates", certificateHandler.GetCertificates)
