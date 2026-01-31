@@ -147,6 +147,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	teamHandler := handlers.NewTeamHandler(cfg.K8sClient, teamResolver, cfg.Logger.With("component", "teams"))
 	certificateHandler := handlers.NewCertificateHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "certificates"))
 	gitopsHandler := handlers.NewGitOpsHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "gitops"))
+	identityProviderHandler := handlers.NewIdentityProvidersHandler(cfg.K8sClient, cfg.Config)
 
 	// Auth middleware - SECURITY: Now re-validates team membership on every request
 	authMiddleware := auth.SessionMiddleware(auth.SessionMiddlewareConfig{
@@ -274,6 +275,15 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Delete("/teams/{name}", teamHandler.Delete)
 			r.Get("/teams/{name}/clusters", teamHandler.ListClusters)
 			r.Get("/teams/{name}/members", teamHandler.ListMembers)
+
+			r.Route("/identity-providers", func(r chi.Router) {
+				r.Get("/", identityProviderHandler.List)
+				r.Post("/", identityProviderHandler.Create)
+				r.Post("/test", identityProviderHandler.TestDiscovery)
+				r.Get("/{name}", identityProviderHandler.Get)
+				r.Delete("/{name}", identityProviderHandler.Delete)
+				r.Post("/{name}/validate", identityProviderHandler.Validate)
+			})
 
 			// User listing (any authenticated user can view)
 			r.Get("/users", userHandler.ListUsers)
