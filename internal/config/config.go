@@ -90,6 +90,10 @@ type OIDCConfig struct {
 	// EmailClaim is the JWT claim for email
 	// Default: "email"
 	EmailClaim string
+
+	// GoogleWorkspace for Admin SDK group fetching
+	GoogleServiceAccountJSON string `env:"GOOGLE_SERVICE_ACCOUNT_JSON"`
+	GoogleAdminEmail         string `env:"GOOGLE_ADMIN_EMAIL"`
 }
 
 // Load loads configuration from environment variables.
@@ -107,14 +111,16 @@ func Load() *Config {
 			AdminPassword: getEnv("BUTLER_ADMIN_PASSWORD", ""),
 		},
 		OIDC: OIDCConfig{
-			Enabled:      getBoolEnv("BUTLER_OIDC_ENABLED", false),
-			IssuerURL:    getEnv("BUTLER_OIDC_ISSUER_URL", ""),
-			ClientID:     getEnv("BUTLER_OIDC_CLIENT_ID", ""),
-			ClientSecret: getEnv("BUTLER_OIDC_CLIENT_SECRET", ""),
-			RedirectURL:  getEnv("BUTLER_OIDC_REDIRECT_URL", ""),
-			HostedDomain: getEnv("BUTLER_OIDC_HOSTED_DOMAIN", ""),
-			GroupsClaim:  getEnv("BUTLER_OIDC_GROUPS_CLAIM", "groups"),
-			EmailClaim:   getEnv("BUTLER_OIDC_EMAIL_CLAIM", "email"),
+			Enabled:                  getBoolEnv("BUTLER_OIDC_ENABLED", false),
+			IssuerURL:                getEnv("BUTLER_OIDC_ISSUER_URL", ""),
+			ClientID:                 getEnv("BUTLER_OIDC_CLIENT_ID", ""),
+			ClientSecret:             getEnv("BUTLER_OIDC_CLIENT_SECRET", ""),
+			RedirectURL:              getEnv("BUTLER_OIDC_REDIRECT_URL", ""),
+			HostedDomain:             getEnv("BUTLER_OIDC_HOSTED_DOMAIN", ""),
+			GroupsClaim:              getEnv("BUTLER_OIDC_GROUPS_CLAIM", "groups"),
+			EmailClaim:               getEnv("BUTLER_OIDC_EMAIL_CLAIM", "email"),
+			GoogleServiceAccountJSON: getEnv("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
+			GoogleAdminEmail:         getEnv("GOOGLE_ADMIN_EMAIL", ""),
 		},
 		TenantNamespace: getEnv("BUTLER_TENANT_NAMESPACE", "butler-tenants"),
 		SystemNamespace: getEnv("BUTLER_SYSTEM_NAMESPACE", "butler-system"),

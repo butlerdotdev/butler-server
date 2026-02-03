@@ -31,14 +31,14 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// TeamHandler handles team-related endpoints.
+// TeamHandler handles team-related API endpoints.
 type TeamHandler struct {
 	k8sClient    *k8s.Client
 	teamResolver *auth.TeamResolver
 	logger       *slog.Logger
 }
 
-// NewTeamHandler creates a new teams handler.
+// NewTeamHandler creates a new TeamHandler.
 func NewTeamHandler(k8sClient *k8s.Client, teamResolver *auth.TeamResolver, logger *slog.Logger) *TeamHandler {
 	return &TeamHandler{
 		k8sClient:    k8sClient,
@@ -56,15 +56,111 @@ type TeamResponse struct {
 	Phase        string            `json:"phase"`
 	ClusterCount int               `json:"clusterCount"`
 	MemberCount  int               `json:"memberCount"`
+	GroupCount   int               `json:"groupCount"`
 	Labels       map[string]string `json:"labels,omitempty"`
 	CreatedAt    string            `json:"createdAt,omitempty"`
 }
 
 // TeamMemberResponse represents a team member in API responses.
+// Source indicates how the user has access: "direct", "group", or "elevated".
+// Elevated means the user has group access but was given a higher role directly.
 type TeamMemberResponse struct {
-	Email string `json:"email"`
-	Name  string `json:"name,omitempty"`
-	Role  string `json:"role"`
+	Email      string `json:"email"`
+	Name       string `json:"name,omitempty"`
+	Role       string `json:"role"`
+	Source     string `json:"source"`
+	GroupName  string `json:"groupName,omitempty"`
+	GroupRole  string `json:"groupRole,omitempty"`
+	DirectRole string `json:"directRole,omitempty"`
+	CanRemove  bool   `json:"canRemove"`
+	RemoveNote string `json:"removeNote,omitempty"`
+}
+
+// TeamGroupAccessResponse represents a group access rule for a team.
+type TeamGroupAccessResponse struct {
+	Name string `json:"name"`
+	Role string `json:"role"`
+}
+
+// roleLevel returns a numeric level for role comparison (higher = more privilege).
+func roleLevel(role string) int {
+	switch role {
+	case auth.RoleAdmin:
+		return 3
+	case auth.RoleOperator:
+		return 2
+	case auth.RoleViewer:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// isHigherRole returns true if role1 has higher privilege than role2.
+func isHigherRole(role1, role2 string) bool {
+	return roleLevel(role1) > roleLevel(role2)
+}
+
+// groupMatchesEmail checks if an email's domain matches a group's domain.
+// This is a heuristic for potential group membership when we don't have IdP data.
+func groupMatchesEmail(groupName, email string) bool {
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 {
+		return false
+	}
+	emailDomain := strings.ToLower(parts[1])
+
+	groupLower := strings.ToLower(groupName)
+	groupParts := strings.Split(groupLower, "@")
+	if len(groupParts) == 2 {
+		return emailDomain == groupParts[1]
+	}
+	return false
+}
+
+// getTeamGroups extracts group access rules from a Team CRD.
+func getTeamGroups(team *unstructured.Unstructured) []TeamGroupAccessResponse {
+	groups := make([]TeamGroupAccessResponse, 0)
+	groupsSlice, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "groups")
+	if !found {
+		return groups
+	}
+
+	for _, g := range groupsSlice {
+		groupMap, ok := g.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _, _ := unstructured.NestedString(groupMap, "name")
+		role, _, _ := unstructured.NestedString(groupMap, "role")
+		if name == "" {
+			continue
+		}
+		if role == "" {
+			role = auth.RoleViewer
+		}
+		groups = append(groups, TeamGroupAccessResponse{Name: name, Role: role})
+	}
+	return groups
+}
+
+// findPotentialGroupAccess checks if an email might have access via team groups.
+// Returns the highest-privilege matching group if found.
+func findPotentialGroupAccess(email string, groups []TeamGroupAccessResponse) (bool, string, string) {
+	var bestGroup string
+	var bestRole string
+	found := false
+
+	for _, group := range groups {
+		if groupMatchesEmail(group.Name, email) {
+			if !found || isHigherRole(group.Role, bestRole) {
+				found = true
+				bestGroup = group.Name
+				bestRole = group.Role
+			}
+		}
+	}
+	return found, bestGroup, bestRole
 }
 
 // List returns all teams.
@@ -77,18 +173,14 @@ func (h *TeamHandler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get all clusters to count per team
 	allClusters, err := h.k8sClient.Dynamic().Resource(k8s.TenantClusterGVR).List(r.Context(), metav1.ListOptions{})
 	if err != nil {
 		h.logger.Warn("Failed to list clusters for counting", "error", err)
-		// Continue without cluster counts
 	}
 
-	// Build cluster count map by team using spec.teamRef.name
 	clusterCountByTeam := make(map[string]int)
 	if allClusters != nil {
 		for _, cluster := range allClusters.Items {
-			// Check spec.teamRef.name for team association
 			teamRefName, found, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
 			if found && teamRefName != "" {
 				clusterCountByTeam[teamRefName]++
@@ -103,28 +195,26 @@ func (h *TeamHandler) List(w http.ResponseWriter, r *http.Request) {
 		namespace, _, _ := unstructured.NestedString(team.Object, "status", "namespace")
 		phase, _, _ := unstructured.NestedString(team.Object, "status", "phase")
 
-		// Fallback namespace to team name if not set
 		if namespace == "" {
 			namespace = team.GetName()
 		}
 
-		// Count members from spec.access.users
 		memberCount := 0
 		if users, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users"); found {
 			memberCount = len(users)
 		}
 
+		groupCount := 0
+		if groups, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "groups"); found {
+			groupCount = len(groups)
+		}
+
 		if displayName == "" {
 			displayName = team.GetName()
 		}
-
-		// Default phase if not set
 		if phase == "" {
 			phase = "Ready"
 		}
-
-		// Get cluster count from map
-		clusterCount := clusterCountByTeam[team.GetName()]
 
 		response = append(response, TeamResponse{
 			Name:         team.GetName(),
@@ -132,16 +222,15 @@ func (h *TeamHandler) List(w http.ResponseWriter, r *http.Request) {
 			Description:  description,
 			Namespace:    namespace,
 			Phase:        phase,
-			ClusterCount: clusterCount,
+			ClusterCount: clusterCountByTeam[team.GetName()],
 			MemberCount:  memberCount,
+			GroupCount:   groupCount,
 			Labels:       team.GetLabels(),
 			CreatedAt:    team.GetCreationTimestamp().Format("2006-01-02T15:04:05Z"),
 		})
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"teams": response,
-	})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"teams": response})
 }
 
 // Get returns a specific team.
@@ -165,18 +254,20 @@ func (h *TeamHandler) Get(w http.ResponseWriter, r *http.Request) {
 	namespace, _, _ := unstructured.NestedString(team.Object, "status", "namespace")
 	phase, _, _ := unstructured.NestedString(team.Object, "status", "phase")
 
-	// Fallback namespace to team name if not set
 	if namespace == "" {
 		namespace = team.GetName()
 	}
 
-	// Count members from spec.access.users
 	memberCount := 0
 	if users, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users"); found {
 		memberCount = len(users)
 	}
 
-	// Count clusters by checking spec.teamRef.name
+	groupCount := 0
+	if groups, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "groups"); found {
+		groupCount = len(groups)
+	}
+
 	clusterCount := 0
 	allClusters, err := h.k8sClient.Dynamic().Resource(k8s.TenantClusterGVR).List(r.Context(), metav1.ListOptions{})
 	if err == nil && allClusters != nil {
@@ -191,8 +282,6 @@ func (h *TeamHandler) Get(w http.ResponseWriter, r *http.Request) {
 	if displayName == "" {
 		displayName = team.GetName()
 	}
-
-	// Default phase if not set
 	if phase == "" {
 		phase = "Ready"
 	}
@@ -205,6 +294,7 @@ func (h *TeamHandler) Get(w http.ResponseWriter, r *http.Request) {
 		Phase:        phase,
 		ClusterCount: clusterCount,
 		MemberCount:  memberCount,
+		GroupCount:   groupCount,
 		Labels:       team.GetLabels(),
 		CreatedAt:    team.GetCreationTimestamp().Format("2006-01-02T15:04:05Z"),
 	})
@@ -232,7 +322,6 @@ func (h *TeamHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build Team CRD
 	team := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "butler.butlerlabs.dev/v1alpha1",
@@ -248,9 +337,7 @@ func (h *TeamHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Namespace != "" {
-		if err := unstructured.SetNestedField(team.Object, req.Namespace, "spec", "namespace"); err != nil {
-			h.logger.Error("Failed to set namespace", "error", err)
-		}
+		unstructured.SetNestedField(team.Object, req.Namespace, "spec", "namespace")
 	}
 
 	created, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Create(r.Context(), team, metav1.CreateOptions{})
@@ -289,7 +376,6 @@ func (h *TeamHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get existing team
 	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
@@ -301,7 +387,6 @@ func (h *TeamHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update fields
 	if req.DisplayName != "" {
 		unstructured.SetNestedField(team.Object, req.DisplayName, "spec", "displayName")
 	}
@@ -354,7 +439,6 @@ func (h *TeamHandler) Delete(w http.ResponseWriter, r *http.Request) {
 func (h *TeamHandler) ListClusters(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 
-	// Get team's cluster selector
 	selector, err := h.teamResolver.GetTeamClusterSelector(r.Context(), name)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
@@ -366,16 +450,13 @@ func (h *TeamHandler) ListClusters(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build label selector string
 	var labelParts []string
 	for k, v := range selector {
 		labelParts = append(labelParts, k+"="+v)
 	}
-	labelSelector := strings.Join(labelParts, ",")
 
-	// List clusters with label selector
 	clusters, err := h.k8sClient.Dynamic().Resource(k8s.TenantClusterGVR).List(r.Context(), metav1.ListOptions{
-		LabelSelector: labelSelector,
+		LabelSelector: strings.Join(labelParts, ","),
 	})
 	if err != nil {
 		h.logger.Error("Failed to list team clusters", "name", name, "error", err)
@@ -388,30 +469,25 @@ func (h *TeamHandler) ListClusters(w http.ResponseWriter, r *http.Request) {
 		response = append(response, cluster.Object)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"clusters": response,
-	})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"clusters": response})
 }
 
-// ListMembers returns members of a team.
+// ListMembers returns members of a team including both explicit users and group-synced users.
 // GET /api/teams/{name}/members
 func (h *TeamHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 
-	// Check if requesting user has access to this team
 	user := auth.UserFromContext(r.Context())
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "Not authenticated")
 		return
 	}
 
-	// User must be a member of the team to view members (or be admin)
-	if !user.HasTeamMembership(name) && !user.IsAdmin() {
+	if !user.HasTeamMembership(name) && !user.IsPlatformAdmin {
 		writeError(w, http.StatusForbidden, "Access denied to team")
 		return
 	}
 
-	// Get the team CRD
 	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
@@ -423,43 +499,120 @@ func (h *TeamHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract spec.access.users[]
-	users, found, err := unstructured.NestedSlice(team.Object, "spec", "access", "users")
-	if err != nil {
-		h.logger.Error("Failed to get team users", "name", name, "error", err)
-		writeError(w, http.StatusInternalServerError, "Failed to get team members")
-		return
+	groups := getTeamGroups(team)
+
+	// findUserGroupAccess checks group access for an email.
+	// For the current user, we use actual IdP groups. For others, we use domain matching.
+	findUserGroupAccess := func(email string) (bool, string, string) {
+		if user == nil || !strings.EqualFold(user.Email, email) {
+			return findPotentialGroupAccess(email, groups)
+		}
+
+		var hasAccess bool
+		var groupName, groupRole string
+		for _, userGroup := range user.Groups {
+			userGroupLower := strings.ToLower(userGroup)
+			for _, teamGroup := range groups {
+				teamGroupLower := strings.ToLower(teamGroup.Name)
+				if userGroupLower == teamGroupLower ||
+					strings.HasPrefix(userGroupLower, teamGroupLower+"@") ||
+					strings.HasPrefix(teamGroupLower, userGroupLower+"@") ||
+					strings.Contains(userGroupLower, teamGroupLower) ||
+					strings.Contains(teamGroupLower, userGroupLower) {
+					if !hasAccess || isHigherRole(teamGroup.Role, groupRole) {
+						hasAccess = true
+						groupName = teamGroup.Name
+						groupRole = teamGroup.Role
+					}
+				}
+			}
+		}
+		return hasAccess, groupName, groupRole
 	}
 
+	seenEmails := make(map[string]bool)
 	members := make([]TeamMemberResponse, 0)
-	if found {
-		for _, u := range users {
-			userMap, ok := u.(map[string]interface{})
-			if !ok {
-				continue
-			}
 
-			email, _, _ := unstructured.NestedString(userMap, "name")
-			role, _, _ := unstructured.NestedString(userMap, "role")
-			displayName, _, _ := unstructured.NestedString(userMap, "displayName")
+	// Process explicit members from spec.access.users
+	usersSlice, _, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users")
+	for _, u := range usersSlice {
+		userMap, ok := u.(map[string]interface{})
+		if !ok {
+			continue
+		}
 
-			if email == "" {
-				continue
-			}
-			if role == "" {
-				role = auth.RoleViewer
-			}
+		email, _, _ := unstructured.NestedString(userMap, "name")
+		directRole, _, _ := unstructured.NestedString(userMap, "role")
+		displayName, _, _ := unstructured.NestedString(userMap, "displayName")
 
-			members = append(members, TeamMemberResponse{
-				Email: email,
-				Name:  displayName,
-				Role:  role,
-			})
+		if email == "" {
+			continue
+		}
+		if directRole == "" {
+			directRole = auth.RoleViewer
+		}
+
+		emailLower := strings.ToLower(email)
+		seenEmails[emailLower] = true
+
+		hasGroupAccess, groupName, groupRole := findUserGroupAccess(email)
+
+		member := TeamMemberResponse{
+			Email: email,
+			Name:  displayName,
+		}
+
+		if hasGroupAccess && isHigherRole(directRole, groupRole) {
+			// Elevated: has group access but direct role is higher
+			member.Role = directRole
+			member.Source = "elevated"
+			member.GroupName = groupName
+			member.GroupRole = groupRole
+			member.DirectRole = directRole
+			member.CanRemove = true
+			member.RemoveNote = "Will revert to " + groupRole + " via " + groupName
+		} else if hasGroupAccess {
+			// Group access at same or higher level (shouldn't happen with Option A enforcement)
+			member.Role = groupRole
+			member.Source = "group"
+			member.GroupName = groupName
+			member.GroupRole = groupRole
+			member.DirectRole = directRole
+			member.CanRemove = true
+			member.RemoveNote = "Redundant direct membership"
+		} else {
+			// Direct only
+			member.Role = directRole
+			member.Source = "direct"
+			member.CanRemove = email != user.Email
+		}
+
+		members = append(members, member)
+	}
+
+	// Add current user if they have group access but no direct membership
+	if user.Email != "" {
+		emailLower := strings.ToLower(user.Email)
+		if !seenEmails[emailLower] && user.HasTeamMembership(name) {
+			hasGroupAccess, groupName, groupRole := findUserGroupAccess(user.Email)
+			if hasGroupAccess {
+				members = append(members, TeamMemberResponse{
+					Email:      user.Email,
+					Name:       user.Name,
+					Role:       groupRole,
+					Source:     "group",
+					GroupName:  groupName,
+					GroupRole:  groupRole,
+					CanRemove:  false,
+					RemoveNote: "Access via group membership",
+				})
+			}
 		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"members": members,
+		"groups":  groups,
 	})
 }
 
@@ -470,6 +623,8 @@ type AddMemberRequest struct {
 }
 
 // AddMember adds a member to a team.
+// If the user has group access at same/lower role, the request is rejected.
+// If the user has group access at a lower role, they can be added with a higher role (elevation).
 // POST /api/admin/teams/{name}/members
 func (h *TeamHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
@@ -489,13 +644,11 @@ func (h *TeamHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 		req.Role = auth.RoleViewer
 	}
 
-	// Validate role
 	if req.Role != auth.RoleAdmin && req.Role != auth.RoleOperator && req.Role != auth.RoleViewer {
 		writeError(w, http.StatusBadRequest, "Invalid role. Must be admin, operator, or viewer")
 		return
 	}
 
-	// Get existing team
 	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
@@ -507,13 +660,12 @@ func (h *TeamHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get existing users
 	users, _, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users")
 	if users == nil {
 		users = []interface{}{}
 	}
 
-	// Check if user already exists
+	// Check if user already exists as direct member
 	emailLower := strings.ToLower(req.Email)
 	for _, u := range users {
 		userMap, ok := u.(map[string]interface{})
@@ -522,25 +674,38 @@ func (h *TeamHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 		}
 		existingEmail, _, _ := unstructured.NestedString(userMap, "name")
 		if strings.EqualFold(existingEmail, emailLower) {
-			writeError(w, http.StatusConflict, "User is already a member of this team")
+			writeError(w, http.StatusConflict, "User is already a direct member. Use the role dropdown to change their role.")
 			return
 		}
 	}
 
-	// Add new user
+	// Check for potential group access (Option A: block redundant, allow elevation)
+	groups := getTeamGroups(team)
+	hasGroupAccess, groupName, groupRole := findPotentialGroupAccess(req.Email, groups)
+
+	if hasGroupAccess {
+		if !isHigherRole(req.Role, groupRole) {
+			writeError(w, http.StatusConflict,
+				"User may already have "+groupRole+" access via "+groupName+". "+
+					"To elevate their role, add them with a higher role.")
+			return
+		}
+		h.logger.Info("Creating elevated membership",
+			"team", name, "email", req.Email, "directRole", req.Role,
+			"groupRole", groupRole, "groupName", groupName)
+	}
+
 	newUser := map[string]interface{}{
 		"name": emailLower,
 		"role": req.Role,
 	}
 	users = append(users, newUser)
 
-	// Ensure spec.access exists
 	access, _, _ := unstructured.NestedMap(team.Object, "spec", "access")
 	if access == nil {
 		unstructured.SetNestedMap(team.Object, map[string]interface{}{}, "spec", "access")
 	}
 
-	// Update team
 	if err := unstructured.SetNestedSlice(team.Object, users, "spec", "access", "users"); err != nil {
 		h.logger.Error("Failed to update team users", "name", name, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to add member")
@@ -554,12 +719,20 @@ func (h *TeamHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.logger.Info("Member added to team", "team", name, "email", req.Email, "role", req.Role)
-	writeJSON(w, http.StatusCreated, map[string]string{
+	response := map[string]interface{}{
 		"status": "added",
 		"email":  req.Email,
 		"role":   req.Role,
-	})
+	}
+
+	if hasGroupAccess {
+		response["elevated"] = true
+		response["groupName"] = groupName
+		response["groupRole"] = groupRole
+	}
+
+	h.logger.Info("Member added to team", "team", name, "email", req.Email, "role", req.Role)
+	writeJSON(w, http.StatusCreated, response)
 }
 
 // UpdateMemberRoleRequest represents the request body for updating a member's role.
@@ -573,7 +746,6 @@ func (h *TeamHandler) UpdateMemberRole(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	email := chi.URLParam(r, "email")
 
-	// URL decode the email
 	decodedEmail, err := url.QueryUnescape(email)
 	if err != nil {
 		decodedEmail = email
@@ -590,13 +762,11 @@ func (h *TeamHandler) UpdateMemberRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate role
 	if req.Role != auth.RoleAdmin && req.Role != auth.RoleOperator && req.Role != auth.RoleViewer {
 		writeError(w, http.StatusBadRequest, "Invalid role. Must be admin, operator, or viewer")
 		return
 	}
 
-	// Get existing team
 	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
@@ -608,14 +778,12 @@ func (h *TeamHandler) UpdateMemberRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get existing users
 	users, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users")
 	if !found || users == nil {
 		writeError(w, http.StatusNotFound, "Member not found")
 		return
 	}
 
-	// Find and update user
 	memberFound := false
 	for i, u := range users {
 		userMap, ok := u.(map[string]interface{})
@@ -636,7 +804,6 @@ func (h *TeamHandler) UpdateMemberRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update team
 	if err := unstructured.SetNestedSlice(team.Object, users, "spec", "access", "users"); err != nil {
 		h.logger.Error("Failed to update team users", "name", name, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to update member role")
@@ -659,18 +826,17 @@ func (h *TeamHandler) UpdateMemberRole(w http.ResponseWriter, r *http.Request) {
 }
 
 // RemoveMember removes a member from a team.
+// If the user has group access, they will retain that access after removal.
 // DELETE /api/admin/teams/{name}/members/{email}
 func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	email := chi.URLParam(r, "email")
 
-	// URL decode the email
 	decodedEmail, err := url.QueryUnescape(email)
 	if err != nil {
 		decodedEmail = email
 	}
 
-	// Get existing team
 	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
@@ -682,14 +848,16 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get existing users
+	// Check for group access to inform response
+	groups := getTeamGroups(team)
+	hasGroupAccess, groupName, groupRole := findPotentialGroupAccess(decodedEmail, groups)
+
 	users, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users")
 	if !found || users == nil {
 		writeError(w, http.StatusNotFound, "Member not found")
 		return
 	}
 
-	// Find and remove user
 	memberFound := false
 	newUsers := make([]interface{}, 0, len(users)-1)
 	for _, u := range users {
@@ -701,7 +869,7 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		existingEmail, _, _ := unstructured.NestedString(userMap, "name")
 		if strings.EqualFold(existingEmail, decodedEmail) {
 			memberFound = true
-			continue // Skip this user (remove)
+			continue
 		}
 		newUsers = append(newUsers, u)
 	}
@@ -711,7 +879,6 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update team
 	if err := unstructured.SetNestedSlice(team.Object, newUsers, "spec", "access", "users"); err != nil {
 		h.logger.Error("Failed to update team users", "name", name, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to remove member")
@@ -725,9 +892,359 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.logger.Info("Member removed from team", "team", name, "email", decodedEmail)
-	writeJSON(w, http.StatusOK, map[string]string{
+	response := map[string]interface{}{
 		"status": "removed",
 		"email":  decodedEmail,
+	}
+
+	if hasGroupAccess {
+		response["retainsAccess"] = true
+		response["groupName"] = groupName
+		response["groupRole"] = groupRole
+	}
+
+	h.logger.Info("Member removed from team", "team", name, "email", decodedEmail, "retainsGroupAccess", hasGroupAccess)
+	writeJSON(w, http.StatusOK, response)
+}
+
+// GroupSyncResponse represents a group sync entry in API responses.
+type GroupSyncResponse struct {
+	Name             string `json:"name"`
+	Role             string `json:"role"`
+	IdentityProvider string `json:"identityProvider,omitempty"`
+}
+
+// ListGroupSyncs returns all group sync entries for a team.
+// GET /api/teams/{name}/groups
+func (h *TeamHandler) ListGroupSyncs(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "Team not found")
+			return
+		}
+		h.logger.Error("Failed to get team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get team")
+		return
+	}
+
+	groups, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "groups")
+	if !found {
+		groups = []interface{}{}
+	}
+
+	response := make([]GroupSyncResponse, 0, len(groups))
+	for _, g := range groups {
+		group, ok := g.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		groupName, _, _ := unstructured.NestedString(group, "name")
+		role, _, _ := unstructured.NestedString(group, "role")
+		idp, _, _ := unstructured.NestedString(group, "identityProvider")
+
+		if groupName == "" {
+			continue
+		}
+		if role == "" {
+			role = auth.RoleViewer
+		}
+
+		response = append(response, GroupSyncResponse{
+			Name:             groupName,
+			Role:             role,
+			IdentityProvider: idp,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"groups": response})
+}
+
+// AddGroupSyncRequest represents the request body for adding a group sync.
+type AddGroupSyncRequest struct {
+	Name             string `json:"name"`
+	Role             string `json:"role"`
+	IdentityProvider string `json:"identityProvider,omitempty"`
+}
+
+// AddGroupSync adds a group sync entry to a team.
+// POST /api/admin/teams/{name}/groups
+func (h *TeamHandler) AddGroupSync(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	var req AddGroupSyncRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "Group name is required")
+		return
+	}
+
+	if req.Role == "" {
+		req.Role = auth.RoleViewer
+	}
+
+	if req.Role != auth.RoleAdmin && req.Role != auth.RoleOperator && req.Role != auth.RoleViewer {
+		writeError(w, http.StatusBadRequest, "Invalid role. Must be admin, operator, or viewer")
+		return
+	}
+
+	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "Team not found")
+			return
+		}
+		h.logger.Error("Failed to get team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get team")
+		return
+	}
+
+	// Validate identity provider if specified
+	if req.IdentityProvider != "" {
+		_, err := h.k8sClient.Dynamic().Resource(auth.IdentityProviderGVR).Get(r.Context(), req.IdentityProvider, metav1.GetOptions{})
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				writeError(w, http.StatusBadRequest, "Identity provider '"+req.IdentityProvider+"' not found")
+				return
+			}
+			h.logger.Error("Failed to validate identity provider", "name", req.IdentityProvider, "error", err)
+			writeError(w, http.StatusInternalServerError, "Failed to validate identity provider")
+			return
+		}
+	}
+
+	groups, _, _ := unstructured.NestedSlice(team.Object, "spec", "access", "groups")
+	if groups == nil {
+		groups = []interface{}{}
+	}
+
+	// Check for duplicate
+	groupNameLower := strings.ToLower(req.Name)
+	idpLower := strings.ToLower(req.IdentityProvider)
+	for _, g := range groups {
+		groupMap, ok := g.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		existingName, _, _ := unstructured.NestedString(groupMap, "name")
+		existingIdP, _, _ := unstructured.NestedString(groupMap, "identityProvider")
+		if strings.EqualFold(existingName, groupNameLower) && strings.EqualFold(existingIdP, idpLower) {
+			writeError(w, http.StatusConflict, "Group sync already exists for this group and identity provider")
+			return
+		}
+	}
+
+	newGroup := map[string]interface{}{
+		"name": req.Name,
+		"role": req.Role,
+	}
+	if req.IdentityProvider != "" {
+		newGroup["identityProvider"] = req.IdentityProvider
+	}
+	groups = append(groups, newGroup)
+
+	access, _, _ := unstructured.NestedMap(team.Object, "spec", "access")
+	if access == nil {
+		unstructured.SetNestedMap(team.Object, map[string]interface{}{}, "spec", "access")
+	}
+
+	if err := unstructured.SetNestedSlice(team.Object, groups, "spec", "access", "groups"); err != nil {
+		h.logger.Error("Failed to update team groups", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to add group sync")
+		return
+	}
+
+	_, err = h.k8sClient.Dynamic().Resource(auth.TeamGVR).Update(r.Context(), team, metav1.UpdateOptions{})
+	if err != nil {
+		h.logger.Error("Failed to update team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to add group sync")
+		return
+	}
+
+	h.logger.Info("Group sync added to team", "team", name, "group", req.Name, "role", req.Role, "idp", req.IdentityProvider)
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"status":           "added",
+		"name":             req.Name,
+		"role":             req.Role,
+		"identityProvider": req.IdentityProvider,
+	})
+}
+
+// RemoveGroupSync removes a group sync entry from a team.
+// DELETE /api/admin/teams/{name}/groups/{groupName}?idp=<identityProvider>
+func (h *TeamHandler) RemoveGroupSync(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	groupName := chi.URLParam(r, "groupName")
+	idpFilter := r.URL.Query().Get("idp")
+
+	decodedGroupName, err := url.QueryUnescape(groupName)
+	if err != nil {
+		decodedGroupName = groupName
+	}
+
+	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "Team not found")
+			return
+		}
+		h.logger.Error("Failed to get team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get team")
+		return
+	}
+
+	groups, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "groups")
+	if !found || groups == nil {
+		writeError(w, http.StatusNotFound, "Group sync not found")
+		return
+	}
+
+	groupFound := false
+	newGroups := make([]interface{}, 0, len(groups)-1)
+	for _, g := range groups {
+		groupMap, ok := g.(map[string]interface{})
+		if !ok {
+			newGroups = append(newGroups, g)
+			continue
+		}
+		existingName, _, _ := unstructured.NestedString(groupMap, "name")
+		existingIdP, _, _ := unstructured.NestedString(groupMap, "identityProvider")
+
+		if strings.EqualFold(existingName, decodedGroupName) {
+			if idpFilter != "" && !strings.EqualFold(existingIdP, idpFilter) {
+				newGroups = append(newGroups, g)
+				continue
+			}
+			groupFound = true
+			continue
+		}
+		newGroups = append(newGroups, g)
+	}
+
+	if !groupFound {
+		writeError(w, http.StatusNotFound, "Group sync not found")
+		return
+	}
+
+	if err := unstructured.SetNestedSlice(team.Object, newGroups, "spec", "access", "groups"); err != nil {
+		h.logger.Error("Failed to update team groups", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to remove group sync")
+		return
+	}
+
+	_, err = h.k8sClient.Dynamic().Resource(auth.TeamGVR).Update(r.Context(), team, metav1.UpdateOptions{})
+	if err != nil {
+		h.logger.Error("Failed to update team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to remove group sync")
+		return
+	}
+
+	h.logger.Info("Group sync removed from team", "team", name, "group", decodedGroupName)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "removed",
+		"name":   decodedGroupName,
+	})
+}
+
+// UpdateGroupSyncRequest represents the request body for updating a group sync's role.
+type UpdateGroupSyncRequest struct {
+	Role string `json:"role"`
+}
+
+// UpdateGroupSyncRole updates a group sync's role.
+// PATCH /api/admin/teams/{name}/groups/{groupName}?idp=<identityProvider>
+func (h *TeamHandler) UpdateGroupSyncRole(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	groupName := chi.URLParam(r, "groupName")
+	idpFilter := r.URL.Query().Get("idp")
+
+	decodedGroupName, err := url.QueryUnescape(groupName)
+	if err != nil {
+		decodedGroupName = groupName
+	}
+
+	var req UpdateGroupSyncRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Role == "" {
+		writeError(w, http.StatusBadRequest, "Role is required")
+		return
+	}
+
+	if req.Role != auth.RoleAdmin && req.Role != auth.RoleOperator && req.Role != auth.RoleViewer {
+		writeError(w, http.StatusBadRequest, "Invalid role. Must be admin, operator, or viewer")
+		return
+	}
+
+	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "Team not found")
+			return
+		}
+		h.logger.Error("Failed to get team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get team")
+		return
+	}
+
+	groups, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "groups")
+	if !found || groups == nil {
+		writeError(w, http.StatusNotFound, "Group sync not found")
+		return
+	}
+
+	groupFound := false
+	for i, g := range groups {
+		groupMap, ok := g.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		existingName, _, _ := unstructured.NestedString(groupMap, "name")
+		existingIdP, _, _ := unstructured.NestedString(groupMap, "identityProvider")
+
+		if strings.EqualFold(existingName, decodedGroupName) {
+			if idpFilter != "" && !strings.EqualFold(existingIdP, idpFilter) {
+				continue
+			}
+			groupMap["role"] = req.Role
+			groups[i] = groupMap
+			groupFound = true
+			break
+		}
+	}
+
+	if !groupFound {
+		writeError(w, http.StatusNotFound, "Group sync not found")
+		return
+	}
+
+	if err := unstructured.SetNestedSlice(team.Object, groups, "spec", "access", "groups"); err != nil {
+		h.logger.Error("Failed to update team groups", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to update group sync role")
+		return
+	}
+
+	_, err = h.k8sClient.Dynamic().Resource(auth.TeamGVR).Update(r.Context(), team, metav1.UpdateOptions{})
+	if err != nil {
+		h.logger.Error("Failed to update team", "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to update group sync role")
+		return
+	}
+
+	h.logger.Info("Group sync role updated", "team", name, "group", decodedGroupName, "role", req.Role)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status": "updated",
+		"name":   decodedGroupName,
+		"role":   req.Role,
 	})
 }

@@ -60,6 +60,18 @@ type UserSession struct {
 	// - Users with spec.isPlatformAdmin=true in their User CRD
 	// Platform admins can manage all teams, users, clusters, and settings.
 	IsPlatformAdmin bool `json:"isPlatformAdmin,omitempty"`
+
+	// SelectedTeam is the team context from X-Butler-Team header.
+	// When set, even platform admins are scoped to this team's permissions
+	// for tenant resource operations (clusters, providers).
+	// This is NOT persisted in JWT - it's set per-request by middleware.
+	SelectedTeam string `json:"-"`
+
+	// SelectedTeamRole is the user's role in the selected team.
+	// Empty if no team is selected or user doesn't have membership.
+	// For platform admins without explicit membership, this defaults to "admin".
+	// This is NOT persisted in JWT - it's set per-request by middleware.
+	SelectedTeamRole string `json:"-"`
 }
 
 // SessionClaims are the JWT claims for a user session.
@@ -233,6 +245,31 @@ func (u *UserSession) CanViewTeam(teamName string) bool {
 		return true
 	}
 	return u.HasTeamMembership(teamName)
+}
+
+// CanOperateInSelectedTeam checks if the user can perform operations
+// based on their role in the currently selected team context.
+// This is the primary authorization check for tenant resource mutations.
+func (u *UserSession) CanOperateInSelectedTeam() bool {
+	// No team selected - use legacy behavior (platform admin can do anything)
+	if u.SelectedTeam == "" {
+		return u.IsPlatformAdmin || u.HasRole(RoleAdmin) || u.HasRole(RoleOperator)
+	}
+
+	// Team selected - check role in that team
+	return u.SelectedTeamRole == RoleAdmin || u.SelectedTeamRole == RoleOperator
+}
+
+// CanViewInSelectedTeam checks if the user can view resources
+// based on their role in the currently selected team context.
+func (u *UserSession) CanViewInSelectedTeam() bool {
+	// No team selected - use legacy behavior
+	if u.SelectedTeam == "" {
+		return u.IsPlatformAdmin || len(u.Teams) > 0
+	}
+
+	// Team selected - any role can view
+	return u.SelectedTeamRole != ""
 }
 
 // Role constants

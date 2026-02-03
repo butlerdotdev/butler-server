@@ -43,7 +43,8 @@ type SessionMiddlewareConfig struct {
 
 // SessionMiddleware validates the session token and re-resolves team membership on every request.
 // This ensures that when a user is removed from a team or disabled, they immediately lose access.
-// Platform admins bypass team checks entirely.
+// Platform admins bypass team membership checks but still respect team-scoped authorization
+// when X-Butler-Team header is present.
 func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -75,15 +76,41 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 				return
 			}
 
-			// Platform admins bypass all further checks
-			// They have full access to the entire platform regardless of team membership
+			// Read team context from header (sent by frontend when scoped to a team)
+			selectedTeam := r.Header.Get("X-Butler-Team")
+
+			// Platform admins path
 			if user.IsPlatformAdmin {
-				if cfg.Logger != nil {
-					cfg.Logger.Debug("Platform admin access granted",
-						"email", user.Email,
-						"subject", user.Subject,
-					)
+				// Set team context if provided - this enables team-scoped authorization
+				// even for platform admins when they're viewing a specific team
+				if selectedTeam != "" {
+					user.SelectedTeam = selectedTeam
+					// Find user's actual role in this team (might be from group sync)
+					membership := findTeamMembership(user.Teams, selectedTeam)
+					if membership != nil {
+						user.SelectedTeamRole = membership.Role
+					} else {
+						// Platform admin without explicit membership gets admin role
+						// This allows platform admins to access any team
+						user.SelectedTeamRole = RoleAdmin
+					}
+
+					if cfg.Logger != nil {
+						cfg.Logger.Debug("Platform admin with team context",
+							"email", user.Email,
+							"selectedTeam", selectedTeam,
+							"selectedTeamRole", user.SelectedTeamRole,
+						)
+					}
+				} else {
+					if cfg.Logger != nil {
+						cfg.Logger.Debug("Platform admin access granted (no team scope)",
+							"email", user.Email,
+							"subject", user.Subject,
+						)
+					}
 				}
+
 				ctx := context.WithValue(r.Context(), userContextKey, user)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
@@ -136,11 +163,32 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 				return
 			}
 
+			// Set team context for non-platform-admins
+			if selectedTeam != "" {
+				membership := findTeamMembership(user.Teams, selectedTeam)
+				if membership != nil {
+					user.SelectedTeam = selectedTeam
+					user.SelectedTeamRole = membership.Role
+				}
+				// If user doesn't have membership in selected team, leave SelectedTeam empty
+				// This will cause authorization checks to fail appropriately
+			}
+
 			// Add user to context with fresh team data
 			ctx := context.WithValue(r.Context(), userContextKey, user)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// findTeamMembership finds a team membership by name from a list
+func findTeamMembership(teams []TeamMembership, teamName string) *TeamMembership {
+	for i := range teams {
+		if teams[i].Name == teamName {
+			return &teams[i]
+		}
+	}
+	return nil
 }
 
 // RequireTeam creates middleware that requires membership in a specific team.

@@ -171,7 +171,35 @@ func (h *IdentityProvidersHandler) Create(w http.ResponseWriter, r *http.Request
 	}
 	secretName := fmt.Sprintf("%s-oidc-secret", req.Name)
 
-	// Create the secret first
+	// Check if an IdentityProvider CRD already exists
+	_, err := h.k8sClient.Dynamic().Resource(IdentityProviderGVR).Get(ctx, req.Name, metav1.GetOptions{})
+	if err == nil {
+		writeError(w, http.StatusConflict, fmt.Sprintf(
+			"An identity provider named %q already exists. Delete it first before creating a new one with the same name.",
+			req.Name,
+		))
+		return
+	}
+
+	// Clean up any orphaned secret from a previous failed attempt
+	existingSecret, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err == nil {
+		// Secret exists — check if it's ours (managed by butler for this provider)
+		labels := existingSecret.GetLabels()
+		if labels["butler.butlerlabs.dev/identity-provider"] == req.Name {
+			// Orphaned secret from a previous failed creation — delete it so we can recreate cleanly
+			_ = h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Delete(ctx, secretName, metav1.DeleteOptions{})
+		} else {
+			// Secret exists but belongs to something else
+			writeError(w, http.StatusConflict, fmt.Sprintf(
+				"A secret named %q already exists in namespace %q but is not managed by Butler. Choose a different provider name or remove the conflicting secret.",
+				secretName, secretNamespace,
+			))
+			return
+		}
+	}
+
+	// Create the secret
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
@@ -187,13 +215,9 @@ func (h *IdentityProvidersHandler) Create(w http.ResponseWriter, r *http.Request
 		},
 	}
 
-	_, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Create(ctx, secret, metav1.CreateOptions{})
+	_, err = h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Create(ctx, secret, metav1.CreateOptions{})
 	if err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			writeError(w, http.StatusConflict, fmt.Sprintf("secret %q already exists", secretName))
-			return
-		}
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create secret: %v", err))
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create credentials secret: %v", err))
 		return
 	}
 
@@ -252,10 +276,13 @@ func (h *IdentityProvidersHandler) Create(w http.ResponseWriter, r *http.Request
 		_ = h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Delete(ctx, secretName, metav1.DeleteOptions{})
 
 		if apierrors.IsAlreadyExists(err) {
-			writeError(w, http.StatusConflict, fmt.Sprintf("identity provider %q already exists", req.Name))
+			writeError(w, http.StatusConflict, fmt.Sprintf(
+				"An identity provider named %q already exists. Delete it first before creating a new one.",
+				req.Name,
+			))
 			return
 		}
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create identity provider: %v", err))
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to create identity provider: %v", err))
 		return
 	}
 
@@ -263,45 +290,76 @@ func (h *IdentityProvidersHandler) Create(w http.ResponseWriter, r *http.Request
 }
 
 // Delete deletes an identity provider and its associated secret.
+// Handles partial state: if the CRD doesn't exist but an orphaned secret does, cleans up the secret.
 func (h *IdentityProvidersHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	ctx := r.Context()
 
-	// Get the IDP first to find the secret reference
-	idp, err := h.k8sClient.Dynamic().Resource(IdentityProviderGVR).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("identity provider %q not found", name))
-			return
-		}
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get identity provider: %v", err))
-		return
-	}
-
-	// Extract secret reference for cleanup
-	secretRef, _, _ := unstructured.NestedMap(idp.Object, "spec", "oidc", "clientSecretRef")
-	secretName, _ := secretRef["name"].(string)
-	secretNamespace, _ := secretRef["namespace"].(string)
+	secretNamespace := h.config.SystemNamespace
 	if secretNamespace == "" {
-		secretNamespace = h.config.SystemNamespace
-		if secretNamespace == "" {
-			secretNamespace = "butler-system"
-		}
+		secretNamespace = "butler-system"
 	}
 
-	// Delete the IdentityProvider
-	err = h.k8sClient.Dynamic().Resource(IdentityProviderGVR).Delete(ctx, name, metav1.DeleteOptions{})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete identity provider: %v", err))
+	// Try to get the IDP CRD
+	idp, err := h.k8sClient.Dynamic().Resource(IdentityProviderGVR).Get(ctx, name, metav1.GetOptions{})
+
+	if err != nil && apierrors.IsNotFound(err) {
+		// CRD doesn't exist — but check for orphaned secret by convention
+		conventionSecretName := fmt.Sprintf("%s-oidc-secret", name)
+		secret, secretErr := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, conventionSecretName, metav1.GetOptions{})
+		if secretErr == nil {
+			// Orphaned secret found — verify it's ours before deleting
+			labels := secret.GetLabels()
+			if labels["butler.butlerlabs.dev/identity-provider"] == name {
+				_ = h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Delete(ctx, conventionSecretName, metav1.DeleteOptions{})
+				writeJSON(w, http.StatusOK, map[string]string{
+					"status":  "cleaned",
+					"message": fmt.Sprintf("Identity provider %q was not found, but an orphaned secret was cleaned up. You can now recreate it.", name),
+				})
+				return
+			}
+		}
+
+		writeError(w, http.StatusNotFound, fmt.Sprintf(
+			"Identity provider %q not found. It may have already been deleted or was never fully created.",
+			name,
+		))
+		return
+	} else if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get identity provider: %v", err))
 		return
 	}
 
-	// Clean up the secret (best effort)
+	// CRD exists — extract secret reference for cleanup
+	secretName := ""
+	secretRef, _, _ := unstructured.NestedMap(idp.Object, "spec", "oidc", "clientSecretRef")
+	if secretRef != nil {
+		secretName, _ = secretRef["name"].(string)
+		if ns, ok := secretRef["namespace"].(string); ok && ns != "" {
+			secretNamespace = ns
+		}
+	}
+
+	// Delete the IdentityProvider CRD
+	err = h.k8sClient.Dynamic().Resource(IdentityProviderGVR).Delete(ctx, name, metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete identity provider: %v", err))
+		return
+	}
+
+	// Clean up the secret (best effort — don't fail if it's already gone)
 	if secretName != "" {
 		_ = h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Delete(ctx, secretName, metav1.DeleteOptions{})
+	} else {
+		// Fallback: try convention-based secret name
+		conventionSecretName := fmt.Sprintf("%s-oidc-secret", name)
+		_ = h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Delete(ctx, conventionSecretName, metav1.DeleteOptions{})
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "deleted",
+		"message": fmt.Sprintf("Identity provider %q and its credentials have been deleted.", name),
+	})
 }
 
 // TestDiscovery tests OIDC discovery for a given issuer URL.

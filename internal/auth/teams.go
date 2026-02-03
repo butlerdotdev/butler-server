@@ -59,19 +59,27 @@ func NewTeamResolver(client dynamic.Interface, logger *slog.Logger) *TeamResolve
 }
 
 // ResolveTeams resolves all team memberships for a user based on their email and IdP groups.
-// It checks both manual team membership and group mappings from IdentityProviders.
+// It checks both manual team membership (spec.access.users) and group sync (spec.access.groups).
 func (r *TeamResolver) ResolveTeams(ctx context.Context, email string, idpGroups []string) ([]TeamMembership, error) {
+	return r.ResolveTeamsWithIdP(ctx, email, idpGroups, "")
+}
+
+// ResolveTeamsWithIdP resolves team memberships with IdP-specific group matching.
+// The idpName parameter is optional - if provided, it restricts group matching to groups
+// configured for that specific identity provider. If empty, groups from any IdP are matched.
+func (r *TeamResolver) ResolveTeamsWithIdP(ctx context.Context, email string, idpGroups []string, idpName string) ([]TeamMembership, error) {
 	memberships := make(map[string]TeamMembership)
 
-	// 1. Check manual membership in Team CRDs
+	// 1. Check manual membership in Team CRDs (spec.access.users)
 	if err := r.resolveManualMemberships(ctx, email, memberships); err != nil {
 		r.logger.Warn("Failed to resolve manual team memberships", "error", err)
 		// Continue - don't fail completely if Team CRDs can't be read
 	}
 
-	// 2. Check group mappings from IdentityProvider CRDs
+	// 2. Check group sync from Team CRDs (spec.access.groups)
+	// This is the team-centric approach where groups are configured on teams, not on IdPs.
 	if len(idpGroups) > 0 {
-		if err := r.resolveGroupMappings(ctx, idpGroups, memberships); err != nil {
+		if err := r.resolveGroupMappings(ctx, idpGroups, idpName, memberships); err != nil {
 			r.logger.Warn("Failed to resolve group mappings", "error", err)
 			// Continue - don't fail completely
 		}
@@ -129,56 +137,153 @@ func (r *TeamResolver) resolveManualMemberships(ctx context.Context, email strin
 	return nil
 }
 
-// resolveGroupMappings checks IdentityProvider CRDs for group mappings.
-func (r *TeamResolver) resolveGroupMappings(ctx context.Context, idpGroups []string, memberships map[string]TeamMembership) error {
-	// Create a set of user's groups for quick lookup
+// normalizeGroupName extracts the base group name without domain suffix.
+// Examples:
+//   - "platform-engineering-viewer@butlerlabs.dev" -> "platform-engineering-viewer"
+//   - "platform-engineering-viewer" -> "platform-engineering-viewer"
+//   - "CN=DevOps,OU=Groups,DC=corp,DC=example,DC=com" -> "devops" (extracts CN)
+func normalizeGroupName(group string) string {
+	group = strings.TrimSpace(group)
+
+	// Handle LDAP DN format (CN=GroupName,OU=...)
+	if strings.HasPrefix(strings.ToUpper(group), "CN=") {
+		// Extract just the CN value
+		parts := strings.Split(group, ",")
+		if len(parts) > 0 {
+			cnPart := parts[0]
+			if idx := strings.Index(cnPart, "="); idx != -1 {
+				group = cnPart[idx+1:]
+			}
+		}
+	}
+
+	// Handle email-style groups (group@domain.com)
+	if idx := strings.LastIndex(group, "@"); idx != -1 {
+		group = group[:idx]
+	}
+
+	return strings.ToLower(group)
+}
+
+// buildGroupLookupSet creates a lookup set for user's IdP groups.
+// It stores multiple variations of each group for flexible matching:
+// - Original (lowercased)
+// - Normalized (without domain suffix)
+func buildGroupLookupSet(idpGroups []string) map[string]bool {
 	groupSet := make(map[string]bool)
+
 	for _, g := range idpGroups {
-		groupSet[strings.ToLower(g)] = true
+		// Store original (lowercased)
+		lower := strings.ToLower(g)
+		groupSet[lower] = true
+
+		// Store normalized version (without domain)
+		normalized := normalizeGroupName(g)
+		if normalized != lower {
+			groupSet[normalized] = true
+		}
 	}
 
-	// List all IdentityProvider CRDs (cluster-scoped)
-	idps, err := r.client.Resource(IdentityProviderGVR).List(ctx, metav1.ListOptions{})
+	return groupSet
+}
+
+// groupMatches checks if a configured group name matches any of the user's IdP groups.
+// This performs flexible matching that handles:
+// - Exact match (case-insensitive)
+// - Domain suffix differences (config has "group", IdP sends "group@domain.com")
+// - LDAP DN format (CN=group,OU=...)
+func (r *TeamResolver) groupMatches(configuredGroup string, groupSet map[string]bool) bool {
+	// Normalize the configured group name
+	normalizedConfig := normalizeGroupName(configuredGroup)
+
+	// Check if the normalized configured group is in our lookup set
+	if groupSet[normalizedConfig] {
+		return true
+	}
+
+	// Also try exact match with original configured group (lowercased)
+	if groupSet[strings.ToLower(configuredGroup)] {
+		return true
+	}
+
+	return false
+}
+
+// resolveGroupMappings checks Team CRDs for group-based access (spec.access.groups).
+// This is the team-centric approach where groups are configured on teams.
+// The idpName parameter is optional - if provided, only groups matching that IdP are considered.
+func (r *TeamResolver) resolveGroupMappings(ctx context.Context, idpGroups []string, idpName string, memberships map[string]TeamMembership) error {
+	// Build a flexible lookup set for the user's groups
+	groupSet := buildGroupLookupSet(idpGroups)
+
+	r.logger.Debug("Group matching lookup set",
+		"idpGroups", idpGroups,
+		"normalizedSet", groupSet,
+	)
+
+	// List all Team CRDs (cluster-scoped)
+	teams, err := r.client.Resource(TeamGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to list identity providers: %w", err)
+		return fmt.Errorf("failed to list teams: %w", err)
 	}
 
-	for _, idp := range idps.Items {
-		// Check spec.groupMapping[]
-		mappings, found, err := unstructured.NestedSlice(idp.Object, "spec", "groupMapping")
+	for _, team := range teams.Items {
+		teamName := team.GetName()
+
+		// Check spec.access.groups[]
+		groups, found, err := unstructured.NestedSlice(team.Object, "spec", "access", "groups")
 		if err != nil || !found {
 			continue
 		}
 
-		for _, m := range mappings {
-			mapping, ok := m.(map[string]interface{})
+		for _, g := range groups {
+			group, ok := g.(map[string]interface{})
 			if !ok {
 				continue
 			}
 
-			// Get IdP group name
-			idpGroup, _, _ := unstructured.NestedString(mapping, "idpGroup")
-			if idpGroup == "" {
+			// Get group name
+			groupName, _, _ := unstructured.NestedString(group, "name")
+			if groupName == "" {
 				continue
 			}
 
-			// Check if user is in this group (case-insensitive)
-			if !groupSet[strings.ToLower(idpGroup)] {
+			// Check if this group is IdP-specific
+			groupIdP, _, _ := unstructured.NestedString(group, "identityProvider")
+
+			// If the group specifies an IdP and we know the user's IdP, check they match
+			if groupIdP != "" && idpName != "" {
+				if !strings.EqualFold(groupIdP, idpName) {
+					continue // Skip - group is for a different IdP
+				}
+			}
+
+			// Check if user is in this group using flexible matching
+			if !r.groupMatches(groupName, groupSet) {
+				r.logger.Debug("Group sync no match",
+					"team", teamName,
+					"configuredGroup", groupName,
+					"normalizedConfig", normalizeGroupName(groupName),
+				)
 				continue
 			}
 
-			// Get target team and role
-			team, _, _ := unstructured.NestedString(mapping, "team")
-			role, _, _ := unstructured.NestedString(mapping, "role")
-			if team == "" {
-				continue
-			}
+			// Get role
+			role, _, _ := unstructured.NestedString(group, "role")
 			if role == "" {
 				role = RoleViewer
 			}
 
 			// Add or upgrade membership
-			r.addMembership(memberships, team, role)
+			r.addMembership(memberships, teamName, role)
+
+			r.logger.Debug("Group sync matched",
+				"team", teamName,
+				"configuredGroup", groupName,
+				"groupIdP", groupIdP,
+				"userIdP", idpName,
+				"role", role,
+			)
 		}
 	}
 
@@ -273,7 +378,6 @@ func (r *TeamResolver) ListTeamsForUser(ctx context.Context, email string, idpGr
 }
 
 // TeamInfo contains information about a team for display purposes.
-// TeamInfo contains information about a team for display purposes.
 type TeamInfo struct {
 	Name         string `json:"name"`
 	DisplayName  string `json:"displayName"`
@@ -356,4 +460,51 @@ func (r *TeamResolver) ListAllMembers(ctx context.Context) map[string]*MemberInf
 	}
 
 	return members
+}
+
+// GroupSyncEntry represents a group sync configuration for a team.
+type GroupSyncEntry struct {
+	Name             string `json:"name"`
+	Role             string `json:"role"`
+	IdentityProvider string `json:"identityProvider,omitempty"`
+}
+
+// GetTeamGroupSyncs returns all group sync entries for a team.
+func (r *TeamResolver) GetTeamGroupSyncs(ctx context.Context, teamName string) ([]GroupSyncEntry, error) {
+	team, err := r.client.Resource(TeamGVR).Get(ctx, teamName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get team %s: %w", teamName, err)
+	}
+
+	groups, found, err := unstructured.NestedSlice(team.Object, "spec", "access", "groups")
+	if err != nil || !found {
+		return []GroupSyncEntry{}, nil
+	}
+
+	result := make([]GroupSyncEntry, 0, len(groups))
+	for _, g := range groups {
+		group, ok := g.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		name, _, _ := unstructured.NestedString(group, "name")
+		role, _, _ := unstructured.NestedString(group, "role")
+		idp, _, _ := unstructured.NestedString(group, "identityProvider")
+
+		if name == "" {
+			continue
+		}
+		if role == "" {
+			role = RoleViewer
+		}
+
+		result = append(result, GroupSyncEntry{
+			Name:             name,
+			Role:             role,
+			IdentityProvider: idp,
+		})
+	}
+
+	return result, nil
 }

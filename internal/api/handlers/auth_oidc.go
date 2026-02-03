@@ -137,6 +137,14 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.logger.Info("OIDC claims received",
+		"email", claims.Email,
+		"name", claims.Name,
+		"subject", claims.Subject,
+		"groups", claims.Groups,
+		"groupsCount", len(claims.Groups),
+	)
+
 	// IMPORTANT: Ensure User CRD exists for this SSO user
 	// This is called on EVERY SSO login to create/update the user record
 	var isPlatformAdmin bool
@@ -405,6 +413,88 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "refreshed"})
+}
+
+// RefreshPermissions re-resolves team memberships and updates the session.
+// This should be called when a user's permissions have changed (e.g., role elevation).
+// POST /api/auth/refresh-permissions
+func (h *AuthHandler) RefreshPermissions(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "Not authenticated")
+		return
+	}
+
+	h.logger.Info("Refreshing permissions - BEFORE",
+		"email", user.Email,
+		"groups", user.Groups,
+		"groupsCount", len(user.Groups),
+		"currentTeams", user.Teams,
+		"currentTeamsCount", len(user.Teams),
+	)
+
+	// Re-resolve team memberships using current user info
+	teams, err := h.teamResolver.ResolveTeams(r.Context(), user.Email, user.Groups)
+	if err != nil {
+		h.logger.Error("Failed to refresh team memberships", "email", user.Email, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to refresh permissions")
+		return
+	}
+
+	h.logger.Info("Refreshing permissions - AFTER ResolveTeams",
+		"email", user.Email,
+		"resolvedTeams", teams,
+		"resolvedTeamsCount", len(teams),
+	)
+
+	// Check if user is disabled (in case that changed)
+	userCRD, err := h.userService.GetUserByEmail(r.Context(), user.Email)
+	if err == nil && userCRD != nil {
+		if userCRD.Disabled {
+			h.logger.Warn("Disabled user tried to refresh permissions", "email", user.Email)
+			writeError(w, http.StatusForbidden, "Account is disabled")
+			return
+		}
+		// Update platform admin status from User CRD
+		user.IsPlatformAdmin = userCRD.IsPlatformAdmin
+	}
+
+	// Update user's team memberships
+	user.Teams = teams
+
+	// Create new session with updated data
+	token, err := h.sessionService.CreateSession(user)
+	if err != nil {
+		h.logger.Error("Failed to create session", "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to refresh permissions")
+		return
+	}
+
+	// Set updated session cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     "butler_session",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   r.TLS != nil || h.config.Auth.SecureCookies,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(h.config.Auth.SessionExpiry.Seconds()),
+	})
+
+	h.logger.Info("Permissions refreshed",
+		"email", user.Email,
+		"teams", len(teams),
+		"isPlatformAdmin", user.IsPlatformAdmin,
+	)
+
+	// Return updated user info (same format as /api/auth/me)
+	writeJSON(w, http.StatusOK, UserResponse{
+		Email:           user.Email,
+		Name:            user.Name,
+		Picture:         user.Picture,
+		Teams:           teams,
+		IsPlatformAdmin: user.IsPlatformAdmin,
+	})
 }
 
 // Me returns the current user's information.
