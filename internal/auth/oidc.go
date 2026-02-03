@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -61,14 +62,23 @@ type OIDCConfig struct {
 
 	// EmailClaim is the JWT claim containing the user's email (default: "email")
 	EmailClaim string
+
+	// DisplayName is the display name for this provider (e.g., "Google", "Okta")
+	DisplayName string
+
+	// GoogleWorkspace holds optional Google Admin SDK config for fetching groups.
+	// Required for Google Workspace because OIDC tokens don't include groups.
+	GoogleWorkspace *GoogleGroupsConfig
 }
 
 // OIDCProvider handles OIDC authentication flows.
 type OIDCProvider struct {
-	config       *OIDCConfig
-	provider     *oidc.Provider
-	oauth2Config *oauth2.Config
-	verifier     *oidc.IDTokenVerifier
+	config        *OIDCConfig
+	provider      *oidc.Provider
+	oauth2Config  *oauth2.Config
+	verifier      *oidc.IDTokenVerifier
+	groupsFetcher *GoogleGroupsFetcher
+	logger        *slog.Logger
 }
 
 // OIDCClaims represents the claims extracted from an OIDC ID token.
@@ -84,9 +94,13 @@ type OIDCClaims struct {
 
 // NewOIDCProvider creates a new OIDC provider from configuration.
 // This performs OIDC Discovery to automatically configure endpoints.
-func NewOIDCProvider(ctx context.Context, cfg *OIDCConfig) (*OIDCProvider, error) {
+func NewOIDCProvider(ctx context.Context, cfg *OIDCConfig, logger *slog.Logger) (*OIDCProvider, error) {
 	if cfg == nil || cfg.IssuerURL == "" {
 		return nil, ErrOIDCNotConfigured
+	}
+
+	if logger == nil {
+		logger = slog.Default()
 	}
 
 	// Perform OIDC Discovery
@@ -115,12 +129,31 @@ func NewOIDCProvider(ctx context.Context, cfg *OIDCConfig) (*OIDCProvider, error
 		ClientID: cfg.ClientID,
 	})
 
-	return &OIDCProvider{
+	p := &OIDCProvider{
 		config:       cfg,
 		provider:     provider,
 		oauth2Config: oauth2Config,
 		verifier:     verifier,
-	}, nil
+		logger:       logger,
+	}
+
+	// Initialize Google Groups fetcher if configured
+	if cfg.GoogleWorkspace != nil {
+		fetcher, err := NewGoogleGroupsFetcher(ctx, cfg.GoogleWorkspace, logger)
+		if err != nil {
+			logger.Warn("Failed to initialize Google Groups fetcher - group sync disabled",
+				"error", err,
+			)
+		} else {
+			p.groupsFetcher = fetcher
+			logger.Info("Google Workspace group sync enabled",
+				"adminEmail", cfg.GoogleWorkspace.AdminEmail,
+				"domain", cfg.GoogleWorkspace.Domain,
+			)
+		}
+	}
+
+	return p, nil
 }
 
 // AuthCodeURL generates the URL to redirect users to for authentication.
@@ -178,6 +211,25 @@ func (p *OIDCProvider) Exchange(ctx context.Context, code string) (*OIDCClaims, 
 			claims.HostedDomain, p.config.HostedDomain)
 	}
 
+	// Fetch Google Workspace groups if configured and groups are empty
+	// This is the key integration point for Google Workspace group sync
+	if len(claims.Groups) == 0 && p.groupsFetcher != nil {
+		groups, err := p.groupsFetcher.FetchUserGroups(ctx, claims.Email)
+		if err != nil {
+			p.logger.Warn("Failed to fetch Google Workspace groups",
+				"email", claims.Email,
+				"error", err,
+			)
+		} else {
+			claims.Groups = groups
+			p.logger.Info("Populated groups from Google Workspace Admin SDK",
+				"email", claims.Email,
+				"groupCount", len(groups),
+				"groups", groups,
+			)
+		}
+	}
+
 	return claims, nil
 }
 
@@ -225,6 +277,9 @@ func (p *OIDCProvider) GetIssuer() string {
 
 // GetDisplayName returns a display name for this provider.
 func (p *OIDCProvider) GetDisplayName() string {
+	if p.config.DisplayName != "" {
+		return p.config.DisplayName
+	}
 	switch {
 	case contains(p.config.IssuerURL, "accounts.google.com"):
 		return "Google"
@@ -237,6 +292,11 @@ func (p *OIDCProvider) GetDisplayName() string {
 	default:
 		return "SSO"
 	}
+}
+
+// HasGroupSync returns true if Google Workspace group sync is configured.
+func (p *OIDCProvider) HasGroupSync() bool {
+	return p.groupsFetcher != nil
 }
 
 // generateState generates a cryptographically random state token.

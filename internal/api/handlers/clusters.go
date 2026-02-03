@@ -54,25 +54,69 @@ type ClusterListResponse struct {
 
 // checkClusterAccess verifies the user has access to a cluster based on its teamRef.
 // Returns nil if access is granted, or an error message if denied.
-// Admins have access to all clusters.
+// When team context is set, only allows access to clusters in that team.
 func (h *ClusterHandler) checkClusterAccess(user *auth.UserSession, cluster *unstructured.Unstructured) error {
+	// Get the cluster's team reference
+	clusterTeam, found, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+
+	// When user has team context selected, only allow access to clusters in that team
+	if user.SelectedTeam != "" {
+		if !found || clusterTeam == "" {
+			return fmt.Errorf("forbidden: cluster is not associated with any team")
+		}
+		if clusterTeam != user.SelectedTeam {
+			return fmt.Errorf("forbidden: cluster belongs to team '%s', not '%s'", clusterTeam, user.SelectedTeam)
+		}
+		return nil
+	}
+
+	// No team context - use legacy behavior
 	// Admins can access all clusters
 	if user.IsAdmin() {
 		return nil
 	}
 
-	// Get the cluster's team reference
-	teamRef, found, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
-
 	// If cluster has no teamRef, it's a platform-level cluster
 	// Only admins should see these (already checked above)
-	if !found || teamRef == "" {
+	if !found || clusterTeam == "" {
 		return fmt.Errorf("forbidden: cluster is not associated with any team")
 	}
 
 	// Check if user is a member of the cluster's team
-	if !user.HasTeamMembership(teamRef) {
-		return fmt.Errorf("forbidden: you don't have access to team '%s'", teamRef)
+	if !user.HasTeamMembership(clusterTeam) {
+		return fmt.Errorf("forbidden: you don't have access to team '%s'", clusterTeam)
+	}
+
+	return nil
+}
+
+// checkOperatePermission verifies the user can perform mutations (create/delete/scale).
+// Returns nil if allowed, or an error message if denied.
+func (h *ClusterHandler) checkOperatePermission(user *auth.UserSession, teamRef string, operation string) error {
+	// When team context is selected, enforce team role
+	if user.SelectedTeam != "" {
+		// Viewer role cannot perform mutations
+		if user.SelectedTeamRole == auth.RoleViewer {
+			return fmt.Errorf("viewer role cannot %s clusters", operation)
+		}
+		// Must be operating on selected team's cluster
+		if teamRef != "" && teamRef != user.SelectedTeam {
+			return fmt.Errorf("cannot %s cluster for team '%s' while scoped to team '%s'", operation, teamRef, user.SelectedTeam)
+		}
+		return nil
+	}
+
+	// No team context - use legacy behavior
+	if user.IsAdmin() {
+		return nil
+	}
+
+	// Non-admin without team context must specify team and have operator role
+	if teamRef == "" {
+		return fmt.Errorf("teamRef is required for non-admin users")
+	}
+	if !user.CanOperateTeam(teamRef) {
+		return fmt.Errorf("you don't have permission to %s clusters for team '%s'", operation, teamRef)
 	}
 
 	return nil
@@ -107,15 +151,21 @@ func (h *ClusterHandler) List(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Authorization check: non-admins can only see clusters from their teams
-		if user != nil && !user.IsAdmin() {
-			// Skip clusters without teamRef (platform-level)
-			if clusterTeam == "" {
-				continue
-			}
-			// Skip clusters from teams user doesn't belong to
-			if !user.HasTeamMembership(clusterTeam) {
-				continue
+		// Authorization check based on team context
+		if user != nil {
+			// When team context is selected, only show clusters from that team
+			if user.SelectedTeam != "" {
+				if clusterTeam != user.SelectedTeam {
+					continue
+				}
+			} else if !user.IsAdmin() {
+				// No team context and not admin - filter by team membership
+				if clusterTeam == "" {
+					continue
+				}
+				if !user.HasTeamMembership(clusterTeam) {
+					continue
+				}
 			}
 		}
 
@@ -177,14 +227,17 @@ func (h *ClusterHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Authorization: non-admins can only create clusters for teams they belong to
-	if user != nil && !user.IsAdmin() {
-		if req.TeamRef == "" {
-			writeError(w, http.StatusForbidden, "teamRef is required for non-admin users")
-			return
+	// Authorization: Check team-scoped permissions for cluster creation
+	if user != nil {
+		// When team context is set, auto-populate teamRef and enforce role
+		if user.SelectedTeam != "" {
+			if req.TeamRef == "" {
+				req.TeamRef = user.SelectedTeam
+			}
 		}
-		if !user.CanOperateTeam(req.TeamRef) {
-			writeError(w, http.StatusForbidden, fmt.Sprintf("you don't have permission to create clusters for team '%s'", req.TeamRef))
+
+		if err := h.checkOperatePermission(user, req.TeamRef, "create"); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
 	}
@@ -345,17 +398,16 @@ func (h *ClusterHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SECURITY: Check team access before allowing delete
+	// SECURITY: Check team access and operate permission
 	if user != nil {
 		if err := h.checkClusterAccess(user, cluster); err != nil {
 			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
 
-		// Additionally, check if user can operate (not just view) - delete requires operator role
 		teamRef, _, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
-		if teamRef != "" && !user.IsAdmin() && !user.CanOperateTeam(teamRef) {
-			writeError(w, http.StatusForbidden, "insufficient permissions: operator role required to delete clusters")
+		if err := h.checkOperatePermission(user, teamRef, "delete"); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
 	}
@@ -386,17 +438,16 @@ func (h *ClusterHandler) Scale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SECURITY: Check team access before allowing scale
+	// SECURITY: Check team access and operate permission
 	if user != nil {
 		if err := h.checkClusterAccess(user, cluster); err != nil {
 			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
 
-		// Scale requires operator role
 		teamRef, _, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
-		if teamRef != "" && !user.IsAdmin() && !user.CanOperateTeam(teamRef) {
-			writeError(w, http.StatusForbidden, "insufficient permissions: operator role required to scale clusters")
+		if err := h.checkOperatePermission(user, teamRef, "scale"); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
 	}
@@ -453,7 +504,7 @@ func (h *ClusterHandler) GetKubeconfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"kubeconfig": kubeconfig})
 }
 
-// GetNodes returns the nodes for a cluster.
+// GetNodes returns nodes for a tenant cluster.
 func (h *ClusterHandler) GetNodes(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	namespace := chi.URLParam(r, "namespace")
@@ -505,7 +556,7 @@ func (h *ClusterHandler) GetNodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"nodes": nodeList})
 }
 
-// GetAddons returns addons for a cluster.
+// GetAddons returns installed addons for a cluster.
 func (h *ClusterHandler) GetAddons(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	namespace := chi.URLParam(r, "namespace")
@@ -623,7 +674,7 @@ func (h *ClusterHandler) GetManagement(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	systemNamespaces := []string{"butler-system", "steward-system", "capi-system", "cert-manager", "kube-system"}
+	systemNamespaces := []string{"butler-system", "kamaji-system", "capi-system", "cert-manager", "kube-system"}
 	namespaceStats := make([]map[string]interface{}, 0)
 
 	for _, ns := range systemNamespaces {

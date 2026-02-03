@@ -82,15 +82,16 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	if cfg.Config.IsOIDCConfigured() {
 		var err error
 		oidcProvider, err = auth.NewOIDCProvider(context.Background(), &auth.OIDCConfig{
-			IssuerURL:    cfg.Config.OIDC.IssuerURL,
-			ClientID:     cfg.Config.OIDC.ClientID,
-			ClientSecret: cfg.Config.OIDC.ClientSecret,
-			RedirectURL:  cfg.Config.OIDC.RedirectURL,
-			Scopes:       cfg.Config.OIDC.Scopes,
-			HostedDomain: cfg.Config.OIDC.HostedDomain,
-			GroupsClaim:  cfg.Config.OIDC.GroupsClaim,
-			EmailClaim:   cfg.Config.OIDC.EmailClaim,
-		})
+			IssuerURL:       cfg.Config.OIDC.IssuerURL,
+			ClientID:        cfg.Config.OIDC.ClientID,
+			ClientSecret:    cfg.Config.OIDC.ClientSecret,
+			RedirectURL:     cfg.Config.OIDC.RedirectURL,
+			Scopes:          cfg.Config.OIDC.Scopes,
+			HostedDomain:    cfg.Config.OIDC.HostedDomain,
+			GroupsClaim:     cfg.Config.OIDC.GroupsClaim,
+			EmailClaim:      cfg.Config.OIDC.EmailClaim,
+			GoogleWorkspace: loadGoogleWorkspaceConfig(&cfg.Config.OIDC),
+		}, cfg.Logger)
 		if err != nil {
 			cfg.Logger.Error("Failed to initialize OIDC provider", "error", err)
 		} else {
@@ -147,6 +148,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	teamHandler := handlers.NewTeamHandler(cfg.K8sClient, teamResolver, cfg.Logger.With("component", "teams"))
 	certificateHandler := handlers.NewCertificateHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "certificates"))
 	gitopsHandler := handlers.NewGitOpsHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "gitops"))
+	identityProviderHandler := handlers.NewIdentityProvidersHandler(cfg.K8sClient, cfg.Config)
 
 	// Auth middleware - SECURITY: Now re-validates team membership on every request
 	authMiddleware := auth.SessionMiddleware(auth.SessionMiddlewareConfig{
@@ -187,6 +189,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			// Auth endpoints
 			r.Post("/auth/logout", authHandler.Logout)
 			r.Post("/auth/refresh", authHandler.Refresh)
+			r.Post("/auth/refresh-permissions", authHandler.RefreshPermissions)
 			r.Get("/auth/me", authHandler.Me)
 			r.Get("/auth/teams", authHandler.Teams)
 
@@ -274,6 +277,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Delete("/teams/{name}", teamHandler.Delete)
 			r.Get("/teams/{name}/clusters", teamHandler.ListClusters)
 			r.Get("/teams/{name}/members", teamHandler.ListMembers)
+			r.Get("/teams/{name}/groups", teamHandler.ListGroupSyncs)
 
 			// User listing (any authenticated user can view)
 			r.Get("/users", userHandler.ListUsers)
@@ -296,6 +300,21 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Post("/teams/{name}/members", teamHandler.AddMember)
 				r.Patch("/teams/{name}/members/{email}", teamHandler.UpdateMemberRole)
 				r.Delete("/teams/{name}/members/{email}", teamHandler.RemoveMember)
+
+				// Team group sync management (admin only)
+				r.Post("/teams/{name}/groups", teamHandler.AddGroupSync)
+				r.Patch("/teams/{name}/groups/{groupName}", teamHandler.UpdateGroupSyncRole)
+				r.Delete("/teams/{name}/groups/{groupName}", teamHandler.RemoveGroupSync)
+
+				r.Route("/identity-providers", func(r chi.Router) {
+					r.Get("/", identityProviderHandler.List)
+					r.Post("/", identityProviderHandler.Create)
+					r.Post("/test", identityProviderHandler.TestDiscovery)
+					r.Get("/{name}", identityProviderHandler.Get)
+					r.Delete("/{name}", identityProviderHandler.Delete)
+					r.Post("/{name}/validate", identityProviderHandler.Validate)
+				})
+
 			})
 		})
 	})
@@ -344,5 +363,16 @@ func LoggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			}()
 			next.ServeHTTP(ww, r)
 		})
+	}
+}
+
+func loadGoogleWorkspaceConfig(oidcCfg *config.OIDCConfig) *auth.GoogleGroupsConfig {
+	if oidcCfg.GoogleServiceAccountJSON == "" || oidcCfg.GoogleAdminEmail == "" {
+		return nil
+	}
+	return &auth.GoogleGroupsConfig{
+		ServiceAccountJSON: oidcCfg.GoogleServiceAccountJSON,
+		AdminEmail:         oidcCfg.GoogleAdminEmail,
+		Domain:             oidcCfg.HostedDomain,
 	}
 }
