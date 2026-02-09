@@ -1,0 +1,36 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits"
+  ],
+  "labels": ["dependencies"],
+  "packageRules": [
+    {
+      "description": "Butler internal dependencies - group and automerge",
+      "matchPackagePatterns": ["^github\\.com/butlerdotdev/"],
+      "groupName": "butler dependencies",
+      "automerge": true,
+      "automergeType": "pr",
+      "schedule": ["at any time"]
+    },
+    {
+      "description": "Kubernetes dependencies - group together",
+      "matchPackagePatterns": [
+        "^k8s\\.io/",
+        "^sigs\\.k8s\\.io/"
+      ],
+      "groupName": "kubernetes dependencies"
+    },
+    {
+      "description": "Go minor/patch updates - automerge",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true
+    }
+  ],
+  "gomod": {
+    "enabled": true
+  },
+  "schedule": ["before 6am on monday"]
+}
