@@ -58,6 +58,33 @@ Butler Server is a Go backend that:
 | GET | `/api/clusters/{ns}/{name}/addons` | Get addon status |
 | GET | `/api/clusters/{ns}/{name}/events` | Get cluster events |
 
+### Example API Usage
+
+```bash
+# Login and get session cookie
+curl -c cookies.txt -X POST http://localhost:8080/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "your-password"}'
+
+# List clusters (using saved cookie)
+curl -b cookies.txt http://localhost:8080/api/clusters
+
+# Get cluster details
+curl -b cookies.txt http://localhost:8080/api/clusters/butler-tenants/my-cluster
+
+# Download kubeconfig
+curl -b cookies.txt http://localhost:8080/api/clusters/butler-tenants/my-cluster/kubeconfig \
+  -o my-cluster.kubeconfig
+
+# Scale cluster workers
+curl -b cookies.txt -X PATCH http://localhost:8080/api/clusters/butler-tenants/my-cluster/scale \
+  -H "Content-Type: application/json" \
+  -d '{"replicas": 5}'
+
+# List providers
+curl -b cookies.txt http://localhost:8080/api/providers
+```
+
 ### Providers
 
 | Method | Path | Description |
