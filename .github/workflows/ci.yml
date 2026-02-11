@@ -33,13 +33,13 @@ permissions:
 jobs:
   build:
     runs-on: butler-runners
-    container:
-      image: golang:1.24-alpine
     steps:
-      - name: Install git
-        run: apk add --no-cache git
-
       - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
 
       - name: Clone butler-api
         run: git clone https://github.com/butlerdotdev/butler-api.git ../butler-api
@@ -59,6 +59,12 @@ jobs:
 
       - name: Clone butler-api
         run: git clone https://github.com/butlerdotdev/butler-api.git ../butler-api
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
