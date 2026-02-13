@@ -352,58 +352,98 @@ func (h *GitOpsHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if tc.Spec.Addons.GitOps == nil || tc.Spec.Addons.GitOps.Repository == nil {
-		writeJSON(w, http.StatusOK, gitops.GitOpsStatusResponse{
-			Enabled: false,
-		})
-		return
-	}
-
-	gitopsSpec := tc.Spec.Addons.GitOps
-	repoURL := gitopsSpec.Repository.URL
-	branch := gitopsSpec.Repository.Branch
-	path := gitopsSpec.Repository.Path
-	provider := gitopsSpec.Provider
-
 	kubeconfig, err := h.k8sClient.GetTenantKubeconfig(ctx, namespace, name)
 	if err != nil {
 		h.logger.Warn("Failed to get kubeconfig for status check", "error", err)
-		writeJSON(w, http.StatusOK, gitops.GitOpsStatusResponse{
-			Enabled:    true,
-			Provider:   provider,
-			Repository: repoURL,
-			Branch:     branch,
-			Path:       path,
-			Status:     "Unknown",
-		})
+		// Can't check actual cluster state without kubeconfig, fall back to CRD only
+		if tc.Spec.Addons.GitOps == nil || tc.Spec.Addons.GitOps.Repository == nil {
+			writeJSON(w, http.StatusOK, gitops.GitOpsStatusResponse{
+				Enabled: false,
+			})
+		} else {
+			writeJSON(w, http.StatusOK, gitops.GitOpsStatusResponse{
+				Enabled:    true,
+				Provider:   tc.Spec.Addons.GitOps.Provider,
+				Repository: tc.Spec.Addons.GitOps.Repository.URL,
+				Branch:     tc.Spec.Addons.GitOps.Repository.Branch,
+				Path:       tc.Spec.Addons.GitOps.Repository.Path,
+				Status:     "Unknown",
+			})
+		}
 		return
 	}
 
+	// If the CRD has explicit GitOps config, use it as the source of truth
+	// for repository info, but still check the actual cluster for status.
+	var repoURL, branch, path, provider string
+	if tc.Spec.Addons.GitOps != nil && tc.Spec.Addons.GitOps.Repository != nil {
+		gitopsSpec := tc.Spec.Addons.GitOps
+		repoURL = gitopsSpec.Repository.URL
+		branch = gitopsSpec.Repository.Branch
+		path = gitopsSpec.Repository.Path
+		provider = gitopsSpec.Provider
+	}
+
+	// Check the actual cluster state for Flux/ArgoCD
 	bootstrapper := gitops.NewFluxBootstrapper(kubeconfig)
 	fluxStatus, err := bootstrapper.GetStatus(ctx)
 	if err != nil {
 		h.logger.Warn("Failed to get Flux status", "error", err)
 	}
 
-	status := "Unknown"
-	fluxVersion := ""
-	if fluxStatus != nil {
-		fluxVersion = fluxStatus.Version
+	// If Flux is installed on the cluster, report as enabled even if the
+	// CRD field is empty (e.g., Flux was installed outside of Butler).
+	if fluxStatus != nil && fluxStatus.Installed {
+		status := "Unknown"
+		fluxVersion := fluxStatus.Version
 		if fluxStatus.Ready {
 			status = "Healthy"
-		} else if fluxStatus.Installed {
+		} else {
 			status = "Degraded"
 		}
+
+		if provider == "" {
+			provider = "fluxcd"
+		}
+
+		// If CRD doesn't have repo info, try to discover it from the
+		// flux-system GitRepository resource on the cluster.
+		if repoURL == "" {
+			if fluxRepo, fluxBranch, fluxPath, err := gitops.GetFluxGitRepositoryConfig(ctx, kubeconfig); err == nil {
+				repoURL = fluxRepo
+				branch = fluxBranch
+				path = fluxPath
+			}
+		}
+
+		writeJSON(w, http.StatusOK, gitops.GitOpsStatusResponse{
+			Enabled:     true,
+			Provider:    provider,
+			Repository:  repoURL,
+			Branch:      branch,
+			Path:        path,
+			Status:      status,
+			FluxVersion: fluxVersion,
+		})
+		return
+	}
+
+	// No GitOps engine found on the cluster
+	if repoURL != "" {
+		// CRD says GitOps is configured but it's not actually running
+		writeJSON(w, http.StatusOK, gitops.GitOpsStatusResponse{
+			Enabled:    true,
+			Provider:   provider,
+			Repository: repoURL,
+			Branch:     branch,
+			Path:       path,
+			Status:     "Not Installed",
+		})
+		return
 	}
 
 	writeJSON(w, http.StatusOK, gitops.GitOpsStatusResponse{
-		Enabled:     true,
-		Provider:    provider,
-		Repository:  repoURL,
-		Branch:      branch,
-		Path:        path,
-		Status:      status,
-		FluxVersion: fluxVersion,
+		Enabled: false,
 	})
 }
 

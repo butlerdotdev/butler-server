@@ -201,17 +201,32 @@ func (t *TerminalSession) setupKubeconfig() (string, error) {
 }
 
 func (t *TerminalSession) startShell() error {
-	shell := "/bin/bash"
-	if _, err := os.Stat("/bin/bash"); err != nil {
-		shell = "/bin/sh"
-	}
-
 	ptmx, tty, err := pty.Open()
 	if err != nil {
 		return fmt.Errorf("failed to open pty: %w", err)
 	}
 
-	t.cmd = exec.Command(shell)
+	// For workspace type, exec into the workspace pod on the tenant cluster
+	if t.config.Type == "workspace" && t.config.Pod != "" && t.kubeconfigPath != "" {
+		container := t.config.Container
+		if container == "" {
+			container = "workspace"
+		}
+		t.cmd = exec.Command("kubectl", "exec", "-it",
+			"--kubeconfig", t.kubeconfigPath,
+			"-n", "workspaces",
+			t.config.Pod,
+			"-c", container,
+			"--", "/bin/bash",
+		)
+	} else {
+		shell := "/bin/bash"
+		if _, err := os.Stat("/bin/bash"); err != nil {
+			shell = "/bin/sh"
+		}
+		t.cmd = exec.Command(shell)
+	}
+
 	t.cmd.Stdin = tty
 	t.cmd.Stdout = tty
 	t.cmd.Stderr = tty

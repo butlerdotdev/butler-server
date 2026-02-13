@@ -17,15 +17,25 @@ limitations under the License.
 package handlers
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/butlerdotdev/butler-server/internal/auth"
 	"github.com/butlerdotdev/butler-server/internal/config"
+	"github.com/butlerdotdev/butler-server/internal/k8s"
+
 	"github.com/go-chi/chi/v5"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 // UserHandler handles user management endpoints.
@@ -33,6 +43,7 @@ type UserHandler struct {
 	userService    *auth.UserService
 	sessionService *auth.SessionService
 	teamResolver   *auth.TeamResolver
+	k8sClient      *k8s.Client
 	config         *config.Config
 	logger         *slog.Logger
 }
@@ -42,6 +53,7 @@ func NewUserHandler(
 	userService *auth.UserService,
 	sessionService *auth.SessionService,
 	teamResolver *auth.TeamResolver,
+	k8sClient *k8s.Client,
 	cfg *config.Config,
 	logger *slog.Logger,
 ) *UserHandler {
@@ -49,6 +61,7 @@ func NewUserHandler(
 		userService:    userService,
 		sessionService: sessionService,
 		teamResolver:   teamResolver,
+		k8sClient:      k8sClient,
 		config:         cfg,
 		logger:         logger,
 	}
@@ -436,4 +449,258 @@ func (h *UserHandler) SetPassword(w http.ResponseWriter, r *http.Request) {
 			IsPlatformAdmin: user.IsPlatformAdmin,
 		},
 	})
+}
+
+// ---- SSH Key Management (self-service) ----
+
+var userGVR = schema.GroupVersionResource{
+	Group:    "butler.butlerlabs.dev",
+	Version:  "v1alpha1",
+	Resource: "users",
+}
+
+// AddSSHKeyRequest is the request body for adding an SSH key.
+type AddSSHKeyRequest struct {
+	Name      string `json:"name"`
+	PublicKey string `json:"publicKey"`
+}
+
+// SSHKeyResponse represents an SSH key in the API response.
+type SSHKeyResponse struct {
+	Name        string `json:"name"`
+	Fingerprint string `json:"fingerprint"`
+	AddedAt     string `json:"addedAt"`
+	// First 30 chars of the key for display
+	Preview string `json:"preview"`
+}
+
+// ListSSHKeys returns the current user's SSH keys.
+// GET /api/auth/ssh-keys
+func (h *UserHandler) ListSSHKeys(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	userCRD, err := h.findUserCRDByEmail(r.Context(), user.Email)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	sshKeys, _, _ := unstructured.NestedSlice(userCRD.Object, "spec", "sshKeys")
+
+	var keys []SSHKeyResponse
+	for _, k := range sshKeys {
+		keyMap, ok := k.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := keyMap["name"].(string)
+		fingerprint, _ := keyMap["fingerprint"].(string)
+		addedAt, _ := keyMap["addedAt"].(string)
+		publicKey, _ := keyMap["publicKey"].(string)
+
+		preview := publicKey
+		if len(preview) > 30 {
+			preview = preview[:30] + "..."
+		}
+
+		keys = append(keys, SSHKeyResponse{
+			Name:        name,
+			Fingerprint: fingerprint,
+			AddedAt:     addedAt,
+			Preview:     preview,
+		})
+	}
+
+	if keys == nil {
+		keys = []SSHKeyResponse{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"sshKeys": keys})
+}
+
+// AddSSHKey adds an SSH public key to the current user's profile.
+// POST /api/auth/ssh-keys
+func (h *UserHandler) AddSSHKey(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req AddSSHKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.PublicKey == "" {
+		writeError(w, http.StatusBadRequest, "publicKey is required")
+		return
+	}
+
+	// Validate SSH public key format
+	parts := strings.Fields(req.PublicKey)
+	if len(parts) < 2 {
+		writeError(w, http.StatusBadRequest, "invalid SSH public key format")
+		return
+	}
+
+	keyType := parts[0]
+	validTypes := map[string]bool{
+		"ssh-rsa":             true,
+		"ssh-ed25519":         true,
+		"ecdsa-sha2-nistp256": true,
+		"ecdsa-sha2-nistp384": true,
+		"ecdsa-sha2-nistp521": true,
+	}
+	if !validTypes[keyType] {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unsupported SSH key type: %s", keyType))
+		return
+	}
+
+	// Validate base64 encoding of key data
+	_, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid SSH key data (bad base64)")
+		return
+	}
+
+	// Compute SHA256 fingerprint
+	keyBytes, _ := base64.StdEncoding.DecodeString(parts[1])
+	hash := sha256.Sum256(keyBytes)
+	fingerprint := "SHA256:" + base64.StdEncoding.EncodeToString(hash[:])
+	// Remove trailing padding
+	fingerprint = strings.TrimRight(fingerprint, "=")
+
+	userCRD, err := h.findUserCRDByEmail(r.Context(), user.Email)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	// Get existing SSH keys
+	sshKeys, _, _ := unstructured.NestedSlice(userCRD.Object, "spec", "sshKeys")
+
+	// Check for duplicate fingerprint
+	for _, k := range sshKeys {
+		if keyMap, ok := k.(map[string]interface{}); ok {
+			if fp, _ := keyMap["fingerprint"].(string); fp == fingerprint {
+				writeError(w, http.StatusConflict, "SSH key already exists")
+				return
+			}
+		}
+	}
+
+	newKey := map[string]interface{}{
+		"name":        req.Name,
+		"publicKey":   req.PublicKey,
+		"fingerprint": fingerprint,
+		"addedAt":     time.Now().UTC().Format(time.RFC3339),
+	}
+
+	sshKeys = append(sshKeys, newKey)
+
+	if err := unstructured.SetNestedSlice(userCRD.Object, sshKeys, "spec", "sshKeys"); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update SSH keys")
+		return
+	}
+
+	_, err = h.k8sClient.Dynamic().Resource(userGVR).Update(r.Context(), userCRD, metav1.UpdateOptions{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save SSH key: %v", err))
+		return
+	}
+
+	h.logger.Info("SSH key added", "user", user.Email, "keyName", req.Name)
+
+	writeJSON(w, http.StatusCreated, SSHKeyResponse{
+		Name:        req.Name,
+		Fingerprint: fingerprint,
+		AddedAt:     newKey["addedAt"].(string),
+		Preview:     truncate(req.PublicKey, 30),
+	})
+}
+
+// RemoveSSHKey removes an SSH key by fingerprint.
+// DELETE /api/auth/ssh-keys/{fingerprint}
+func (h *UserHandler) RemoveSSHKey(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	fingerprint := chi.URLParam(r, "fingerprint")
+
+	userCRD, err := h.findUserCRDByEmail(r.Context(), user.Email)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	sshKeys, _, _ := unstructured.NestedSlice(userCRD.Object, "spec", "sshKeys")
+
+	var updated []interface{}
+	found := false
+	for _, k := range sshKeys {
+		if keyMap, ok := k.(map[string]interface{}); ok {
+			if fp, _ := keyMap["fingerprint"].(string); fp == fingerprint {
+				found = true
+				continue
+			}
+		}
+		updated = append(updated, k)
+	}
+
+	if !found {
+		writeError(w, http.StatusNotFound, "SSH key not found")
+		return
+	}
+
+	if err := unstructured.SetNestedSlice(userCRD.Object, updated, "spec", "sshKeys"); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update SSH keys")
+		return
+	}
+
+	_, err = h.k8sClient.Dynamic().Resource(userGVR).Update(r.Context(), userCRD, metav1.UpdateOptions{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to remove SSH key: %v", err))
+		return
+	}
+
+	h.logger.Info("SSH key removed", "user", user.Email, "fingerprint", fingerprint)
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// findUserCRDByEmail looks up a User CRD by email address.
+func (h *UserHandler) findUserCRDByEmail(ctx context.Context, email string) (*unstructured.Unstructured, error) {
+	users, err := h.k8sClient.Dynamic().Resource(userGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	for _, u := range users.Items {
+		userEmail, _, _ := unstructured.NestedString(u.Object, "spec", "email")
+		if strings.EqualFold(userEmail, email) {
+			return &u, nil
+		}
+	}
+
+	return nil, fmt.Errorf("user not found: %s", email)
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
