@@ -33,8 +33,9 @@ type TeamMembership struct {
 
 // UserSession represents an authenticated user's session.
 type UserSession struct {
-	// Subject is the OIDC subject identifier (unique per provider)
-	Subject string `json:"sub"`
+	// Subject is the OIDC subject identifier (unique per provider).
+	// Uses "subject" tag to avoid collision with jwt.RegisteredClaims "sub" in SessionClaims.
+	Subject string `json:"subject,omitempty"`
 
 	// Email is the user's email address
 	Email string `json:"email"`
