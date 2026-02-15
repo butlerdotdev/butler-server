@@ -81,6 +81,22 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 
 			// Platform admins path
 			if user.IsPlatformAdmin {
+				// When requests come through the Backstage portal proxy, all
+				// requests authenticate as the admin service account. The proxy
+				// forwards the real user's email via X-Butler-User-Email so the
+				// server can use it as the effective identity (e.g., workspace
+				// ownership, SSH key resolution). Only trust this header for
+				// platform admin sessions to prevent unprivileged impersonation.
+				if impersonateEmail := r.Header.Get("X-Butler-User-Email"); impersonateEmail != "" {
+					if cfg.Logger != nil {
+						cfg.Logger.Debug("Platform admin impersonating user via X-Butler-User-Email",
+							"sessionEmail", user.Email,
+							"effectiveEmail", impersonateEmail,
+						)
+					}
+					user.Email = impersonateEmail
+				}
+
 				// Set team context if provided - this enables team-scoped authorization
 				// even for platform admins when they're viewing a specific team
 				if selectedTeam != "" {

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/butlerdotdev/butler-server/internal/auth"
@@ -30,11 +31,15 @@ import (
 	"github.com/butlerdotdev/butler-server/internal/k8s"
 
 	"github.com/go-chi/chi/v5"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
 var (
@@ -80,6 +85,7 @@ type CreateWorkspaceRequest struct {
 	Name          string                     `json:"name"`
 	Image         string                     `json:"image,omitempty"`
 	Repository    *WorkspaceRepositoryReq    `json:"repository,omitempty"`
+	Repositories  []WorkspaceRepositoryReq   `json:"repositories,omitempty"`
 	EnvFrom       *WorkspaceEnvSourceReq     `json:"envFrom,omitempty"`
 	Dotfiles      *DotfilesReq               `json:"dotfiles,omitempty"`
 	Resources     *WorkspaceResourcesReq     `json:"resources,omitempty"`
@@ -87,10 +93,17 @@ type CreateWorkspaceRequest struct {
 	IdleTimeout   string                     `json:"idleTimeout,omitempty"`
 	AutoStopAfter string                     `json:"autoStopAfter,omitempty"`
 	SSHPublicKeys []string                   `json:"sshPublicKeys,omitempty"`
+	EditorConfig  *EditorConfigReq           `json:"editorConfig,omitempty"`
+}
+
+type EditorConfigReq struct {
+	NeovimConfigRepo string `json:"neovimConfigRepo,omitempty"`
+	NeovimInitLua    string `json:"neovimInitLua,omitempty"`
 }
 
 type WorkspaceRepositoryReq struct {
 	URL       string `json:"url"`
+	Name      string `json:"name,omitempty"`
 	Branch    string `json:"branch,omitempty"`
 	SecretRef string `json:"secretRef,omitempty"`
 }
@@ -217,7 +230,7 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		if defaultImage != "" {
 			image = defaultImage
 		} else {
-			image = "ghcr.io/butlerdotdev/workspace-base:latest"
+			image = "ubuntu:24.04"
 		}
 	}
 
@@ -229,8 +242,29 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		"sshPublicKeys": toInterfaceSlice(sshKeys),
 	}
 
-	if req.Repository != nil {
+	if len(req.Repositories) > 0 {
+		// Multi-repo: use the repositories array
+		var repos []interface{}
+		for _, r := range req.Repositories {
+			repo := map[string]interface{}{"url": r.URL}
+			if r.Name != "" {
+				repo["name"] = r.Name
+			}
+			if r.Branch != "" {
+				repo["branch"] = r.Branch
+			}
+			if r.SecretRef != "" {
+				repo["secretRef"] = map[string]interface{}{"name": r.SecretRef}
+			}
+			repos = append(repos, repo)
+		}
+		spec["repositories"] = repos
+	} else if req.Repository != nil {
+		// Single repo: legacy field
 		repo := map[string]interface{}{"url": req.Repository.URL}
+		if req.Repository.Name != "" {
+			repo["name"] = req.Repository.Name
+		}
 		if req.Repository.Branch != "" {
 			repo["branch"] = req.Repository.Branch
 		}
@@ -283,6 +317,19 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		spec["autoStopAfter"] = req.AutoStopAfter
 	}
 
+	if req.EditorConfig != nil {
+		ec := map[string]interface{}{}
+		if req.EditorConfig.NeovimConfigRepo != "" {
+			ec["neovimConfigRepo"] = req.EditorConfig.NeovimConfigRepo
+		}
+		if req.EditorConfig.NeovimInitLua != "" {
+			ec["neovimInitLua"] = req.EditorConfig.NeovimInitLua
+		}
+		if len(ec) > 0 {
+			spec["editorConfig"] = ec
+		}
+	}
+
 	workspace := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "butler.butlerlabs.dev/v1alpha1",
@@ -293,6 +340,9 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 				"labels": map[string]interface{}{
 					"butler.butlerlabs.dev/tenant":          clusterName,
 					"butler.butlerlabs.dev/workspace-owner": sanitizeLabelValue(user.Email),
+				},
+				"annotations": map[string]interface{}{
+					"butler.butlerlabs.dev/connect": "true",
 				},
 			},
 			"spec": spec,
@@ -560,14 +610,20 @@ func (h *WorkspaceHandler) GenerateMirrordConfig(w http.ResponseWriter, r *http.
 		"kube_context": fmt.Sprintf("mirrord-%s-%s", clusterName, targetNs),
 	}
 
+	// Format config as pretty JSON string for display
+	configJSON, _ := json.MarshalIndent(mirrordConfig, "", "  ")
+	configStr := string(configJSON)
+
 	// Build VS Code deeplink
-	configJSON, _ := json.Marshal(mirrordConfig)
 	configB64 := base64.StdEncoding.EncodeToString(configJSON)
 	deeplink := fmt.Sprintf("vscode://metalbear-co.mirrord/connect?config=%s", configB64)
 
+	filename := fmt.Sprintf("mirrord-%s-%s.json", clusterName, req.TargetService)
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"config":         mirrordConfig,
-		"kubeconfig":     base64.StdEncoding.EncodeToString(kubeconfigData),
+		"config":         configStr,
+		"kubeconfig":     string(kubeconfigData),
+		"filename":       filename,
 		"vscodeDeeplink": deeplink,
 	})
 }
@@ -579,51 +635,51 @@ func (h *WorkspaceHandler) ListImages(w http.ResponseWriter, r *http.Request) {
 	images := []map[string]interface{}{
 		{
 			"name":        "workspace-base",
-			"tag":         "latest",
+			"image":       "ubuntu:24.04",
 			"displayName": "Base (Ubuntu)",
 			"language":    "general",
 			"description": "Ubuntu 24.04 with core development tools",
-			"tools":       []string{"git", "curl", "vim", "tmux", "jq", "kubectl"},
+			"tools":       []string{"git", "curl", "vim", "tmux", "jq"},
 		},
 		{
 			"name":        "workspace-go",
-			"tag":         "1.24",
+			"image":       "golang:1.24",
 			"displayName": "Go 1.24",
 			"language":    "go",
-			"description": "Go development with gopls, delve, and golangci-lint",
-			"tools":       []string{"go", "gopls", "delve", "golangci-lint", "air", "git", "kubectl"},
+			"description": "Go development environment",
+			"tools":       []string{"go", "git"},
 		},
 		{
 			"name":        "workspace-node",
-			"tag":         "22",
+			"image":       "node:22",
 			"displayName": "Node.js 22",
 			"language":    "javascript",
 			"description": "Node.js with npm, yarn, pnpm, and tsx",
-			"tools":       []string{"node", "npm", "yarn", "pnpm", "tsx", "git", "kubectl"},
+			"tools":       []string{"node", "npm", "git"},
 		},
 		{
 			"name":        "workspace-python",
-			"tag":         "3.13",
+			"image":       "python:3.13",
 			"displayName": "Python 3.13",
 			"language":    "python",
-			"description": "Python with pip, poetry, ruff, and mypy",
-			"tools":       []string{"python", "pip", "poetry", "ruff", "mypy", "git", "kubectl"},
+			"description": "Python with pip",
+			"tools":       []string{"python", "pip", "git"},
 		},
 		{
 			"name":        "workspace-rust",
-			"tag":         "1.84",
+			"image":       "rust:1.84",
 			"displayName": "Rust 1.84",
 			"language":    "rust",
-			"description": "Rust with cargo, rust-analyzer, and clippy",
-			"tools":       []string{"rustc", "cargo", "rust-analyzer", "clippy", "git", "kubectl"},
+			"description": "Rust with cargo",
+			"tools":       []string{"rustc", "cargo", "git"},
 		},
 		{
 			"name":        "workspace-java",
-			"tag":         "21",
+			"image":       "eclipse-temurin:21",
 			"displayName": "Java 21",
 			"language":    "java",
-			"description": "JDK 21 with Maven and Gradle",
-			"tools":       []string{"java", "javac", "mvn", "gradle", "git", "kubectl"},
+			"description": "JDK 21 (Eclipse Temurin)",
+			"tools":       []string{"java", "javac", "git"},
 		},
 	}
 
@@ -708,6 +764,54 @@ func (h *WorkspaceHandler) CreateTemplate(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusCreated, result.Object)
+}
+
+// UpdateTemplate updates an existing workspace template.
+func (h *WorkspaceHandler) UpdateTemplate(w http.ResponseWriter, r *http.Request) {
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+
+	var body map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	existing, err := h.k8sClient.Dynamic().Resource(WorkspaceTemplateGVR).Namespace(namespace).Get(r.Context(), name, metav1.GetOptions{})
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("template not found: %v", err))
+		return
+	}
+
+	// Update spec fields from body
+	spec, _ := existing.Object["spec"].(map[string]interface{})
+	if spec == nil {
+		spec = make(map[string]interface{})
+	}
+	if v, ok := body["displayName"]; ok {
+		spec["displayName"] = v
+	}
+	if v, ok := body["description"]; ok {
+		spec["description"] = v
+	}
+	if v, ok := body["icon"]; ok {
+		spec["icon"] = v
+	}
+	if v, ok := body["category"]; ok {
+		spec["category"] = v
+	}
+	if v, ok := body["template"]; ok {
+		spec["template"] = v
+	}
+	existing.Object["spec"] = spec
+
+	result, err := h.k8sClient.Dynamic().Resource(WorkspaceTemplateGVR).Namespace(namespace).Update(r.Context(), existing, metav1.UpdateOptions{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update template: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result.Object)
 }
 
 // DeleteTemplate deletes a workspace template.
@@ -831,9 +935,22 @@ func (h *WorkspaceHandler) resolveUserSSHKeys(ctx context.Context, email string)
 		return nil, err
 	}
 
+	// Extract local part for flexible matching (e.g., abagan@butlerlabs.dev → abagan)
+	emailLocalPart := email
+	if idx := strings.Index(email, "@"); idx > 0 {
+		emailLocalPart = email[:idx]
+	}
+
 	for _, u := range users.Items {
 		userEmail, _, _ := unstructured.NestedString(u.Object, "spec", "email")
-		if userEmail != email {
+		userName := u.GetName()
+
+		// Match on exact email, CRD name, or email local part
+		matched := userEmail == email ||
+			userName == emailLocalPart ||
+			(userEmail != "" && strings.HasPrefix(userEmail, emailLocalPart+"@"))
+
+		if !matched {
 			continue
 		}
 
@@ -873,15 +990,16 @@ func (h *WorkspaceHandler) getTenantKubeconfig(ctx context.Context, namespace, c
 		return nil, fmt.Errorf("failed to get kubeconfig secret: %w", err)
 	}
 
-	// Prefer admin.svc for internal access
-	if data, ok := secret.Data["admin.svc"]; ok {
-		return data, nil
-	}
+	// Prefer admin.conf (external endpoint) so the server can reach the tenant
+	// cluster regardless of whether it runs inside or outside the management cluster.
 	if data, ok := secret.Data["admin.conf"]; ok {
 		return data, nil
 	}
+	if data, ok := secret.Data["admin.svc"]; ok {
+		return data, nil
+	}
 
-	return nil, fmt.Errorf("kubeconfig secret missing admin.svc and admin.conf keys")
+	return nil, fmt.Errorf("kubeconfig secret missing admin.conf and admin.svc keys")
 }
 
 func (h *WorkspaceHandler) getTenantClient(ctx context.Context, namespace, clusterName string) (kubernetes.Interface, error) {
@@ -939,4 +1057,157 @@ func toInterfaceSlice(ss []string) []interface{} {
 		result[i] = s
 	}
 	return result
+}
+
+// SyncSSHKeys syncs the current user's SSH keys to a running workspace.
+// POST /clusters/{namespace}/{name}/workspaces/{workspace}/sync-ssh-keys
+func (h *WorkspaceHandler) SyncSSHKeys(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	namespace := chi.URLParam(r, "namespace")
+	clusterName := chi.URLParam(r, "name")
+	workspaceName := chi.URLParam(r, "workspace")
+
+	// Get workspace
+	ws, err := h.k8sClient.Dynamic().Resource(WorkspaceGVR).Namespace(namespace).Get(
+		r.Context(), workspaceName, metav1.GetOptions{})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "workspace not found")
+		return
+	}
+
+	// Verify access
+	if err := h.checkWorkspaceAccess(user, ws); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
+	// Workspace must be running
+	phase, _, _ := unstructured.NestedString(ws.Object, "status", "phase")
+	if phase != "Running" {
+		writeError(w, http.StatusBadRequest, "workspace must be running to sync SSH keys")
+		return
+	}
+
+	podName, _, _ := unstructured.NestedString(ws.Object, "status", "podName")
+	if podName == "" {
+		writeError(w, http.StatusBadRequest, "workspace pod not running")
+		return
+	}
+
+	// Resolve current SSH keys from User CRD
+	owner, _, _ := unstructured.NestedString(ws.Object, "spec", "owner")
+	sshKeys, err := h.resolveUserSSHKeys(r.Context(), owner)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve SSH keys")
+		return
+	}
+	if len(sshKeys) == 0 {
+		writeError(w, http.StatusBadRequest, "no SSH keys found on user profile")
+		return
+	}
+
+	// Update the SSH keys secret on the tenant cluster
+	tenantClient, err := h.getTenantClient(r.Context(), namespace, clusterName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to connect to tenant: %v", err))
+		return
+	}
+
+	authorizedKeys := ""
+	for i, key := range sshKeys {
+		authorizedKeys += key
+		if i < len(sshKeys)-1 {
+			authorizedKeys += "\n"
+		}
+	}
+	authorizedKeys += "\n"
+
+	secretName := fmt.Sprintf("ws-%s-ssh-keys", workspaceName)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: "workspaces",
+		},
+		Data: map[string][]byte{
+			"authorized_keys": []byte(authorizedKeys),
+		},
+	}
+
+	_, err = tenantClient.CoreV1().Secrets("workspaces").Update(r.Context(), secret, metav1.UpdateOptions{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update SSH secret: %v", err))
+		return
+	}
+
+	// Exec into the pod to refresh authorized_keys immediately
+	restConfig, err := h.getTenantRESTConfig(r.Context(), namespace, clusterName)
+	if err != nil {
+		// Secret was updated — keys will propagate via kubelet within ~60s
+		h.logger.Warn("SSH secret updated but exec failed", "error", err)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"synced":  true,
+			"keys":    len(sshKeys),
+			"message": "SSH keys updated. Keys will take effect within ~60 seconds.",
+		})
+		return
+	}
+
+	execReq := tenantClient.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(podName).
+		Namespace("workspaces").
+		SubResource("exec").
+		VersionedParams(&corev1.PodExecOptions{
+			Container: "workspace",
+			Command:   []string{"sh", "-c", "cp /tmp/ssh-keys/authorized_keys /home/dev/.ssh/authorized_keys && chmod 600 /home/dev/.ssh/authorized_keys && chown 1000:1000 /home/dev/.ssh/authorized_keys"},
+			Stdout:    true,
+			Stderr:    true,
+		}, scheme.ParameterCodec)
+
+	exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", execReq.URL())
+	if err != nil {
+		h.logger.Warn("SSH secret updated but exec setup failed", "error", err)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"synced":  true,
+			"keys":    len(sshKeys),
+			"message": "SSH keys updated. Keys will take effect within ~60 seconds.",
+		})
+		return
+	}
+
+	if err := exec.StreamWithContext(r.Context(), remotecommand.StreamOptions{}); err != nil {
+		h.logger.Warn("SSH secret updated but exec failed", "error", err)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"synced":  true,
+			"keys":    len(sshKeys),
+			"message": "SSH keys updated. Keys will take effect within ~60 seconds.",
+		})
+		return
+	}
+
+	h.logger.Info("SSH keys synced to workspace", "workspace", workspaceName, "keys", len(sshKeys))
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"synced":  true,
+		"keys":    len(sshKeys),
+		"message": "SSH keys synced successfully.",
+	})
+}
+
+func (h *WorkspaceHandler) getTenantRESTConfig(ctx context.Context, namespace, clusterName string) (*rest.Config, error) {
+	kubeconfigData, err := h.getTenantKubeconfig(ctx, namespace, clusterName)
+	if err != nil {
+		return nil, err
+	}
+
+	restConfig, err := clientcmd.RESTConfigFromKubeConfig(kubeconfigData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build REST config: %w", err)
+	}
+
+	return restConfig, nil
 }

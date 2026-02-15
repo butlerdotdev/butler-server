@@ -483,9 +483,9 @@ func (h *UserHandler) ListSSHKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userCRD, err := h.findUserCRDByEmail(r.Context(), user.Email)
+	userCRD, err := h.findOrEnsureUserCRD(r.Context(), user)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "user not found")
+		writeError(w, http.StatusInternalServerError, "failed to resolve user profile")
 		return
 	}
 
@@ -580,9 +580,9 @@ func (h *UserHandler) AddSSHKey(w http.ResponseWriter, r *http.Request) {
 	// Remove trailing padding
 	fingerprint = strings.TrimRight(fingerprint, "=")
 
-	userCRD, err := h.findUserCRDByEmail(r.Context(), user.Email)
+	userCRD, err := h.findOrEnsureUserCRD(r.Context(), user)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "user not found")
+		writeError(w, http.StatusInternalServerError, "failed to resolve user profile")
 		return
 	}
 
@@ -640,9 +640,9 @@ func (h *UserHandler) RemoveSSHKey(w http.ResponseWriter, r *http.Request) {
 
 	fingerprint := chi.URLParam(r, "fingerprint")
 
-	userCRD, err := h.findUserCRDByEmail(r.Context(), user.Email)
+	userCRD, err := h.findOrEnsureUserCRD(r.Context(), user)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "user not found")
+		writeError(w, http.StatusInternalServerError, "failed to resolve user profile")
 		return
 	}
 
@@ -696,6 +696,40 @@ func (h *UserHandler) findUserCRDByEmail(ctx context.Context, email string) (*un
 	}
 
 	return nil, fmt.Errorf("user not found: %s", email)
+}
+
+// findOrEnsureUserCRD looks up a User CRD by email, auto-creating it for
+// authenticated users if one doesn't exist. This handles the case where
+// users authenticate via Backstage SSO proxy and bypass the OIDC callback
+// that normally calls EnsureSSOUser.
+func (h *UserHandler) findOrEnsureUserCRD(ctx context.Context, session *auth.UserSession) (*unstructured.Unstructured, error) {
+	userCRD, err := h.findUserCRDByEmail(ctx, session.Email)
+	if err == nil {
+		return userCRD, nil
+	}
+
+	// User CRD not found by email — auto-create or find by username via EnsureSSOUser.
+	// EnsureSSOUser derives username from email and looks up by name first,
+	// which handles cases where the CRD email differs from the session email.
+	h.logger.Info("Auto-creating User CRD for authenticated user", "email", session.Email)
+	userInfo, ensureErr := h.userService.EnsureSSOUser(ctx, auth.EnsureSSOUserRequest{
+		Email:       session.Email,
+		DisplayName: session.Name,
+		Picture:     session.Picture,
+		Provider:    session.Provider,
+		Subject:     session.Subject,
+	})
+	if ensureErr != nil {
+		return nil, fmt.Errorf("failed to ensure user CRD: %w", ensureErr)
+	}
+
+	// Fetch the CRD by name (not email) since the existing CRD's email
+	// may differ from the session email (e.g., admin@butler.local vs admin@localhost)
+	crd, getErr := h.k8sClient.Dynamic().Resource(userGVR).Get(ctx, userInfo.Name, metav1.GetOptions{})
+	if getErr != nil {
+		return nil, fmt.Errorf("failed to fetch user CRD: %w", getErr)
+	}
+	return crd, nil
 }
 
 func truncate(s string, maxLen int) string {
