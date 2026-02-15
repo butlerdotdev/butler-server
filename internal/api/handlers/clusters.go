@@ -206,6 +206,9 @@ type CreateClusterRequest struct {
 	ProxmoxNode       string `json:"proxmoxNode,omitempty"`
 	ProxmoxStorage    string `json:"proxmoxStorage,omitempty"`
 	ProxmoxTemplateID int    `json:"proxmoxTemplateID,omitempty"`
+
+	// Workspaces
+	WorkspacesEnabled bool `json:"workspacesEnabled,omitempty"`
 }
 
 // Create creates a new tenant cluster.
@@ -286,6 +289,13 @@ func (h *ClusterHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if req.TeamRef != "" {
 		spec["teamRef"] = map[string]interface{}{
 			"name": req.TeamRef,
+		}
+	}
+
+	if req.WorkspacesEnabled {
+		spec["workspaces"] = map[string]interface{}{
+			"enabled":      true,
+			"defaultImage": "ghcr.io/butlerdotdev/workspace-base:latest",
 		}
 	}
 
@@ -468,6 +478,54 @@ func (h *ClusterHandler) Scale(w http.ResponseWriter, r *http.Request) {
 	patched, err := h.k8sClient.PatchTenantCluster(r.Context(), namespace, name, patch)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to scale cluster: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, patched.Object)
+}
+
+// ToggleWorkspaces enables or disables workspaces on a cluster.
+func (h *ClusterHandler) ToggleWorkspaces(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+
+	cluster, err := h.k8sClient.GetTenantCluster(r.Context(), namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+
+	if user != nil {
+		if err := h.checkClusterAccess(user, cluster); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		teamRef, _, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+		if err := h.checkOperatePermission(user, teamRef, "update"); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
+
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	var patch []byte
+	if req.Enabled {
+		patch = []byte(`{"spec":{"workspaces":{"enabled":true,"defaultImage":"ghcr.io/butlerdotdev/workspace-base:latest"}}}`)
+	} else {
+		patch = []byte(`{"spec":{"workspaces":{"enabled":false}}}`)
+	}
+
+	patched, err := h.k8sClient.PatchTenantCluster(r.Context(), namespace, name, patch)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update workspaces: %v", err))
 		return
 	}
 

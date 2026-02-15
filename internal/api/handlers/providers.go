@@ -78,6 +78,52 @@ type CreateProviderRequest struct {
 	ProxmoxTokenId     string `json:"proxmoxTokenId,omitempty"`
 	ProxmoxTokenSecret string `json:"proxmoxTokenSecret,omitempty"`
 	ProxmoxInsecure    bool   `json:"proxmoxInsecure,omitempty"`
+
+	// AWS
+	AWSRegion           string   `json:"awsRegion,omitempty"`
+	AWSAccessKeyID      string   `json:"awsAccessKeyId,omitempty"`
+	AWSSecretAccessKey  string   `json:"awsSecretAccessKey,omitempty"`
+	AWSVPCID            string   `json:"awsVpcId,omitempty"`
+	AWSSubnetIDs        []string `json:"awsSubnetIds,omitempty"`
+	AWSSecurityGroupIDs []string `json:"awsSecurityGroupIds,omitempty"`
+
+	// Azure
+	AzureSubscriptionID string `json:"azureSubscriptionId,omitempty"`
+	AzureTenantID       string `json:"azureTenantId,omitempty"`
+	AzureClientID       string `json:"azureClientId,omitempty"`
+	AzureClientSecret   string `json:"azureClientSecret,omitempty"`
+	AzureResourceGroup  string `json:"azureResourceGroup,omitempty"`
+	AzureLocation       string `json:"azureLocation,omitempty"`
+	AzureVNetName       string `json:"azureVnetName,omitempty"`
+	AzureSubnetName     string `json:"azureSubnetName,omitempty"`
+
+	// GCP
+	GCPProjectID      string `json:"gcpProjectId,omitempty"`
+	GCPRegion         string `json:"gcpRegion,omitempty"`
+	GCPServiceAccount string `json:"gcpServiceAccount,omitempty"`
+	GCPNetwork        string `json:"gcpNetwork,omitempty"`
+	GCPSubnetwork     string `json:"gcpSubnetwork,omitempty"`
+
+	// Network configuration
+	NetworkMode       string   `json:"networkMode,omitempty"`
+	NetworkSubnet     string   `json:"networkSubnet,omitempty"`
+	NetworkGateway    string   `json:"networkGateway,omitempty"`
+	NetworkDNSServers []string `json:"networkDnsServers,omitempty"`
+	PoolRefs          []struct {
+		Name     string `json:"name"`
+		Priority int32  `json:"priority,omitempty"`
+	} `json:"poolRefs,omitempty"`
+	LBDefaultPoolSize *int32 `json:"lbDefaultPoolSize,omitempty"`
+	QuotaMaxNodeIPs   *int32 `json:"quotaMaxNodeIPs,omitempty"`
+	QuotaMaxLBIPs     *int32 `json:"quotaMaxLoadBalancerIPs,omitempty"`
+
+	// Scope
+	ScopeType    string `json:"scopeType,omitempty"`
+	ScopeTeamRef string `json:"scopeTeamRef,omitempty"`
+
+	// Limits
+	MaxClustersPerTeam *int32 `json:"maxClustersPerTeam,omitempty"`
+	MaxNodesPerTeam    *int32 `json:"maxNodesPerTeam,omitempty"`
 }
 
 // ValidateResponse represents the validation response.
@@ -139,6 +185,12 @@ func (h *ProvidersHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.createProvider(w, r, req)
+}
+
+// createProvider is the shared logic for creating a provider config.
+// Both Create and CreateTeamProvider call this after decoding the request.
+func (h *ProvidersHandler) createProvider(w http.ResponseWriter, r *http.Request, req CreateProviderRequest) {
 	if req.Name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
@@ -202,6 +254,64 @@ func (h *ProvidersHandler) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+	case "aws":
+		if req.AWSRegion == "" {
+			writeError(w, http.StatusBadRequest, "awsRegion is required")
+			return
+		}
+		if req.AWSAccessKeyID == "" || req.AWSSecretAccessKey == "" {
+			writeError(w, http.StatusBadRequest, "awsAccessKeyId and awsSecretAccessKey are required")
+			return
+		}
+		secretData = map[string][]byte{
+			"accessKeyId":     []byte(req.AWSAccessKeyID),
+			"secretAccessKey": []byte(req.AWSSecretAccessKey),
+		}
+		// Default network mode to "cloud" for cloud providers
+		if req.NetworkMode == "" {
+			req.NetworkMode = "cloud"
+		}
+
+	case "azure":
+		if req.AzureSubscriptionID == "" {
+			writeError(w, http.StatusBadRequest, "azureSubscriptionId is required")
+			return
+		}
+		if req.AzureTenantID == "" || req.AzureClientID == "" || req.AzureClientSecret == "" {
+			writeError(w, http.StatusBadRequest, "azureTenantId, azureClientId, and azureClientSecret are required")
+			return
+		}
+		secretData = map[string][]byte{
+			"tenantId":     []byte(req.AzureTenantID),
+			"clientId":     []byte(req.AzureClientID),
+			"clientSecret": []byte(req.AzureClientSecret),
+		}
+		// Default network mode to "cloud" for cloud providers
+		if req.NetworkMode == "" {
+			req.NetworkMode = "cloud"
+		}
+
+	case "gcp":
+		if req.GCPProjectID == "" {
+			writeError(w, http.StatusBadRequest, "gcpProjectId is required")
+			return
+		}
+		if req.GCPRegion == "" {
+			writeError(w, http.StatusBadRequest, "gcpRegion is required")
+			return
+		}
+		if req.GCPServiceAccount == "" {
+			writeError(w, http.StatusBadRequest, "gcpServiceAccount is required")
+			return
+		}
+		secretData = map[string][]byte{
+			"serviceAccount": []byte(req.GCPServiceAccount),
+		}
+		// Default network mode to "cloud" for cloud providers
+		if req.NetworkMode == "" {
+			req.NetworkMode = "cloud"
+		}
+
 	default:
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("unsupported provider type: %s", req.Provider))
 		return
@@ -260,6 +370,120 @@ func (h *ProvidersHandler) Create(w http.ResponseWriter, r *http.Request) {
 			proxmoxConfig["insecure"] = true
 		}
 		spec["proxmox"] = proxmoxConfig
+
+	case "aws":
+		awsConfig := map[string]interface{}{
+			"region": req.AWSRegion,
+		}
+		if req.AWSVPCID != "" {
+			awsConfig["vpcID"] = req.AWSVPCID
+		}
+		if len(req.AWSSubnetIDs) > 0 {
+			awsConfig["subnetIDs"] = req.AWSSubnetIDs
+		}
+		if len(req.AWSSecurityGroupIDs) > 0 {
+			awsConfig["securityGroupIDs"] = req.AWSSecurityGroupIDs
+		}
+		spec["aws"] = awsConfig
+
+	case "azure":
+		azureConfig := map[string]interface{}{
+			"subscriptionID": req.AzureSubscriptionID,
+		}
+		if req.AzureResourceGroup != "" {
+			azureConfig["resourceGroup"] = req.AzureResourceGroup
+		}
+		if req.AzureLocation != "" {
+			azureConfig["location"] = req.AzureLocation
+		}
+		if req.AzureVNetName != "" {
+			azureConfig["vnetName"] = req.AzureVNetName
+		}
+		if req.AzureSubnetName != "" {
+			azureConfig["subnetName"] = req.AzureSubnetName
+		}
+		spec["azure"] = azureConfig
+
+	case "gcp":
+		gcpConfig := map[string]interface{}{
+			"projectID": req.GCPProjectID,
+			"region":    req.GCPRegion,
+		}
+		if req.GCPNetwork != "" {
+			gcpConfig["network"] = req.GCPNetwork
+		}
+		if req.GCPSubnetwork != "" {
+			gcpConfig["subnetwork"] = req.GCPSubnetwork
+		}
+		spec["gcp"] = gcpConfig
+	}
+
+	// Network configuration
+	if req.NetworkMode != "" {
+		network := map[string]interface{}{
+			"mode": req.NetworkMode,
+		}
+		if len(req.PoolRefs) > 0 {
+			poolRefs := make([]interface{}, 0, len(req.PoolRefs))
+			for _, pr := range req.PoolRefs {
+				ref := map[string]interface{}{"name": pr.Name}
+				if pr.Priority > 0 {
+					ref["priority"] = pr.Priority
+				}
+				poolRefs = append(poolRefs, ref)
+			}
+			network["poolRefs"] = poolRefs
+		}
+		if req.NetworkSubnet != "" {
+			network["subnet"] = req.NetworkSubnet
+		}
+		if req.NetworkGateway != "" {
+			network["gateway"] = req.NetworkGateway
+		}
+		if len(req.NetworkDNSServers) > 0 {
+			network["dnsServers"] = req.NetworkDNSServers
+		}
+		if req.LBDefaultPoolSize != nil {
+			network["loadBalancer"] = map[string]interface{}{
+				"defaultPoolSize": *req.LBDefaultPoolSize,
+			}
+		}
+		if req.QuotaMaxNodeIPs != nil || req.QuotaMaxLBIPs != nil {
+			quota := map[string]interface{}{}
+			if req.QuotaMaxNodeIPs != nil {
+				quota["maxNodeIPs"] = *req.QuotaMaxNodeIPs
+			}
+			if req.QuotaMaxLBIPs != nil {
+				quota["maxLoadBalancerIPs"] = *req.QuotaMaxLBIPs
+			}
+			network["quotaPerTenant"] = quota
+		}
+		spec["network"] = network
+	}
+
+	// Scope
+	if req.ScopeType != "" {
+		scope := map[string]interface{}{
+			"type": req.ScopeType,
+		}
+		if req.ScopeTeamRef != "" {
+			scope["teamRef"] = map[string]interface{}{
+				"name": req.ScopeTeamRef,
+			}
+		}
+		spec["scope"] = scope
+	}
+
+	// Limits
+	if req.MaxClustersPerTeam != nil || req.MaxNodesPerTeam != nil {
+		limits := map[string]interface{}{}
+		if req.MaxClustersPerTeam != nil {
+			limits["maxClustersPerTeam"] = *req.MaxClustersPerTeam
+		}
+		if req.MaxNodesPerTeam != nil {
+			limits["maxNodesPerTeam"] = *req.MaxNodesPerTeam
+		}
+		spec["limits"] = limits
 	}
 
 	provider := &unstructured.Unstructured{
@@ -290,6 +514,13 @@ func (h *ProvidersHandler) Create(w http.ResponseWriter, r *http.Request) {
 func (h *ProvidersHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
+
+	h.deleteProvider(w, r, namespace, name)
+}
+
+// deleteProvider is the shared logic for deleting a provider config and its secret.
+// Both Delete and DeleteTeamProvider call this after authorization checks.
+func (h *ProvidersHandler) deleteProvider(w http.ResponseWriter, r *http.Request, namespace, name string) {
 	ctx := r.Context()
 
 	provider, err := h.k8sClient.GetProviderConfig(ctx, namespace, name)
@@ -318,6 +549,87 @@ func (h *ProvidersHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "provider deleted"})
+}
+
+// ListTeamProviders returns providers available to a specific team.
+// This includes all platform-scoped providers and team-scoped providers belonging to the team.
+func (h *ProvidersHandler) ListTeamProviders(w http.ResponseWriter, r *http.Request) {
+	teamName := chi.URLParam(r, "name")
+
+	providers, err := h.k8sClient.ListProviderConfigs(r.Context(), "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list providers: %v", err))
+		return
+	}
+
+	filtered := make([]map[string]interface{}, 0)
+	for _, provider := range providers.Items {
+		spec, _ := provider.Object["spec"].(map[string]interface{})
+		scope, _ := spec["scope"].(map[string]interface{})
+
+		scopeType, _ := scope["type"].(string)
+		if scopeType == "" {
+			scopeType = "platform" // default
+		}
+
+		if scopeType == "platform" {
+			filtered = append(filtered, provider.Object)
+		} else if scopeType == "team" {
+			teamRef, _ := scope["teamRef"].(map[string]interface{})
+			refName, _ := teamRef["name"].(string)
+			if refName == teamName {
+				filtered = append(filtered, provider.Object)
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, ProviderListResponse{Providers: filtered})
+}
+
+// CreateTeamProvider creates a provider config scoped to a specific team.
+func (h *ProvidersHandler) CreateTeamProvider(w http.ResponseWriter, r *http.Request) {
+	teamName := chi.URLParam(r, "name")
+
+	var req CreateProviderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Force team scope
+	req.ScopeType = "team"
+	req.ScopeTeamRef = teamName
+
+	h.createProvider(w, r, req)
+}
+
+// DeleteTeamProvider deletes a provider config that is scoped to a specific team.
+// It verifies the provider is actually team-scoped to the given team before deleting.
+func (h *ProvidersHandler) DeleteTeamProvider(w http.ResponseWriter, r *http.Request) {
+	teamName := chi.URLParam(r, "name")
+	namespace := chi.URLParam(r, "namespace")
+	providerName := chi.URLParam(r, "providerName")
+	ctx := r.Context()
+
+	// Get provider and verify it is team-scoped to this team
+	provider, err := h.k8sClient.GetProviderConfig(ctx, namespace, providerName)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("provider not found: %v", err))
+		return
+	}
+
+	spec, _ := provider.Object["spec"].(map[string]interface{})
+	scope, _ := spec["scope"].(map[string]interface{})
+	scopeType, _ := scope["type"].(string)
+	teamRef, _ := scope["teamRef"].(map[string]interface{})
+	refName, _ := teamRef["name"].(string)
+
+	if scopeType != "team" || refName != teamName {
+		writeError(w, http.StatusForbidden, "can only delete team-scoped providers belonging to this team")
+		return
+	}
+
+	h.deleteProvider(w, r, namespace, providerName)
 }
 
 // Validate validates an existing provider's connectivity.
@@ -377,6 +689,25 @@ func (h *ProvidersHandler) Validate(w http.ResponseWriter, r *http.Request) {
 		tokenSecret := string(secret.Data["tokenSecret"])
 		result = testProxmoxConnection(endpoint, username, password, tokenId, tokenSecret, insecure)
 
+	case "aws":
+		region, _, _ := unstructured.NestedString(provider.Object, "spec", "aws", "region")
+		accessKeyID := string(secret.Data["accessKeyId"])
+		secretAccessKey := string(secret.Data["secretAccessKey"])
+		result = testAWSConnection(region, accessKeyID, secretAccessKey)
+
+	case "azure":
+		subscriptionID, _, _ := unstructured.NestedString(provider.Object, "spec", "azure", "subscriptionID")
+		tenantID := string(secret.Data["tenantId"])
+		clientID := string(secret.Data["clientId"])
+		clientSecret := string(secret.Data["clientSecret"])
+		result = testAzureConnection(subscriptionID, tenantID, clientID, clientSecret)
+
+	case "gcp":
+		projectID, _, _ := unstructured.NestedString(provider.Object, "spec", "gcp", "projectID")
+		region, _, _ := unstructured.NestedString(provider.Object, "spec", "gcp", "region")
+		serviceAccount := string(secret.Data["serviceAccount"])
+		result = testGCPConnection(projectID, region, serviceAccount)
+
 	default:
 		result = ValidateResponse{Valid: false, Message: fmt.Sprintf("unsupported provider type: %s", providerType)}
 	}
@@ -392,6 +723,12 @@ func testProviderConnection(req CreateProviderRequest) ValidateResponse {
 		return testNutanixConnection(req.NutanixEndpoint, req.NutanixPort, req.NutanixUsername, req.NutanixPassword, req.NutanixInsecure)
 	case "proxmox":
 		return testProxmoxConnection(req.ProxmoxEndpoint, req.ProxmoxUsername, req.ProxmoxPassword, req.ProxmoxTokenId, req.ProxmoxTokenSecret, req.ProxmoxInsecure)
+	case "aws":
+		return testAWSConnection(req.AWSRegion, req.AWSAccessKeyID, req.AWSSecretAccessKey)
+	case "azure":
+		return testAzureConnection(req.AzureSubscriptionID, req.AzureTenantID, req.AzureClientID, req.AzureClientSecret)
+	case "gcp":
+		return testGCPConnection(req.GCPProjectID, req.GCPRegion, req.GCPServiceAccount)
 	default:
 		return ValidateResponse{Valid: false, Message: fmt.Sprintf("unsupported provider: %s", req.Provider)}
 	}
@@ -526,6 +863,112 @@ func testProxmoxConnection(endpoint, username, password, tokenId, tokenSecret st
 	return ValidateResponse{
 		Valid:   true,
 		Message: "Connected to Proxmox VE successfully",
+	}
+}
+
+func testAWSConnection(region, accessKeyID, secretAccessKey string) ValidateResponse {
+	if region == "" {
+		return ValidateResponse{Valid: false, Message: "region is required"}
+	}
+	if accessKeyID == "" || secretAccessKey == "" {
+		return ValidateResponse{Valid: false, Message: "accessKeyId and secretAccessKey are required"}
+	}
+
+	// Test by calling the AWS STS GetCallerIdentity endpoint
+	// This is the standard way to validate AWS credentials without needing any specific permissions
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	stsURL := fmt.Sprintf("https://sts.%s.amazonaws.com/?Action=GetCallerIdentity&Version=2011-06-15", region)
+	req, err := http.NewRequest("GET", stsURL, nil)
+	if err != nil {
+		return ValidateResponse{Valid: false, Message: fmt.Sprintf("failed to create request: %v", err)}
+	}
+
+	// AWS Signature V4 requires the SDK for proper signing; for a basic connectivity test
+	// we verify the endpoint is reachable and credentials format is valid
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return ValidateResponse{Valid: false, Message: fmt.Sprintf("connection failed: %v", err)}
+	}
+	defer resp.Body.Close()
+
+	// STS endpoint is reachable - credentials format will be validated by the provider controller
+	return ValidateResponse{
+		Valid:   true,
+		Message: fmt.Sprintf("AWS endpoint reachable in region %s (credential validation deferred to provider controller)", region),
+	}
+}
+
+func testAzureConnection(subscriptionID, tenantID, clientID, clientSecret string) ValidateResponse {
+	if subscriptionID == "" {
+		return ValidateResponse{Valid: false, Message: "subscriptionId is required"}
+	}
+	if tenantID == "" || clientID == "" || clientSecret == "" {
+		return ValidateResponse{Valid: false, Message: "tenantId, clientId, and clientSecret are required"}
+	}
+
+	// Test by requesting an OAuth2 token from Azure AD
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	tokenURL := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", tenantID)
+	body := fmt.Sprintf("grant_type=client_credentials&client_id=%s&client_secret=%s&scope=https://management.azure.com/.default",
+		clientID, clientSecret)
+
+	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(body))
+	if err != nil {
+		return ValidateResponse{Valid: false, Message: fmt.Sprintf("failed to create request: %v", err)}
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return ValidateResponse{Valid: false, Message: fmt.Sprintf("connection failed: %v", err)}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 401 || resp.StatusCode == 400 {
+		return ValidateResponse{Valid: false, Message: "authentication failed: invalid credentials"}
+	}
+	if resp.StatusCode >= 400 {
+		return ValidateResponse{Valid: false, Message: fmt.Sprintf("Azure AD error: HTTP %d", resp.StatusCode)}
+	}
+
+	return ValidateResponse{
+		Valid:   true,
+		Message: "Connected to Azure successfully",
+	}
+}
+
+func testGCPConnection(projectID, region, serviceAccount string) ValidateResponse {
+	if projectID == "" {
+		return ValidateResponse{Valid: false, Message: "projectId is required"}
+	}
+	if region == "" {
+		return ValidateResponse{Valid: false, Message: "region is required"}
+	}
+	if serviceAccount == "" {
+		return ValidateResponse{Valid: false, Message: "serviceAccount (JSON key) is required"}
+	}
+
+	// Validate the service account JSON is parseable
+	var saKey map[string]interface{}
+	if err := json.Unmarshal([]byte(serviceAccount), &saKey); err != nil {
+		return ValidateResponse{Valid: false, Message: fmt.Sprintf("invalid service account JSON: %v", err)}
+	}
+
+	// Check required fields in the service account key
+	if _, ok := saKey["client_email"]; !ok {
+		return ValidateResponse{Valid: false, Message: "service account JSON missing client_email field"}
+	}
+	if _, ok := saKey["private_key"]; !ok {
+		return ValidateResponse{Valid: false, Message: "service account JSON missing private_key field"}
+	}
+
+	return ValidateResponse{
+		Valid:   true,
+		Message: fmt.Sprintf("GCP service account key validated for project %s (full auth deferred to provider controller)", projectID),
 	}
 }
 

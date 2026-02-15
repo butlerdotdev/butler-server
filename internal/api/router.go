@@ -139,6 +139,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 		userService,
 		sessionService,
 		teamResolver,
+		cfg.K8sClient,
 		cfg.Config,
 		cfg.Logger.With("component", "users"),
 	)
@@ -149,6 +150,8 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	certificateHandler := handlers.NewCertificateHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "certificates"))
 	gitopsHandler := handlers.NewGitOpsHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "gitops"))
 	identityProviderHandler := handlers.NewIdentityProvidersHandler(cfg.K8sClient, cfg.Config)
+	networksHandler := handlers.NewNetworksHandler(cfg.K8sClient, cfg.Config)
+	workspaceHandler := handlers.NewWorkspaceHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "workspaces"))
 
 	// Auth middleware - SECURITY: Now re-validates team membership on every request
 	authMiddleware := auth.SessionMiddleware(auth.SessionMiddlewareConfig{
@@ -224,6 +227,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Get("/clusters/{namespace}/{name}", clusterHandler.Get)
 			r.Delete("/clusters/{namespace}/{name}", clusterHandler.Delete)
 			r.Patch("/clusters/{namespace}/{name}/scale", clusterHandler.Scale)
+			r.Post("/clusters/{namespace}/{name}/settings/workspaces", clusterHandler.ToggleWorkspaces)
 			r.Get("/clusters/{namespace}/{name}/kubeconfig", clusterHandler.GetKubeconfig)
 			r.Get("/clusters/{namespace}/{name}/nodes", clusterHandler.GetNodes)
 			r.Get("/clusters/{namespace}/{name}/events", clusterHandler.GetEvents)
@@ -259,6 +263,33 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Get("/clusters/{namespace}/{name}/certificates/rotation-status", certificateHandler.GetRotationStatus)
 			r.Get("/clusters/{namespace}/{name}/certificates/{category}", certificateHandler.GetCertificatesByCategory)
 
+			// Workspaces
+			r.Get("/clusters/{namespace}/{name}/workspaces", workspaceHandler.List)
+			r.Post("/clusters/{namespace}/{name}/workspaces", workspaceHandler.Create)
+			r.Get("/clusters/{namespace}/{name}/workspaces/{workspace}", workspaceHandler.Get)
+			r.Delete("/clusters/{namespace}/{name}/workspaces/{workspace}", workspaceHandler.Delete)
+			r.Post("/clusters/{namespace}/{name}/workspaces/{workspace}/connect", workspaceHandler.Connect)
+			r.Post("/clusters/{namespace}/{name}/workspaces/{workspace}/disconnect", workspaceHandler.Disconnect)
+			r.Post("/clusters/{namespace}/{name}/workspaces/{workspace}/start", workspaceHandler.StartWorkspace)
+			r.Get("/clusters/{namespace}/{name}/workspaces/{workspace}/metrics", workspaceHandler.GetMetrics)
+			r.Post("/clusters/{namespace}/{name}/workspaces/{workspace}/sync-ssh-keys", workspaceHandler.SyncSSHKeys)
+
+			// Cluster services (for mirrord)
+			r.Get("/clusters/{namespace}/{name}/services", workspaceHandler.ListServices)
+			r.Post("/clusters/{namespace}/{name}/mirrord-config", workspaceHandler.GenerateMirrordConfig)
+
+			// Workspace images and templates
+			r.Get("/workspace-images", workspaceHandler.ListImages)
+			r.Get("/workspace-templates", workspaceHandler.ListTemplates)
+			r.Post("/workspace-templates", workspaceHandler.CreateTemplate)
+			r.Post("/workspace-templates/{namespace}/{name}", workspaceHandler.UpdateTemplate)
+			r.Delete("/workspace-templates/{namespace}/{name}", workspaceHandler.DeleteTemplate)
+
+			// SSH keys (user self-service)
+			r.Get("/auth/ssh-keys", userHandler.ListSSHKeys)
+			r.Post("/auth/ssh-keys", userHandler.AddSSHKey)
+			r.Delete("/auth/ssh-keys/{fingerprint}", userHandler.RemoveSSHKey)
+
 			// Providers
 			r.Get("/providers", providerHandler.List)
 			r.Post("/providers", providerHandler.Create)
@@ -278,6 +309,12 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Get("/teams/{name}/clusters", teamHandler.ListClusters)
 			r.Get("/teams/{name}/members", teamHandler.ListMembers)
 			r.Get("/teams/{name}/groups", teamHandler.ListGroupSyncs)
+
+			// Team provider management (team members can list, team admins can create/delete)
+			r.Get("/teams/{name}/providers", providerHandler.ListTeamProviders)
+			r.Post("/teams/{name}/providers", providerHandler.CreateTeamProvider)
+			r.Post("/teams/{name}/providers/test", providerHandler.TestConnection)
+			r.Delete("/teams/{name}/providers/{namespace}/{providerName}", providerHandler.DeleteTeamProvider)
 
 			// User listing (any authenticated user can view)
 			r.Get("/users", userHandler.ListUsers)
@@ -314,6 +351,15 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 					r.Delete("/{name}", identityProviderHandler.Delete)
 					r.Post("/{name}/validate", identityProviderHandler.Validate)
 				})
+
+				// Network pools and IP allocations
+				r.Get("/networks", networksHandler.ListNetworkPools)
+				r.Post("/networks", networksHandler.CreateNetworkPool)
+				r.Get("/networks/{namespace}/{name}", networksHandler.GetNetworkPool)
+				r.Delete("/networks/{namespace}/{name}", networksHandler.DeleteNetworkPool)
+				r.Get("/networks/{namespace}/{name}/allocations", networksHandler.ListAllocations)
+				r.Get("/ipallocations", networksHandler.ListAllAllocations)
+				r.Delete("/ipallocations/{namespace}/{name}", networksHandler.ReleaseAllocation)
 
 			})
 		})

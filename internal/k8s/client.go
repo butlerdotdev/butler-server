@@ -72,6 +72,18 @@ var (
 		Version:  "v1alpha1",
 		Resource: "addondefinitions",
 	}
+
+	NetworkPoolGVR = schema.GroupVersionResource{
+		Group:    "butler.butlerlabs.dev",
+		Version:  "v1alpha1",
+		Resource: "networkpools",
+	}
+
+	IPAllocationGVR = schema.GroupVersionResource{
+		Group:    "butler.butlerlabs.dev",
+		Version:  "v1alpha1",
+		Resource: "ipallocations",
+	}
 )
 
 // Client wraps Kubernetes client functionality.

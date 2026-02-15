@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/butlerdotdev/butler-server/internal/k8s"
 
@@ -100,8 +101,19 @@ func (t *TerminalSession) Run(conn *websocket.Conn) {
 	}
 	defer t.cleanup()
 
+	// Configure keepalive: pong handler extends the read deadline so the
+	// connection stays alive during long idle periods (e.g., reading code
+	// in neovim). Without this, intermediate proxies or the browser will
+	// close the WebSocket after ~60s of inactivity.
+	conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		return nil
+	})
+
 	done := make(chan struct{})
 
+	// PTY → WebSocket: read shell output and forward to client
 	go func() {
 		defer close(done)
 		buf := make([]byte, 4096)
@@ -123,6 +135,7 @@ func (t *TerminalSession) Run(conn *websocket.Conn) {
 		}
 	}()
 
+	// WebSocket → PTY: read client input and forward to shell
 	go func() {
 		for {
 			_, data, err := t.conn.ReadMessage()
@@ -146,6 +159,23 @@ func (t *TerminalSession) Run(conn *websocket.Conn) {
 
 			if _, err := t.pty.Write(data); err != nil {
 				t.log.Debug("PTY write error", "error", err)
+				return
+			}
+		}
+	}()
+
+	// Ping ticker: send WebSocket pings every 30s to keep the connection
+	// alive through proxies and prevent browser idle timeouts.
+	pingTicker := time.NewTicker(30 * time.Second)
+	defer pingTicker.Stop()
+
+	go func() {
+		for range pingTicker.C {
+			t.mu.Lock()
+			err := t.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second))
+			t.mu.Unlock()
+			if err != nil {
+				t.log.Debug("Ping failed", "error", err)
 				return
 			}
 		}
@@ -201,17 +231,32 @@ func (t *TerminalSession) setupKubeconfig() (string, error) {
 }
 
 func (t *TerminalSession) startShell() error {
-	shell := "/bin/bash"
-	if _, err := os.Stat("/bin/bash"); err != nil {
-		shell = "/bin/sh"
-	}
-
 	ptmx, tty, err := pty.Open()
 	if err != nil {
 		return fmt.Errorf("failed to open pty: %w", err)
 	}
 
-	t.cmd = exec.Command(shell)
+	// For workspace type, exec into the workspace pod on the tenant cluster
+	if t.config.Type == "workspace" && t.config.Pod != "" && t.kubeconfigPath != "" {
+		container := t.config.Container
+		if container == "" {
+			container = "workspace"
+		}
+		t.cmd = exec.Command("kubectl", "exec", "-it",
+			"--kubeconfig", t.kubeconfigPath,
+			"-n", "workspaces",
+			t.config.Pod,
+			"-c", container,
+			"--", "/bin/bash",
+		)
+	} else {
+		shell := "/bin/bash"
+		if _, err := os.Stat("/bin/bash"); err != nil {
+			shell = "/bin/sh"
+		}
+		t.cmd = exec.Command(shell)
+	}
+
 	t.cmd.Stdin = tty
 	t.cmd.Stdout = tty
 	t.cmd.Stderr = tty
