@@ -30,11 +30,13 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
 FROM alpine:3.21
 ARG TARGETARCH
 
-# Install bash, kubectl, and ca-certs
+# Install bash, kubectl, flux CLI, and ca-certs
+ENV FLUX_VERSION=2.4.0
 RUN apk add --no-cache bash curl ca-certificates && \
     curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/${TARGETARCH}/kubectl" && \
     chmod +x kubectl && \
     mv kubectl /usr/local/bin/ && \
+    curl -sL "https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_linux_${TARGETARCH}.tar.gz" | tar xz -C /usr/local/bin/ && \
     rm -rf /var/cache/apk/*
 
 WORKDIR /app
