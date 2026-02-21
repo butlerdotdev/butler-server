@@ -137,6 +137,33 @@ func (c *Client) UpdateButlerConfigTyped(ctx context.Context, bc *butlerv1alpha1
 	return result, nil
 }
 
+// UpdateButlerConfigStatusTyped updates only the status subresource of the ButlerConfig.
+func (c *Client) UpdateButlerConfigStatusTyped(ctx context.Context, bc *butlerv1alpha1.ButlerConfig) (*butlerv1alpha1.ButlerConfig, error) {
+	unstructuredMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(bc)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert ButlerConfig to unstructured: %w", err)
+	}
+
+	existing, err := c.dynamicClient.Resource(ButlerConfigGVR).Get(ctx, "butler", metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	// Only update the status portion
+	existing.Object["status"] = unstructuredMap["status"]
+	updated, err := c.dynamicClient.Resource(ButlerConfigGVR).UpdateStatus(ctx, existing, metav1.UpdateOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	result := &butlerv1alpha1.ButlerConfig{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(updated.Object, result); err != nil {
+		return nil, fmt.Errorf("failed to convert updated ButlerConfig: %w", err)
+	}
+
+	return result, nil
+}
+
 // ListTenantClustersTyped lists all TenantClusters in a namespace and returns typed structs.
 func (c *Client) ListTenantClustersTyped(ctx context.Context, namespace string) (*butlerv1alpha1.TenantClusterList, error) {
 	var unstructuredList *unstructured.UnstructuredList

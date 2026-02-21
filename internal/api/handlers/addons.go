@@ -355,13 +355,15 @@ func (h *AddonsHandler) InstallAddon(w http.ResponseWriter, r *http.Request) {
 		spec["values"] = req.Values
 	}
 
-	resourceName := req.Addon
-	if resourceName == "" && req.Helm != nil {
-		resourceName = req.Helm.ReleaseName
-		if resourceName == "" {
-			resourceName = req.Helm.Chart
+	baseName := req.Addon
+	if baseName == "" && req.Helm != nil {
+		baseName = req.Helm.ReleaseName
+		if baseName == "" {
+			baseName = req.Helm.Chart
 		}
 	}
+	// Include cluster name to avoid collisions when multiple clusters share a namespace
+	resourceName := fmt.Sprintf("%s-%s", baseName, clusterName)
 
 	tenantAddon := &unstructured.Unstructured{
 		Object: map[string]interface{}{

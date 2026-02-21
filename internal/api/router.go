@@ -152,6 +152,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	identityProviderHandler := handlers.NewIdentityProvidersHandler(cfg.K8sClient, cfg.Config)
 	networksHandler := handlers.NewNetworksHandler(cfg.K8sClient, cfg.Config)
 	workspaceHandler := handlers.NewWorkspaceHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "workspaces"))
+	observabilityHandler := handlers.NewObservabilityHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "observability"))
 
 	// Auth middleware - SECURITY: Now re-validates team membership on every request
 	authMiddleware := auth.SessionMiddleware(auth.SessionMiddlewareConfig{
@@ -290,6 +291,9 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Post("/auth/ssh-keys", userHandler.AddSSHKey)
 			r.Delete("/auth/ssh-keys/{fingerprint}", userHandler.RemoveSSHKey)
 
+			// Observability config (any authenticated user can read)
+			r.Get("/observability/config", observabilityHandler.GetConfig)
+
 			// Providers
 			r.Get("/providers", providerHandler.List)
 			r.Post("/providers", providerHandler.Create)
@@ -360,6 +364,12 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Get("/networks/{namespace}/{name}/allocations", networksHandler.ListAllocations)
 				r.Get("/ipallocations", networksHandler.ListAllAllocations)
 				r.Delete("/ipallocations/{namespace}/{name}", networksHandler.ReleaseAllocation)
+
+				// Observability management (admin only)
+				r.Put("/observability/config", observabilityHandler.UpdateConfig)
+				r.Get("/observability/status", observabilityHandler.GetStatus)
+				r.Post("/observability/pipeline/setup", observabilityHandler.SetupPipeline)
+				r.Delete("/observability/pipeline", observabilityHandler.DeregisterPipeline)
 
 			})
 		})

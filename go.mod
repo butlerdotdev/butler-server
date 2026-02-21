@@ -3,7 +3,7 @@ module github.com/butlerdotdev/butler-server
 go 1.24.6
 
 require (
-	github.com/butlerdotdev/butler-api v0.3.1-0.20260215211731-ce8b92b32168
+	github.com/butlerdotdev/butler-api v0.4.1-0.20260228030305-140667362f7c
 	github.com/coreos/go-oidc/v3 v3.17.0
 	github.com/creack/pty v1.1.9
 	github.com/go-chi/chi/v5 v5.2.0
@@ -79,5 +79,3 @@ require (
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 )
-
-// replace github.com/butlerdotdev/butler-api => ../butler-api
