@@ -3,7 +3,7 @@ module github.com/butlerdotdev/butler-server
 go 1.24.6
 
 require (
-	github.com/butlerdotdev/butler-api v0.4.1-0.20260228030305-140667362f7c
+	github.com/butlerdotdev/butler-api v0.4.1-0.20260228135713-24a3d9923dcf
 	github.com/coreos/go-oidc/v3 v3.17.0
 	github.com/creack/pty v1.1.9
 	github.com/go-chi/chi/v5 v5.2.0
