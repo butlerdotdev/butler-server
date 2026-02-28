@@ -50,7 +50,7 @@ jobs:
   image:
     needs: build
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: butler-runners
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
