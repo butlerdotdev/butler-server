@@ -8,6 +8,8 @@ github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5 h1:0CwZNZbxp69SHPd
 github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5/go.mod h1:wHh0iHkYZB8zMSxRWpUBQtwG5a7fFgvEO+odwuTv2gs=
 github.com/butlerdotdev/butler-api v0.4.1-0.20260228030305-140667362f7c h1:AFEK56foqZf82tEG39PFHU0yaso+PrHhE3u7LXZVPZk=
 github.com/butlerdotdev/butler-api v0.4.1-0.20260228030305-140667362f7c/go.mod h1:q/RjPFM/r2ELq4DqR78OiAxerKBvH5D4nTGsVLKbjqY=
+github.com/butlerdotdev/butler-api v0.4.1-0.20260228135713-24a3d9923dcf h1:fc0lGJJr20BeDCSuAWWOakiHqiKRR9CvuKdWqURhOdY=
+github.com/butlerdotdev/butler-api v0.4.1-0.20260228135713-24a3d9923dcf/go.mod h1:q/RjPFM/r2ELq4DqR78OiAxerKBvH5D4nTGsVLKbjqY=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/coreos/go-oidc/v3 v3.17.0 h1:hWBGaQfbi0iVviX4ibC7bk8OKT5qNr4klBaCHVNvehc=

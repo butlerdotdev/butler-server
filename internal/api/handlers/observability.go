@@ -65,9 +65,16 @@ type PipelineConfigInfo struct {
 	TraceEndpoint    string `json:"traceEndpoint,omitempty"`
 }
 
+// AutoEnrollInfo contains per-agent auto-enrollment settings.
+type AutoEnrollInfo struct {
+	VectorAgent   bool `json:"vectorAgent"`
+	Prometheus    bool `json:"prometheus"`
+	OtelCollector bool `json:"otelCollector"`
+}
+
 // CollectionConfigInfo contains collection defaults.
 type CollectionConfigInfo struct {
-	AutoEnroll bool                  `json:"autoEnroll"`
+	AutoEnroll *AutoEnrollInfo       `json:"autoEnroll,omitempty"`
 	Logs       *LogCollectionInfo    `json:"logs,omitempty"`
 	Metrics    *MetricCollectionInfo `json:"metrics,omitempty"`
 }
@@ -593,8 +600,13 @@ func (h *ObservabilityHandler) buildConfigResponse(bc *butlerv1alpha1.ButlerConf
 	}
 
 	if obs.Collection != nil {
-		resp.Collection = &CollectionConfigInfo{
-			AutoEnroll: obs.Collection.AutoEnroll,
+		resp.Collection = &CollectionConfigInfo{}
+		if obs.Collection.AutoEnroll != nil {
+			resp.Collection.AutoEnroll = &AutoEnrollInfo{
+				VectorAgent:   obs.Collection.AutoEnroll.VectorAgent,
+				Prometheus:    obs.Collection.AutoEnroll.Prometheus,
+				OtelCollector: obs.Collection.AutoEnroll.OtelCollector,
+			}
 		}
 		if obs.Collection.Logs != nil {
 			resp.Collection.Logs = &LogCollectionInfo{
@@ -644,7 +656,13 @@ func (h *ObservabilityHandler) applyConfigUpdate(bc *butlerv1alpha1.ButlerConfig
 		if bc.Spec.Observability.Collection == nil {
 			bc.Spec.Observability.Collection = &butlerv1alpha1.ObservabilityCollectionConfig{}
 		}
-		bc.Spec.Observability.Collection.AutoEnroll = req.Collection.AutoEnroll
+		if req.Collection.AutoEnroll != nil {
+			bc.Spec.Observability.Collection.AutoEnroll = &butlerv1alpha1.AutoEnrollConfig{
+				VectorAgent:   req.Collection.AutoEnroll.VectorAgent,
+				Prometheus:    req.Collection.AutoEnroll.Prometheus,
+				OtelCollector: req.Collection.AutoEnroll.OtelCollector,
+			}
+		}
 		if req.Collection.Logs != nil {
 			bc.Spec.Observability.Collection.Logs = &butlerv1alpha1.LogCollectionDefaults{
 				PodLogs:          req.Collection.Logs.PodLogs,
