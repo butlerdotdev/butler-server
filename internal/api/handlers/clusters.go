@@ -207,6 +207,9 @@ type CreateClusterRequest struct {
 	ProxmoxStorage    string `json:"proxmoxStorage,omitempty"`
 	ProxmoxTemplateID int    `json:"proxmoxTemplateID,omitempty"`
 
+	// OS type (derived from selected image)
+	OSType string `json:"osType,omitempty"`
+
 	// Workspaces
 	WorkspacesEnabled bool `json:"workspacesEnabled,omitempty"`
 }
@@ -249,7 +252,7 @@ func (h *ClusterHandler) Create(w http.ResponseWriter, r *http.Request) {
 		req.Namespace = h.config.TenantNamespace
 	}
 	if req.KubernetesVersion == "" {
-		req.KubernetesVersion = "v1.30.2"
+		req.KubernetesVersion = "v1.32.2"
 	}
 	if req.WorkerReplicas == 0 {
 		req.WorkerReplicas = 1
@@ -271,11 +274,19 @@ func (h *ClusterHandler) Create(w http.ResponseWriter, r *http.Request) {
 		},
 		"workers": map[string]interface{}{
 			"replicas": req.WorkerReplicas,
-			"machineTemplate": map[string]interface{}{
-				"cpu":      req.WorkerCPU,
-				"memory":   req.WorkerMemory,
-				"diskSize": req.WorkerDiskSize,
-			},
+			"machineTemplate": func() map[string]interface{} {
+				mt := map[string]interface{}{
+					"cpu":      req.WorkerCPU,
+					"memory":   req.WorkerMemory,
+					"diskSize": req.WorkerDiskSize,
+				}
+				if req.OSType != "" {
+					mt["os"] = map[string]interface{}{
+						"type": req.OSType,
+					}
+				}
+				return mt
+			}(),
 		},
 		"networking": map[string]interface{}{
 			"loadBalancerPool": map[string]interface{}{
