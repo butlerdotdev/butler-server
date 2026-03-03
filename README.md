@@ -1,6 +1,24 @@
-# Butler Server
+<p align="center">
+  <img src="https://raw.githubusercontent.com/butlerdotdev/butler/main/assets/mascots/butler.png" alt="Butler" width="150"/>
+</p>
 
-Backend API server for Butler Console, providing REST APIs and WebSocket connections for Kubernetes multi-cluster management.
+<h1 align="center">Butler Server</h1>
+
+<p align="center">
+  Backend API server for the <a href="https://github.com/butlerdotdev/butler-console">Butler Console</a>, providing REST APIs and WebSocket connections for cluster management.
+</p>
+
+<p align="center">
+  <a href="https://github.com/butlerdotdev/butler-server/releases"><img src="https://img.shields.io/github/v/release/butlerdotdev/butler-server" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/butlerdotdev/butler-server" alt="License"></a>
+  <img src="https://img.shields.io/github/go-mod/go-version/butlerdotdev/butler-server" alt="Go Version">
+</p>
+
+<p align="center">
+  <a href="https://github.com/butlerdotdev/butler">Butler</a> · <a href="https://docs.butlerlabs.dev">Docs</a> · <a href="https://butlerlabs.dev">Website</a>
+</p>
+
+---
 
 ## Overview
 
