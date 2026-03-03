@@ -212,6 +212,28 @@ type CreateClusterRequest struct {
 
 	// Workspaces
 	WorkspacesEnabled bool `json:"workspacesEnabled,omitempty"`
+
+	// Control plane resource overrides (optional)
+	ControlPlaneResources *ControlPlaneResourcesRequest `json:"controlPlaneResources,omitempty"`
+}
+
+// ControlPlaneResourcesRequest defines optional control plane resource overrides.
+type ControlPlaneResourcesRequest struct {
+	APIServer         *ComponentResourcesRequest `json:"apiServer,omitempty"`
+	ControllerManager *ComponentResourcesRequest `json:"controllerManager,omitempty"`
+	Scheduler         *ComponentResourcesRequest `json:"scheduler,omitempty"`
+}
+
+// ComponentResourcesRequest defines CPU and memory requests/limits for a component.
+type ComponentResourcesRequest struct {
+	Requests *ResourceQuantitiesRequest `json:"requests,omitempty"`
+	Limits   *ResourceQuantitiesRequest `json:"limits,omitempty"`
+}
+
+// ResourceQuantitiesRequest defines CPU and memory quantities.
+type ResourceQuantitiesRequest struct {
+	CPU    string `json:"cpu,omitempty"`
+	Memory string `json:"memory,omitempty"`
 }
 
 // Create creates a new tenant cluster.
@@ -357,6 +379,28 @@ func (h *ClusterHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 		spec["infrastructureOverride"] = map[string]interface{}{
 			"proxmox": infraOverride,
+		}
+	}
+
+	// Add control plane resources if provided
+	if req.ControlPlaneResources != nil {
+		cpResources := map[string]interface{}{}
+		if req.ControlPlaneResources.APIServer != nil {
+			cpResources["apiServer"] = buildComponentResourcesMap(req.ControlPlaneResources.APIServer)
+		}
+		if req.ControlPlaneResources.ControllerManager != nil {
+			cpResources["controllerManager"] = buildComponentResourcesMap(req.ControlPlaneResources.ControllerManager)
+		}
+		if req.ControlPlaneResources.Scheduler != nil {
+			cpResources["scheduler"] = buildComponentResourcesMap(req.ControlPlaneResources.Scheduler)
+		}
+		if len(cpResources) > 0 {
+			controlPlane, ok := spec["controlPlane"].(map[string]interface{})
+			if !ok {
+				controlPlane = map[string]interface{}{}
+			}
+			controlPlane["resources"] = cpResources
+			spec["controlPlane"] = controlPlane
 		}
 	}
 
@@ -906,4 +950,34 @@ func getRestartCount(pod corev1.Pod) int32 {
 		restarts += cs.RestartCount
 	}
 	return restarts
+}
+
+// buildComponentResourcesMap converts a ComponentResourcesRequest to a nested map for the CRD.
+func buildComponentResourcesMap(cr *ComponentResourcesRequest) map[string]interface{} {
+	result := map[string]interface{}{}
+	if cr.Requests != nil {
+		reqMap := map[string]interface{}{}
+		if cr.Requests.CPU != "" {
+			reqMap["cpu"] = cr.Requests.CPU
+		}
+		if cr.Requests.Memory != "" {
+			reqMap["memory"] = cr.Requests.Memory
+		}
+		if len(reqMap) > 0 {
+			result["requests"] = reqMap
+		}
+	}
+	if cr.Limits != nil {
+		limMap := map[string]interface{}{}
+		if cr.Limits.CPU != "" {
+			limMap["cpu"] = cr.Limits.CPU
+		}
+		if cr.Limits.Memory != "" {
+			limMap["memory"] = cr.Limits.Memory
+		}
+		if len(limMap) > 0 {
+			result["limits"] = limMap
+		}
+	}
+	return result
 }
