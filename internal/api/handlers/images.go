@@ -65,39 +65,11 @@ type CreateImageSyncRequest struct {
 	SchematicID    string `json:"schematicID"`
 	Version        string `json:"version"`
 	Arch           string `json:"arch,omitempty"`
+	Platform       string `json:"platform,omitempty"`
 	ProviderConfig string `json:"providerConfig"` // "namespace/name" format
 	Format         string `json:"format,omitempty"`
 	TransferMode   string `json:"transferMode,omitempty"`
 	DisplayName    string `json:"displayName,omitempty"`
-}
-
-// ImageSyncResponse represents an image sync in API responses.
-type ImageSyncResponse struct {
-	Name             string `json:"name"`
-	Namespace        string `json:"namespace"`
-	Phase            string `json:"phase"`
-	SchematicID      string `json:"schematicID"`
-	Version          string `json:"version"`
-	Arch             string `json:"arch"`
-	ProviderConfig   string `json:"providerConfig"`
-	ProviderImageRef string `json:"providerImageRef,omitempty"`
-	TransferMode     string `json:"transferMode"`
-	Format           string `json:"format"`
-	FailureReason    string `json:"failureReason,omitempty"`
-	FailureMessage   string `json:"failureMessage,omitempty"`
-	CreatedAt        string `json:"createdAt"`
-}
-
-// FactoryCatalogResponse represents the factory catalog proxy response.
-type FactoryCatalogResponse struct {
-	Entries []FactoryCatalogEntry `json:"entries"`
-}
-
-// FactoryCatalogEntry represents a single entry in the factory catalog.
-type FactoryCatalogEntry struct {
-	OS       string   `json:"os"`
-	Versions []string `json:"versions"`
-	Formats  []string `json:"formats"`
 }
 
 // --- Image Sync CRUD ---
@@ -120,14 +92,11 @@ func (h *ImagesHandler) ListImageSyncs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results := make([]ImageSyncResponse, 0, len(imageSyncs.Items))
+	results := make([]map[string]interface{}, 0, len(imageSyncs.Items))
 	for _, is := range imageSyncs.Items {
-		resp := imageSyncFromUnstructured(&is)
-
 		// Filter by team access for non-admin users
 		if user != nil && !user.IsAdmin() {
 			isNamespace := is.GetNamespace()
-			// Non-admin users can only see ImageSyncs in namespaces they have access to
 			if user.SelectedTeam != "" {
 				teamNS := "team-" + user.SelectedTeam
 				if isNamespace != teamNS && isNamespace != h.config.SystemNamespace {
@@ -137,22 +106,26 @@ func (h *ImagesHandler) ListImageSyncs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Apply query param filters
-		if providerFilter != "" && resp.ProviderConfig != "" {
-			// Match on provider config name (last segment of "namespace/name")
-			parts := strings.Split(resp.ProviderConfig, "/")
-			pcName := parts[len(parts)-1]
-			if pcName != providerFilter && resp.ProviderConfig != providerFilter {
+		if providerFilter != "" {
+			pcName, _, _ := unstructured.NestedString(is.Object, "spec", "providerConfigRef", "name")
+			if pcName != providerFilter {
 				continue
 			}
 		}
-		if statusFilter != "" && resp.Phase != statusFilter {
-			continue
+		if statusFilter != "" {
+			phase, _, _ := unstructured.NestedString(is.Object, "status", "phase")
+			if phase != statusFilter {
+				continue
+			}
 		}
-		if schematicFilter != "" && !strings.HasPrefix(resp.SchematicID, schematicFilter) {
-			continue
+		if schematicFilter != "" {
+			schematicID, _, _ := unstructured.NestedString(is.Object, "spec", "factoryRef", "schematicID")
+			if !strings.HasPrefix(schematicID, schematicFilter) {
+				continue
+			}
 		}
 
-		results = append(results, resp)
+		results = append(results, is.Object)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{"imageSyncs": results})
@@ -216,6 +189,9 @@ func (h *ImagesHandler) CreateImageSync(w http.ResponseWriter, r *http.Request) 
 	if req.Arch == "" {
 		req.Arch = "amd64"
 	}
+	if req.Platform == "" {
+		req.Platform = "nocloud"
+	}
 	if req.Format == "" {
 		req.Format = "qcow2"
 	}
@@ -244,6 +220,7 @@ func (h *ImagesHandler) CreateImageSync(w http.ResponseWriter, r *http.Request) 
 			"schematicID": req.SchematicID,
 			"version":     req.Version,
 			"arch":        req.Arch,
+			"platform":    req.Platform,
 		},
 		"providerConfigRef": map[string]interface{}{
 			"name":      pcName,
@@ -279,8 +256,7 @@ func (h *ImagesHandler) CreateImageSync(w http.ResponseWriter, r *http.Request) 
 	}
 
 	h.logger.Info("Created ImageSync", "name", nameBase, "namespace", namespace, "schematicID", req.SchematicID)
-	resp := imageSyncFromUnstructured(created)
-	writeJSON(w, http.StatusCreated, resp)
+	writeJSON(w, http.StatusCreated, created.Object)
 }
 
 // GetImageSync handles GET /api/image-syncs/{namespace}/{name}.
@@ -297,8 +273,7 @@ func (h *ImagesHandler) GetImageSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := imageSyncFromUnstructured(imageSync)
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, imageSync.Object)
 }
 
 // DeleteImageSync handles DELETE /api/image-syncs/{namespace}/{name}.
@@ -462,40 +437,3 @@ func (h *ImagesHandler) proxyFactoryRequest(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-// imageSyncFromUnstructured converts an unstructured ImageSync to the response type.
-func imageSyncFromUnstructured(obj *unstructured.Unstructured) ImageSyncResponse {
-	resp := ImageSyncResponse{
-		Name:      obj.GetName(),
-		Namespace: obj.GetNamespace(),
-		CreatedAt: obj.GetCreationTimestamp().Format(time.RFC3339),
-	}
-
-	// Spec fields
-	resp.SchematicID, _, _ = unstructured.NestedString(obj.Object, "spec", "factoryRef", "schematicID")
-	resp.Version, _, _ = unstructured.NestedString(obj.Object, "spec", "factoryRef", "version")
-	resp.Arch, _, _ = unstructured.NestedString(obj.Object, "spec", "factoryRef", "arch")
-	resp.Format, _, _ = unstructured.NestedString(obj.Object, "spec", "format")
-	resp.TransferMode, _, _ = unstructured.NestedString(obj.Object, "spec", "transferMode")
-
-	// Build providerConfig as "namespace/name"
-	pcName, _, _ := unstructured.NestedString(obj.Object, "spec", "providerConfigRef", "name")
-	pcNamespace, _, _ := unstructured.NestedString(obj.Object, "spec", "providerConfigRef", "namespace")
-	if pcNamespace != "" && pcName != "" {
-		resp.ProviderConfig = pcNamespace + "/" + pcName
-	} else if pcName != "" {
-		resp.ProviderConfig = pcName
-	}
-
-	// Status fields
-	resp.Phase, _, _ = unstructured.NestedString(obj.Object, "status", "phase")
-	resp.ProviderImageRef, _, _ = unstructured.NestedString(obj.Object, "status", "providerImageRef")
-	resp.FailureReason, _, _ = unstructured.NestedString(obj.Object, "status", "failureReason")
-	resp.FailureMessage, _, _ = unstructured.NestedString(obj.Object, "status", "failureMessage")
-
-	// Default phase if empty
-	if resp.Phase == "" {
-		resp.Phase = "Pending"
-	}
-
-	return resp
-}
