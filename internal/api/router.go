@@ -153,6 +153,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	networksHandler := handlers.NewNetworksHandler(cfg.K8sClient, cfg.Config)
 	workspaceHandler := handlers.NewWorkspaceHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "workspaces"))
 	observabilityHandler := handlers.NewObservabilityHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "observability"))
+	imagesHandler := handlers.NewImagesHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "images"))
 
 	// Auth middleware - SECURITY: Now re-validates team membership on every request
 	authMiddleware := auth.SessionMiddleware(auth.SessionMiddlewareConfig{
@@ -293,6 +294,16 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 
 			// Observability config (any authenticated user can read)
 			r.Get("/observability/config", observabilityHandler.GetConfig)
+
+			// Image syncs
+			r.Get("/image-syncs", imagesHandler.ListImageSyncs)
+			r.Post("/image-syncs", imagesHandler.CreateImageSync)
+			r.Get("/image-syncs/{namespace}/{name}", imagesHandler.GetImageSync)
+			r.Delete("/image-syncs/{namespace}/{name}", imagesHandler.DeleteImageSync)
+
+			// Image factory proxy
+			r.Get("/image-factory/catalog", imagesHandler.GetFactoryCatalog)
+			r.Get("/image-factory/schematics/{id}", imagesHandler.GetFactorySchematic)
 
 			// Providers
 			r.Get("/providers", providerHandler.List)
