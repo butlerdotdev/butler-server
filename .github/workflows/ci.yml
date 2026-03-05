@@ -38,6 +38,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Clean up runner disk space
+        run: |
+          go clean -cache -testcache 2>/dev/null || true
+          rm -rf /tmp/go-build* 2>/dev/null || true
+          docker system prune -f 2>/dev/null || true
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
