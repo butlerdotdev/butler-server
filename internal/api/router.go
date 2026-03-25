@@ -154,6 +154,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	workspaceHandler := handlers.NewWorkspaceHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "workspaces"))
 	observabilityHandler := handlers.NewObservabilityHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "observability"))
 	imagesHandler := handlers.NewImagesHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "images"))
+	configHandler := handlers.NewConfigHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "config"))
 
 	// Auth middleware - SECURITY: Now re-validates team membership on every request
 	authMiddleware := auth.SessionMiddleware(auth.SessionMiddlewareConfig{
@@ -375,6 +376,10 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Get("/networks/{namespace}/{name}/allocations", networksHandler.ListAllocations)
 				r.Get("/ipallocations", networksHandler.ListAllAllocations)
 				r.Delete("/ipallocations/{namespace}/{name}", networksHandler.ReleaseAllocation)
+
+				// Platform configuration (admin only)
+				r.Get("/config", configHandler.GetConfig)
+				r.Put("/config", configHandler.UpdateConfig)
 
 				// Observability management (admin only)
 				r.Put("/observability/config", observabilityHandler.UpdateConfig)
