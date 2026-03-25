@@ -18,6 +18,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -79,10 +80,10 @@ type ProviderRefInfo struct {
 // ControlPlaneExposureInfo contains control plane exposure settings.
 type ControlPlaneExposureInfo struct {
 	Mode             string `json:"mode"`
-	Hostname         string `json:"hostname,omitempty"`
-	IngressClassName string `json:"ingressClassName,omitempty"`
-	ControllerType   string `json:"controllerType,omitempty"`
-	GatewayRef       string `json:"gatewayRef,omitempty"`
+	Hostname         string `json:"hostname"`
+	IngressClassName string `json:"ingressClassName"`
+	ControllerType   string `json:"controllerType"`
+	GatewayRef       string `json:"gatewayRef"`
 }
 
 // AddonVersionsInfo contains default addon versions.
@@ -126,8 +127,8 @@ type ResourceQuantitiesInfo struct {
 // ImageFactoryInfo contains image factory configuration.
 type ImageFactoryInfo struct {
 	URL                string `json:"url"`
-	CredentialsRef     string `json:"credentialsRef,omitempty"`
-	DefaultSchematicID string `json:"defaultSchematicID,omitempty"`
+	CredentialsRef     string `json:"credentialsRef"`
+	DefaultSchematicID string `json:"defaultSchematicID"`
 	AutoSync           *bool  `json:"autoSync,omitempty"`
 }
 
@@ -187,7 +188,10 @@ func (h *ConfigHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Apply updates field-by-field with nil checks
-	h.applyUpdate(bc, &req)
+	if err := h.applyUpdate(bc, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	_, err = h.k8sClient.UpdateButlerConfigTyped(ctx, bc)
 	if err != nil {
@@ -318,18 +322,18 @@ func quantityToString(q *resource.Quantity) string {
 	return q.String()
 }
 
-func parseQuantity(s string) *resource.Quantity {
+func parseQuantity(s string) (*resource.Quantity, error) {
 	if s == "" {
-		return nil
+		return nil, nil
 	}
 	q, err := resource.ParseQuantity(s)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("invalid resource quantity %q: %w", s, err)
 	}
-	return &q
+	return &q, nil
 }
 
-func (h *ConfigHandler) applyUpdate(bc *butlerv1alpha1.ButlerConfig, req *UpdateConfigRequest) {
+func (h *ConfigHandler) applyUpdate(bc *butlerv1alpha1.ButlerConfig, req *UpdateConfigRequest) error {
 	if req.MultiTenancy != nil {
 		bc.Spec.MultiTenancy.Mode = butlerv1alpha1.MultiTenancyMode(req.MultiTenancy.Mode)
 	}
@@ -349,30 +353,19 @@ func (h *ConfigHandler) applyUpdate(bc *butlerv1alpha1.ButlerConfig, req *Update
 	}
 
 	if req.ControlPlaneExposure != nil {
-		if bc.Spec.ControlPlaneExposure == nil {
-			bc.Spec.ControlPlaneExposure = &butlerv1alpha1.ControlPlaneExposureSpec{}
-		}
+		// Replace the entire section — empty strings clear the field.
 		cpe := req.ControlPlaneExposure
-		if cpe.Mode != "" {
-			bc.Spec.ControlPlaneExposure.Mode = butlerv1alpha1.ControlPlaneExposureMode(cpe.Mode)
-		}
-		if cpe.Hostname != "" {
-			bc.Spec.ControlPlaneExposure.Hostname = cpe.Hostname
-		}
-		if cpe.IngressClassName != "" {
-			bc.Spec.ControlPlaneExposure.IngressClassName = cpe.IngressClassName
-		}
-		if cpe.ControllerType != "" {
-			bc.Spec.ControlPlaneExposure.ControllerType = cpe.ControllerType
-		}
-		if cpe.GatewayRef != "" {
-			bc.Spec.ControlPlaneExposure.GatewayRef = cpe.GatewayRef
+		bc.Spec.ControlPlaneExposure = &butlerv1alpha1.ControlPlaneExposureSpec{
+			Mode:             butlerv1alpha1.ControlPlaneExposureMode(cpe.Mode),
+			Hostname:         cpe.Hostname,
+			IngressClassName: cpe.IngressClassName,
+			ControllerType:   cpe.ControllerType,
+			GatewayRef:       cpe.GatewayRef,
 		}
 	}
 
 	if req.DefaultAddonVersions != nil {
-		// Replace the entire section — the console sends all fields on save,
-		// so empty strings mean "clear this field".
+		// Replace the entire section — empty strings clear the field.
 		bc.Spec.DefaultAddonVersions = &butlerv1alpha1.AddonVersions{
 			Cilium:      req.DefaultAddonVersions.Cilium,
 			MetalLB:     req.DefaultAddonVersions.MetalLB,
@@ -385,65 +378,104 @@ func (h *ConfigHandler) applyUpdate(bc *butlerv1alpha1.ButlerConfig, req *Update
 
 	if req.DefaultTeamLimits != nil {
 		// Replace the entire section — empty values clear the field.
+		maxCPU, err := parseQuantity(req.DefaultTeamLimits.MaxTotalCPU)
+		if err != nil {
+			return fmt.Errorf("maxTotalCPU: %w", err)
+		}
+		maxMem, err := parseQuantity(req.DefaultTeamLimits.MaxTotalMemory)
+		if err != nil {
+			return fmt.Errorf("maxTotalMemory: %w", err)
+		}
+		maxStorage, err := parseQuantity(req.DefaultTeamLimits.MaxTotalStorage)
+		if err != nil {
+			return fmt.Errorf("maxTotalStorage: %w", err)
+		}
 		bc.Spec.DefaultTeamLimits = &butlerv1alpha1.ResourceLimits{
 			MaxClusters:          req.DefaultTeamLimits.MaxClusters,
 			MaxWorkersPerCluster: req.DefaultTeamLimits.MaxWorkersPerCluster,
-			MaxTotalCPU:          parseQuantity(req.DefaultTeamLimits.MaxTotalCPU),
-			MaxTotalMemory:       parseQuantity(req.DefaultTeamLimits.MaxTotalMemory),
-			MaxTotalStorage:      parseQuantity(req.DefaultTeamLimits.MaxTotalStorage),
+			MaxTotalCPU:          maxCPU,
+			MaxTotalMemory:       maxMem,
+			MaxTotalStorage:      maxStorage,
 		}
 	}
 
 	if req.DefaultControlPlaneResources != nil {
 		// Replace the entire section — empty values clear the field.
-		bc.Spec.DefaultControlPlaneResources = &butlerv1alpha1.ControlPlaneResourcesSpec{
-			APIServer:         buildComponentResources(req.DefaultControlPlaneResources.APIServer),
-			ControllerManager: buildComponentResources(req.DefaultControlPlaneResources.ControllerManager),
-			Scheduler:         buildComponentResources(req.DefaultControlPlaneResources.Scheduler),
+		cpr, err := buildComponentResourcesValidated(req.DefaultControlPlaneResources)
+		if err != nil {
+			return fmt.Errorf("defaultControlPlaneResources: %w", err)
 		}
+		bc.Spec.DefaultControlPlaneResources = cpr
 	}
 
 	if req.ImageFactory != nil {
-		if bc.Spec.ImageFactory == nil {
-			bc.Spec.ImageFactory = &butlerv1alpha1.ImageFactoryConfig{}
-		}
-		if req.ImageFactory.URL != "" {
-			bc.Spec.ImageFactory.URL = req.ImageFactory.URL
-		}
-		if req.ImageFactory.DefaultSchematicID != "" {
-			bc.Spec.ImageFactory.DefaultSchematicID = req.ImageFactory.DefaultSchematicID
-		}
-		if req.ImageFactory.AutoSync != nil {
-			bc.Spec.ImageFactory.AutoSync = req.ImageFactory.AutoSync
+		// Replace the entire section — empty strings clear the field.
+		ifCfg := &butlerv1alpha1.ImageFactoryConfig{
+			URL:                req.ImageFactory.URL,
+			DefaultSchematicID: req.ImageFactory.DefaultSchematicID,
+			AutoSync:           req.ImageFactory.AutoSync,
 		}
 		if req.ImageFactory.CredentialsRef != "" {
-			bc.Spec.ImageFactory.CredentialsRef = &butlerv1alpha1.SecretReference{
+			ifCfg.CredentialsRef = &butlerv1alpha1.SecretReference{
 				Name: req.ImageFactory.CredentialsRef,
 			}
 		}
+		bc.Spec.ImageFactory = ifCfg
 	}
 
 	if req.SSHAuthorizedKey != nil {
 		bc.Spec.SSHAuthorizedKey = *req.SSHAuthorizedKey
 	}
+
+	return nil
 }
 
-func buildComponentResources(source *ComponentResourcesInfo) *butlerv1alpha1.ComponentResources {
+func buildComponentResourcesValidated(source *CPResourcesInfo) (*butlerv1alpha1.ControlPlaneResourcesSpec, error) {
+	apiServer, err := buildComponentResources(source.APIServer, "apiServer")
+	if err != nil {
+		return nil, err
+	}
+	cm, err := buildComponentResources(source.ControllerManager, "controllerManager")
+	if err != nil {
+		return nil, err
+	}
+	sched, err := buildComponentResources(source.Scheduler, "scheduler")
+	if err != nil {
+		return nil, err
+	}
+	return &butlerv1alpha1.ControlPlaneResourcesSpec{
+		APIServer:         apiServer,
+		ControllerManager: cm,
+		Scheduler:         sched,
+	}, nil
+}
+
+func buildComponentResources(source *ComponentResourcesInfo, name string) (*butlerv1alpha1.ComponentResources, error) {
 	if source == nil {
-		return nil
+		return nil, nil
 	}
 	cr := &butlerv1alpha1.ComponentResources{}
 	if source.Requests != nil {
-		cr.Requests = &butlerv1alpha1.ResourceQuantities{
-			CPU:    parseQuantity(source.Requests.CPU),
-			Memory: parseQuantity(source.Requests.Memory),
+		cpu, err := parseQuantity(source.Requests.CPU)
+		if err != nil {
+			return nil, fmt.Errorf("%s.requests.cpu: %w", name, err)
 		}
+		mem, err := parseQuantity(source.Requests.Memory)
+		if err != nil {
+			return nil, fmt.Errorf("%s.requests.memory: %w", name, err)
+		}
+		cr.Requests = &butlerv1alpha1.ResourceQuantities{CPU: cpu, Memory: mem}
 	}
 	if source.Limits != nil {
-		cr.Limits = &butlerv1alpha1.ResourceQuantities{
-			CPU:    parseQuantity(source.Limits.CPU),
-			Memory: parseQuantity(source.Limits.Memory),
+		cpu, err := parseQuantity(source.Limits.CPU)
+		if err != nil {
+			return nil, fmt.Errorf("%s.limits.cpu: %w", name, err)
 		}
+		mem, err := parseQuantity(source.Limits.Memory)
+		if err != nil {
+			return nil, fmt.Errorf("%s.limits.memory: %w", name, err)
+		}
+		cr.Limits = &butlerv1alpha1.ResourceQuantities{CPU: cpu, Memory: mem}
 	}
-	return cr
+	return cr, nil
 }
