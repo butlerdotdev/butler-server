@@ -88,6 +88,7 @@ type InstalledAddonResponse struct {
 	ManagedBy        string                 `json:"managedBy,omitempty"`
 	Namespace        string                 `json:"namespace,omitempty"`
 	Message          string                 `json:"message,omitempty"`
+	Values           map[string]interface{} `json:"values,omitempty"`
 	HelmRelease      map[string]interface{} `json:"helmRelease,omitempty"`
 	Conditions       []ConditionResponse    `json:"conditions,omitempty"`
 }
@@ -762,6 +763,7 @@ func (h *AddonsHandler) tenantAddonToResponse(ctx context.Context, ta *unstructu
 		addonName = name
 	}
 	version, _, _ := unstructured.NestedString(ta.Object, "spec", "version")
+	values, _, _ := unstructured.NestedMap(ta.Object, "spec", "values")
 
 	phase, _, _ := unstructured.NestedString(ta.Object, "status", "phase")
 	installedVersion, _, _ := unstructured.NestedString(ta.Object, "status", "installedVersion")
@@ -810,6 +812,7 @@ func (h *AddonsHandler) tenantAddonToResponse(ctx context.Context, ta *unstructu
 		ManagedBy:        "butler",
 		Namespace:        namespace,
 		Message:          message,
+		Values:           values,
 		HelmRelease:      helmRelease,
 		Conditions:       conditions,
 	}
