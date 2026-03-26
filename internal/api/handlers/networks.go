@@ -180,6 +180,108 @@ func (h *NetworksHandler) CreateNetworkPool(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusCreated, created.Object)
 }
 
+// UpdateNetworkPoolRequest represents a network pool update request.
+type UpdateNetworkPoolRequest struct {
+	Reserved []struct {
+		CIDR        string `json:"cidr"`
+		Description string `json:"description,omitempty"`
+	} `json:"reserved,omitempty"`
+	TenantAllocation *struct {
+		Start    string `json:"start,omitempty"`
+		End      string `json:"end,omitempty"`
+		Defaults *struct {
+			NodesPerTenant  *int32 `json:"nodesPerTenant,omitempty"`
+			LBPoolPerTenant *int32 `json:"lbPoolPerTenant,omitempty"`
+		} `json:"defaults,omitempty"`
+	} `json:"tenantAllocation,omitempty"`
+}
+
+// UpdateNetworkPool updates a NetworkPool's mutable fields (reserved ranges, tenant allocation).
+func (h *NetworksHandler) UpdateNetworkPool(w http.ResponseWriter, r *http.Request) {
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+
+	var req UpdateNetworkPoolRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Fetch the existing pool.
+	pool, err := h.k8sClient.Dynamic().Resource(k8s.NetworkPoolGVR).Namespace(namespace).Get(r.Context(), name, metav1.GetOptions{})
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("network pool not found: %v", err))
+		return
+	}
+
+	spec, _, _ := unstructured.NestedMap(pool.Object, "spec")
+	if spec == nil {
+		spec = map[string]interface{}{}
+	}
+
+	// Update reserved ranges.
+	if req.Reserved != nil {
+		if len(req.Reserved) == 0 {
+			delete(spec, "reserved")
+		} else {
+			reserved := make([]interface{}, 0, len(req.Reserved))
+			for _, r := range req.Reserved {
+				entry := map[string]interface{}{
+					"cidr": r.CIDR,
+				}
+				if r.Description != "" {
+					entry["description"] = r.Description
+				}
+				reserved = append(reserved, entry)
+			}
+			spec["reserved"] = reserved
+		}
+	}
+
+	// Update tenant allocation.
+	if req.TenantAllocation != nil {
+		ta := map[string]interface{}{}
+		if req.TenantAllocation.Start != "" {
+			ta["start"] = req.TenantAllocation.Start
+		}
+		if req.TenantAllocation.End != "" {
+			ta["end"] = req.TenantAllocation.End
+		}
+		if req.TenantAllocation.Defaults != nil {
+			defaults := map[string]interface{}{}
+			if req.TenantAllocation.Defaults.NodesPerTenant != nil {
+				defaults["nodesPerTenant"] = int64(*req.TenantAllocation.Defaults.NodesPerTenant)
+			}
+			if req.TenantAllocation.Defaults.LBPoolPerTenant != nil {
+				defaults["lbPoolPerTenant"] = int64(*req.TenantAllocation.Defaults.LBPoolPerTenant)
+			}
+			if len(defaults) > 0 {
+				ta["defaults"] = defaults
+			}
+		}
+		if len(ta) > 0 {
+			spec["tenantAllocation"] = ta
+		} else {
+			delete(spec, "tenantAllocation")
+		}
+	}
+
+	if err := unstructured.SetNestedField(pool.Object, spec, "spec"); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to set spec: %v", err))
+		return
+	}
+
+	updated, err := h.k8sClient.Dynamic().Resource(k8s.NetworkPoolGVR).Namespace(namespace).Update(
+		r.Context(), pool, metav1.UpdateOptions{},
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update network pool: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, updated.Object)
+}
+
 // DeleteNetworkPool deletes a NetworkPool.
 func (h *NetworksHandler) DeleteNetworkPool(w http.ResponseWriter, r *http.Request) {
 	namespace := chi.URLParam(r, "namespace")
