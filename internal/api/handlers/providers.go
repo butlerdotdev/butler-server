@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -549,6 +550,339 @@ func (h *ProvidersHandler) deleteProvider(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "provider deleted"})
+}
+
+// Update updates a provider config, including credential rotation.
+// PUT /api/providers/{namespace}/{name}
+func (h *ProvidersHandler) Update(w http.ResponseWriter, r *http.Request) {
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+	ctx := r.Context()
+
+	var req CreateProviderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	existing, err := h.k8sClient.GetProviderConfig(ctx, namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("provider not found: %v", err))
+		return
+	}
+
+	providerType, _, _ := unstructured.NestedString(existing.Object, "spec", "provider")
+
+	// Update credentials secret if any credential fields are provided
+	credentialsRef, _, _ := unstructured.NestedMap(existing.Object, "spec", "credentialsRef")
+	secretName, _ := credentialsRef["name"].(string)
+	secretNamespace, _ := credentialsRef["namespace"].(string)
+	if secretNamespace == "" {
+		secretNamespace = namespace
+	}
+
+	var secretData map[string][]byte
+
+	switch providerType {
+	case "harvester":
+		if req.HarvesterKubeconfig != "" {
+			secretData = map[string][]byte{
+				"kubeconfig": []byte(req.HarvesterKubeconfig),
+			}
+		}
+	case "nutanix":
+		if req.NutanixUsername != "" || req.NutanixPassword != "" {
+			// Fetch existing secret to preserve unchanged fields
+			existingSecret, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to read existing credentials")
+				return
+			}
+			secretData = existingSecret.Data
+			if req.NutanixUsername != "" {
+				secretData["username"] = []byte(req.NutanixUsername)
+			}
+			if req.NutanixPassword != "" {
+				secretData["password"] = []byte(req.NutanixPassword)
+			}
+		}
+	case "proxmox":
+		if req.ProxmoxTokenId != "" || req.ProxmoxTokenSecret != "" || req.ProxmoxUsername != "" || req.ProxmoxPassword != "" {
+			secretData = map[string][]byte{}
+			if req.ProxmoxTokenId != "" && req.ProxmoxTokenSecret != "" {
+				secretData["tokenId"] = []byte(req.ProxmoxTokenId)
+				secretData["tokenSecret"] = []byte(req.ProxmoxTokenSecret)
+			} else if req.ProxmoxUsername != "" && req.ProxmoxPassword != "" {
+				secretData["username"] = []byte(req.ProxmoxUsername)
+				secretData["password"] = []byte(req.ProxmoxPassword)
+			} else {
+				writeError(w, http.StatusBadRequest, "proxmox requires either username/password or tokenId/tokenSecret")
+				return
+			}
+		}
+	case "aws":
+		if req.AWSAccessKeyID != "" || req.AWSSecretAccessKey != "" {
+			existingSecret, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to read existing credentials")
+				return
+			}
+			secretData = existingSecret.Data
+			if req.AWSAccessKeyID != "" {
+				secretData["accessKeyId"] = []byte(req.AWSAccessKeyID)
+			}
+			if req.AWSSecretAccessKey != "" {
+				secretData["secretAccessKey"] = []byte(req.AWSSecretAccessKey)
+			}
+		}
+	case "azure":
+		if req.AzureTenantID != "" || req.AzureClientID != "" || req.AzureClientSecret != "" {
+			existingSecret, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to read existing credentials")
+				return
+			}
+			secretData = existingSecret.Data
+			if req.AzureTenantID != "" {
+				secretData["tenantId"] = []byte(req.AzureTenantID)
+			}
+			if req.AzureClientID != "" {
+				secretData["clientId"] = []byte(req.AzureClientID)
+			}
+			if req.AzureClientSecret != "" {
+				secretData["clientSecret"] = []byte(req.AzureClientSecret)
+			}
+		}
+	case "gcp":
+		if req.GCPServiceAccount != "" {
+			secretData = map[string][]byte{
+				"serviceAccount": []byte(req.GCPServiceAccount),
+			}
+		}
+	}
+
+	if secretData != nil {
+		existingSecret, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read existing credentials")
+			return
+		}
+		existingSecret.Data = secretData
+		_, err = h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Update(ctx, existingSecret, metav1.UpdateOptions{})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update credentials: %v", err))
+			return
+		}
+		slog.Info("provider credentials updated", "provider", name, "namespace", namespace)
+	}
+
+	// Update provider-specific config fields
+	spec, _, _ := unstructured.NestedMap(existing.Object, "spec")
+	if spec == nil {
+		spec = map[string]interface{}{}
+	}
+	specChanged := false
+
+	switch providerType {
+	case "nutanix":
+		if req.NutanixEndpoint != "" {
+			nutanixConfig, _, _ := unstructured.NestedMap(existing.Object, "spec", "nutanix")
+			if nutanixConfig == nil {
+				nutanixConfig = map[string]interface{}{}
+			}
+			nutanixConfig["endpoint"] = req.NutanixEndpoint
+			if req.NutanixPort > 0 {
+				nutanixConfig["port"] = int64(req.NutanixPort)
+			}
+			spec["nutanix"] = nutanixConfig
+			specChanged = true
+		}
+	case "proxmox":
+		if req.ProxmoxEndpoint != "" {
+			proxmoxConfig, _, _ := unstructured.NestedMap(existing.Object, "spec", "proxmox")
+			if proxmoxConfig == nil {
+				proxmoxConfig = map[string]interface{}{}
+			}
+			proxmoxConfig["endpoint"] = req.ProxmoxEndpoint
+			spec["proxmox"] = proxmoxConfig
+			specChanged = true
+		}
+	case "aws":
+		if req.AWSRegion != "" || req.AWSVPCID != "" || len(req.AWSSubnetIDs) > 0 || len(req.AWSSecurityGroupIDs) > 0 {
+			awsConfig, _, _ := unstructured.NestedMap(existing.Object, "spec", "aws")
+			if awsConfig == nil {
+				awsConfig = map[string]interface{}{}
+			}
+			if req.AWSRegion != "" {
+				awsConfig["region"] = req.AWSRegion
+			}
+			if req.AWSVPCID != "" {
+				awsConfig["vpcID"] = req.AWSVPCID
+			}
+			if len(req.AWSSubnetIDs) > 0 {
+				subnets := make([]interface{}, len(req.AWSSubnetIDs))
+				for i, s := range req.AWSSubnetIDs {
+					subnets[i] = s
+				}
+				awsConfig["subnetIDs"] = subnets
+			}
+			if len(req.AWSSecurityGroupIDs) > 0 {
+				sgs := make([]interface{}, len(req.AWSSecurityGroupIDs))
+				for i, s := range req.AWSSecurityGroupIDs {
+					sgs[i] = s
+				}
+				awsConfig["securityGroupIDs"] = sgs
+			}
+			spec["aws"] = awsConfig
+			specChanged = true
+		}
+	case "azure":
+		if req.AzureSubscriptionID != "" || req.AzureResourceGroup != "" || req.AzureLocation != "" || req.AzureVNetName != "" || req.AzureSubnetName != "" {
+			azureConfig, _, _ := unstructured.NestedMap(existing.Object, "spec", "azure")
+			if azureConfig == nil {
+				azureConfig = map[string]interface{}{}
+			}
+			if req.AzureSubscriptionID != "" {
+				azureConfig["subscriptionID"] = req.AzureSubscriptionID
+			}
+			if req.AzureResourceGroup != "" {
+				azureConfig["resourceGroup"] = req.AzureResourceGroup
+			}
+			if req.AzureLocation != "" {
+				azureConfig["location"] = req.AzureLocation
+			}
+			if req.AzureVNetName != "" {
+				azureConfig["vnetName"] = req.AzureVNetName
+			}
+			if req.AzureSubnetName != "" {
+				azureConfig["subnetName"] = req.AzureSubnetName
+			}
+			spec["azure"] = azureConfig
+			specChanged = true
+		}
+	case "gcp":
+		if req.GCPProjectID != "" || req.GCPRegion != "" || req.GCPNetwork != "" || req.GCPSubnetwork != "" {
+			gcpConfig, _, _ := unstructured.NestedMap(existing.Object, "spec", "gcp")
+			if gcpConfig == nil {
+				gcpConfig = map[string]interface{}{}
+			}
+			if req.GCPProjectID != "" {
+				gcpConfig["projectID"] = req.GCPProjectID
+			}
+			if req.GCPRegion != "" {
+				gcpConfig["region"] = req.GCPRegion
+			}
+			if req.GCPNetwork != "" {
+				gcpConfig["network"] = req.GCPNetwork
+			}
+			if req.GCPSubnetwork != "" {
+				gcpConfig["subnetwork"] = req.GCPSubnetwork
+			}
+			spec["gcp"] = gcpConfig
+			specChanged = true
+		}
+	}
+
+	// Update network config
+	if req.NetworkMode != "" || req.NetworkSubnet != "" || req.NetworkGateway != "" || len(req.NetworkDNSServers) > 0 || len(req.PoolRefs) > 0 || req.LBDefaultPoolSize != nil || req.QuotaMaxNodeIPs != nil || req.QuotaMaxLBIPs != nil {
+		network, _, _ := unstructured.NestedMap(existing.Object, "spec", "network")
+		if network == nil {
+			network = map[string]interface{}{}
+		}
+		if req.NetworkMode != "" {
+			network["mode"] = req.NetworkMode
+		}
+		if req.NetworkSubnet != "" {
+			network["subnet"] = req.NetworkSubnet
+		}
+		if req.NetworkGateway != "" {
+			network["gateway"] = req.NetworkGateway
+		}
+		if len(req.NetworkDNSServers) > 0 {
+			dns := make([]interface{}, len(req.NetworkDNSServers))
+			for i, d := range req.NetworkDNSServers {
+				dns[i] = d
+			}
+			network["dnsServers"] = dns
+		}
+		if len(req.PoolRefs) > 0 {
+			poolRefs := make([]interface{}, 0, len(req.PoolRefs))
+			for _, pr := range req.PoolRefs {
+				ref := map[string]interface{}{"name": pr.Name}
+				if pr.Priority > 0 {
+					ref["priority"] = int64(pr.Priority)
+				}
+				poolRefs = append(poolRefs, ref)
+			}
+			network["poolRefs"] = poolRefs
+		}
+		if req.LBDefaultPoolSize != nil {
+			lb, _, _ := unstructured.NestedMap(existing.Object, "spec", "network", "loadBalancer")
+			if lb == nil {
+				lb = map[string]interface{}{}
+			}
+			lb["defaultPoolSize"] = int64(*req.LBDefaultPoolSize)
+			network["loadBalancer"] = lb
+		}
+		if req.QuotaMaxNodeIPs != nil || req.QuotaMaxLBIPs != nil {
+			quota, _, _ := unstructured.NestedMap(existing.Object, "spec", "network", "quotaPerTenant")
+			if quota == nil {
+				quota = map[string]interface{}{}
+			}
+			if req.QuotaMaxNodeIPs != nil {
+				quota["maxNodeIPs"] = int64(*req.QuotaMaxNodeIPs)
+			}
+			if req.QuotaMaxLBIPs != nil {
+				quota["maxLoadBalancerIPs"] = int64(*req.QuotaMaxLBIPs)
+			}
+			network["quotaPerTenant"] = quota
+		}
+		spec["network"] = network
+		specChanged = true
+	}
+
+	// Update limits
+	if req.MaxClustersPerTeam != nil || req.MaxNodesPerTeam != nil {
+		limits, _, _ := unstructured.NestedMap(existing.Object, "spec", "limits")
+		if limits == nil {
+			limits = map[string]interface{}{}
+		}
+		if req.MaxClustersPerTeam != nil {
+			limits["maxClustersPerTeam"] = int64(*req.MaxClustersPerTeam)
+		}
+		if req.MaxNodesPerTeam != nil {
+			limits["maxNodesPerTeam"] = int64(*req.MaxNodesPerTeam)
+		}
+		spec["limits"] = limits
+		specChanged = true
+	}
+
+	if specChanged {
+		if err := unstructured.SetNestedMap(existing.Object, spec, "spec"); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update spec")
+			return
+		}
+
+		updated, err := h.k8sClient.Dynamic().Resource(k8s.ProviderConfigGVR).Namespace(namespace).Update(
+			ctx, existing, metav1.UpdateOptions{},
+		)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update provider: %v", err))
+			return
+		}
+
+		slog.Info("provider config updated", "provider", name, "namespace", namespace)
+		writeJSON(w, http.StatusOK, updated.Object)
+		return
+	}
+
+	// If only credentials were updated (no spec changes), return the existing object
+	if secretData != nil {
+		writeJSON(w, http.StatusOK, existing.Object)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, existing.Object)
 }
 
 // ListTeamProviders returns providers available to a specific team.

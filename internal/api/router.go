@@ -313,6 +313,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Get("/providers/{namespace}/{name}/images", providerHandler.ListImages)
 			r.Get("/providers/{namespace}/{name}/networks", providerHandler.ListNetworks)
 			r.Get("/providers/{namespace}/{name}", providerHandler.Get)
+			r.Put("/providers/{namespace}/{name}", providerHandler.Update)
 			r.Delete("/providers/{namespace}/{name}", providerHandler.Delete)
 			r.Post("/providers/{namespace}/{name}/validate", providerHandler.Validate)
 
