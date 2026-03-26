@@ -372,6 +372,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Get("/networks", networksHandler.ListNetworkPools)
 				r.Post("/networks", networksHandler.CreateNetworkPool)
 				r.Get("/networks/{namespace}/{name}", networksHandler.GetNetworkPool)
+				r.Put("/networks/{namespace}/{name}", networksHandler.UpdateNetworkPool)
 				r.Delete("/networks/{namespace}/{name}", networksHandler.DeleteNetworkPool)
 				r.Get("/networks/{namespace}/{name}/allocations", networksHandler.ListAllocations)
 				r.Get("/ipallocations", networksHandler.ListAllAllocations)
