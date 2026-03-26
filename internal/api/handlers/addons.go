@@ -848,3 +848,212 @@ func (h *AddonsHandler) managementAddonToResponse(ctx context.Context, ma *unstr
 		},
 	}
 }
+
+// CreateAddonDefinitionRequest represents a request to create an addon definition.
+type CreateAddonDefinitionRequest struct {
+	Name             string            `json:"name"`
+	DisplayName      string            `json:"displayName"`
+	Description      string            `json:"description"`
+	Category         string            `json:"category"`
+	Icon             string            `json:"icon,omitempty"`
+	ChartRepository  string            `json:"chartRepository"`
+	ChartName        string            `json:"chartName"`
+	DefaultVersion   string            `json:"defaultVersion"`
+	AvailableVersions []string         `json:"availableVersions,omitempty"`
+	DefaultNamespace string            `json:"defaultNamespace,omitempty"`
+	Platform         bool              `json:"platform"`
+	DependsOn        []string          `json:"dependsOn,omitempty"`
+	Links            map[string]string `json:"links,omitempty"`
+}
+
+// CreateAddonDefinition creates a new AddonDefinition CRD.
+func (h *AddonsHandler) CreateAddonDefinition(w http.ResponseWriter, r *http.Request) {
+	var req CreateAddonDefinitionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.ChartRepository == "" || req.ChartName == "" {
+		writeError(w, http.StatusBadRequest, "chartRepository and chartName are required")
+		return
+	}
+
+	chart := map[string]interface{}{
+		"repository":     req.ChartRepository,
+		"name":           req.ChartName,
+		"defaultVersion": req.DefaultVersion,
+	}
+	if len(req.AvailableVersions) > 0 {
+		versions := make([]interface{}, 0, len(req.AvailableVersions))
+		for _, v := range req.AvailableVersions {
+			versions = append(versions, v)
+		}
+		chart["availableVersions"] = versions
+	}
+
+	spec := map[string]interface{}{
+		"displayName": req.DisplayName,
+		"description": req.Description,
+		"category":    req.Category,
+		"chart":       chart,
+		"platform":    req.Platform,
+	}
+	if req.Icon != "" {
+		spec["icon"] = req.Icon
+	}
+	if req.DefaultNamespace != "" {
+		spec["defaults"] = map[string]interface{}{
+			"namespace": req.DefaultNamespace,
+		}
+	}
+	if len(req.DependsOn) > 0 {
+		deps := make([]interface{}, 0, len(req.DependsOn))
+		for _, d := range req.DependsOn {
+			deps = append(deps, d)
+		}
+		spec["dependsOn"] = deps
+	}
+	if len(req.Links) > 0 {
+		links := make(map[string]interface{}, len(req.Links))
+		for k, v := range req.Links {
+			links[k] = v
+		}
+		spec["links"] = links
+	}
+
+	ad := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "butler.butlerlabs.dev/v1alpha1",
+			"kind":       "AddonDefinition",
+			"metadata": map[string]interface{}{
+				"name": req.Name,
+			},
+			"spec": spec,
+		},
+	}
+
+	created, err := h.k8sClient.Dynamic().Resource(k8s.AddonDefinitionGVR).Create(
+		r.Context(), ad, metav1.CreateOptions{},
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create addon definition: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, h.addonDefinitionToResponse(created))
+}
+
+// UpdateAddonDefinition updates an AddonDefinition's mutable fields.
+func (h *AddonsHandler) UpdateAddonDefinition(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	var req CreateAddonDefinitionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	ad, err := h.k8sClient.GetAddonDefinition(r.Context(), name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("addon definition not found: %v", err))
+		return
+	}
+
+	spec, _, _ := unstructured.NestedMap(ad.Object, "spec")
+	if spec == nil {
+		spec = map[string]interface{}{}
+	}
+
+	if req.DisplayName != "" {
+		spec["displayName"] = req.DisplayName
+	}
+	if req.Description != "" {
+		spec["description"] = req.Description
+	}
+	if req.Category != "" {
+		spec["category"] = req.Category
+	}
+	if req.Icon != "" {
+		spec["icon"] = req.Icon
+	}
+	spec["platform"] = req.Platform
+
+	if req.ChartRepository != "" || req.ChartName != "" || req.DefaultVersion != "" {
+		chart, _ := spec["chart"].(map[string]interface{})
+		if chart == nil {
+			chart = map[string]interface{}{}
+		}
+		if req.ChartRepository != "" {
+			chart["repository"] = req.ChartRepository
+		}
+		if req.ChartName != "" {
+			chart["name"] = req.ChartName
+		}
+		if req.DefaultVersion != "" {
+			chart["defaultVersion"] = req.DefaultVersion
+		}
+		if len(req.AvailableVersions) > 0 {
+			versions := make([]interface{}, 0, len(req.AvailableVersions))
+			for _, v := range req.AvailableVersions {
+				versions = append(versions, v)
+			}
+			chart["availableVersions"] = versions
+		}
+		spec["chart"] = chart
+	}
+
+	if req.DefaultNamespace != "" {
+		spec["defaults"] = map[string]interface{}{
+			"namespace": req.DefaultNamespace,
+		}
+	}
+	if len(req.DependsOn) > 0 {
+		deps := make([]interface{}, 0, len(req.DependsOn))
+		for _, d := range req.DependsOn {
+			deps = append(deps, d)
+		}
+		spec["dependsOn"] = deps
+	}
+	if len(req.Links) > 0 {
+		links := make(map[string]interface{}, len(req.Links))
+		for k, v := range req.Links {
+			links[k] = v
+		}
+		spec["links"] = links
+	}
+
+	if err := unstructured.SetNestedField(ad.Object, spec, "spec"); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to set spec: %v", err))
+		return
+	}
+
+	updated, err := h.k8sClient.Dynamic().Resource(k8s.AddonDefinitionGVR).Update(
+		r.Context(), ad, metav1.UpdateOptions{},
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update addon definition: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, h.addonDefinitionToResponse(updated))
+}
+
+// DeleteAddonDefinition deletes an AddonDefinition.
+func (h *AddonsHandler) DeleteAddonDefinition(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	err := h.k8sClient.Dynamic().Resource(k8s.AddonDefinitionGVR).Delete(
+		r.Context(), name, metav1.DeleteOptions{},
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete addon definition: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "addon definition deleted"})
+}

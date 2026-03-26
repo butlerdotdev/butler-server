@@ -84,6 +84,18 @@ var (
 		Version:  "v1alpha1",
 		Resource: "ipallocations",
 	}
+
+	MachineRequestGVR = schema.GroupVersionResource{
+		Group:    "butler.butlerlabs.dev",
+		Version:  "v1alpha1",
+		Resource: "machinerequests",
+	}
+
+	LoadBalancerRequestGVR = schema.GroupVersionResource{
+		Group:    "butler.butlerlabs.dev",
+		Version:  "v1alpha1",
+		Resource: "loadbalancerrequests",
+	}
 )
 
 // Client wraps Kubernetes client functionality.
@@ -274,4 +286,20 @@ func (c *Client) GetTenantAddon(ctx context.Context, namespace, name string) (*u
 // DeleteTenantAddon deletes a TenantAddon.
 func (c *Client) DeleteTenantAddon(ctx context.Context, namespace, name string) error {
 	return c.dynamicClient.Resource(TenantAddonGVR).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+}
+
+// ListMachineRequests lists MachineRequest resources for a cluster.
+func (c *Client) ListMachineRequests(ctx context.Context, namespace, clusterName string) (*unstructured.UnstructuredList, error) {
+	labelSelector := fmt.Sprintf("butler.butlerlabs.dev/cluster=%s", clusterName)
+	return c.dynamicClient.Resource(MachineRequestGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
+}
+
+// ListLoadBalancerRequests lists LoadBalancerRequest resources for a cluster.
+func (c *Client) ListLoadBalancerRequests(ctx context.Context, namespace, clusterName string) (*unstructured.UnstructuredList, error) {
+	labelSelector := fmt.Sprintf("butler.butlerlabs.dev/cluster=%s", clusterName)
+	return c.dynamicClient.Resource(LoadBalancerRequestGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labelSelector,
+	})
 }
