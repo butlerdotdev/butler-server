@@ -49,16 +49,19 @@ func NewTeamHandler(k8sClient *k8s.Client, teamResolver *auth.TeamResolver, logg
 
 // TeamResponse represents a team in API responses.
 type TeamResponse struct {
-	Name         string            `json:"name"`
-	DisplayName  string            `json:"displayName,omitempty"`
-	Description  string            `json:"description,omitempty"`
-	Namespace    string            `json:"namespace,omitempty"`
-	Phase        string            `json:"phase"`
-	ClusterCount int               `json:"clusterCount"`
-	MemberCount  int               `json:"memberCount"`
-	GroupCount   int               `json:"groupCount"`
-	Labels       map[string]string `json:"labels,omitempty"`
-	CreatedAt    string            `json:"createdAt,omitempty"`
+	Name            string                  `json:"name"`
+	DisplayName     string                  `json:"displayName,omitempty"`
+	Description     string                  `json:"description,omitempty"`
+	Namespace       string                  `json:"namespace,omitempty"`
+	Phase           string                  `json:"phase"`
+	ClusterCount    int                     `json:"clusterCount"`
+	MemberCount     int                     `json:"memberCount"`
+	GroupCount       int                    `json:"groupCount"`
+	Labels          map[string]string       `json:"labels,omitempty"`
+	CreatedAt       string                  `json:"createdAt,omitempty"`
+	ResourceLimits  map[string]interface{}  `json:"resourceLimits,omitempty"`
+	ResourceUsage   map[string]interface{}  `json:"resourceUsage,omitempty"`
+	ClusterDefaults map[string]interface{}  `json:"clusterDefaults,omitempty"`
 }
 
 // TeamMemberResponse represents a team member in API responses.
@@ -80,6 +83,65 @@ type TeamMemberResponse struct {
 type TeamGroupAccessResponse struct {
 	Name string `json:"name"`
 	Role string `json:"role"`
+}
+
+// buildTeamResponse constructs a TeamResponse from an unstructured Team CRD.
+func buildTeamResponse(team *unstructured.Unstructured, clusterCount int) TeamResponse {
+	displayName, _, _ := unstructured.NestedString(team.Object, "spec", "displayName")
+	description, _, _ := unstructured.NestedString(team.Object, "spec", "description")
+	namespace, _, _ := unstructured.NestedString(team.Object, "status", "namespace")
+	phase, _, _ := unstructured.NestedString(team.Object, "status", "phase")
+
+	if namespace == "" {
+		namespace = team.GetName()
+	}
+
+	memberCount := 0
+	if users, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users"); found {
+		memberCount = len(users)
+	}
+
+	groupCount := 0
+	if groups, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "groups"); found {
+		groupCount = len(groups)
+	}
+
+	if displayName == "" {
+		displayName = team.GetName()
+	}
+	if phase == "" {
+		phase = "Ready"
+	}
+
+	resp := TeamResponse{
+		Name:         team.GetName(),
+		DisplayName:  displayName,
+		Description:  description,
+		Namespace:    namespace,
+		Phase:        phase,
+		ClusterCount: clusterCount,
+		MemberCount:  memberCount,
+		GroupCount:   groupCount,
+		Labels:       team.GetLabels(),
+		CreatedAt:    team.GetCreationTimestamp().Format("2006-01-02T15:04:05Z"),
+	}
+
+	// Extract resource limits from spec
+	if limits, found, _ := unstructured.NestedMap(team.Object, "spec", "resourceLimits"); found {
+		resp.ResourceLimits = limits
+	}
+
+	// Extract resource usage from status
+	if usage, found, _ := unstructured.NestedMap(team.Object, "status", "resourceUsage"); found {
+		resp.ResourceUsage = usage
+	}
+
+	// Extract cluster defaults from spec
+	if defaults, found, _ := unstructured.NestedMap(team.Object, "spec", "clusterDefaults"); found {
+		resp.ClusterDefaults = defaults
+	}
+
+	return resp
 }
 
 // roleLevel returns a numeric level for role comparison (higher = more privilege).
@@ -190,44 +252,7 @@ func (h *TeamHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	response := make([]TeamResponse, 0, len(teams.Items))
 	for _, team := range teams.Items {
-		displayName, _, _ := unstructured.NestedString(team.Object, "spec", "displayName")
-		description, _, _ := unstructured.NestedString(team.Object, "spec", "description")
-		namespace, _, _ := unstructured.NestedString(team.Object, "status", "namespace")
-		phase, _, _ := unstructured.NestedString(team.Object, "status", "phase")
-
-		if namespace == "" {
-			namespace = team.GetName()
-		}
-
-		memberCount := 0
-		if users, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users"); found {
-			memberCount = len(users)
-		}
-
-		groupCount := 0
-		if groups, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "groups"); found {
-			groupCount = len(groups)
-		}
-
-		if displayName == "" {
-			displayName = team.GetName()
-		}
-		if phase == "" {
-			phase = "Ready"
-		}
-
-		response = append(response, TeamResponse{
-			Name:         team.GetName(),
-			DisplayName:  displayName,
-			Description:  description,
-			Namespace:    namespace,
-			Phase:        phase,
-			ClusterCount: clusterCountByTeam[team.GetName()],
-			MemberCount:  memberCount,
-			GroupCount:   groupCount,
-			Labels:       team.GetLabels(),
-			CreatedAt:    team.GetCreationTimestamp().Format("2006-01-02T15:04:05Z"),
-		})
+		response = append(response, buildTeamResponse(&team, clusterCountByTeam[team.GetName()]))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{"teams": response})
@@ -249,25 +274,6 @@ func (h *TeamHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	displayName, _, _ := unstructured.NestedString(team.Object, "spec", "displayName")
-	description, _, _ := unstructured.NestedString(team.Object, "spec", "description")
-	namespace, _, _ := unstructured.NestedString(team.Object, "status", "namespace")
-	phase, _, _ := unstructured.NestedString(team.Object, "status", "phase")
-
-	if namespace == "" {
-		namespace = team.GetName()
-	}
-
-	memberCount := 0
-	if users, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users"); found {
-		memberCount = len(users)
-	}
-
-	groupCount := 0
-	if groups, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "groups"); found {
-		groupCount = len(groups)
-	}
-
 	clusterCount := 0
 	allClusters, err := h.k8sClient.Dynamic().Resource(k8s.TenantClusterGVR).List(r.Context(), metav1.ListOptions{})
 	if err == nil && allClusters != nil {
@@ -279,25 +285,7 @@ func (h *TeamHandler) Get(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if displayName == "" {
-		displayName = team.GetName()
-	}
-	if phase == "" {
-		phase = "Ready"
-	}
-
-	writeJSON(w, http.StatusOK, TeamResponse{
-		Name:         team.GetName(),
-		DisplayName:  displayName,
-		Description:  description,
-		Namespace:    namespace,
-		Phase:        phase,
-		ClusterCount: clusterCount,
-		MemberCount:  memberCount,
-		GroupCount:   groupCount,
-		Labels:       team.GetLabels(),
-		CreatedAt:    team.GetCreationTimestamp().Format("2006-01-02T15:04:05Z"),
-	})
+	writeJSON(w, http.StatusOK, buildTeamResponse(team, clusterCount))
 }
 
 // CreateTeamRequest represents the request body for creating a team.
@@ -365,12 +353,20 @@ func (h *TeamHandler) Create(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// UpdateTeamRequest represents the request body for updating a team.
+type UpdateTeamRequest struct {
+	DisplayName     string                 `json:"displayName,omitempty"`
+	Description     string                 `json:"description,omitempty"`
+	ResourceLimits  map[string]interface{} `json:"resourceLimits,omitempty"`
+	ClusterDefaults map[string]interface{} `json:"clusterDefaults,omitempty"`
+}
+
 // Update updates a team.
 // PUT /api/teams/{name}
 func (h *TeamHandler) Update(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 
-	var req CreateTeamRequest
+	var req UpdateTeamRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
@@ -394,6 +390,14 @@ func (h *TeamHandler) Update(w http.ResponseWriter, r *http.Request) {
 		unstructured.SetNestedField(team.Object, req.Description, "spec", "description")
 	}
 
+	if req.ResourceLimits != nil {
+		unstructured.SetNestedField(team.Object, req.ResourceLimits, "spec", "resourceLimits")
+	}
+
+	if req.ClusterDefaults != nil {
+		unstructured.SetNestedField(team.Object, req.ClusterDefaults, "spec", "clusterDefaults")
+	}
+
 	updated, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Update(r.Context(), team, metav1.UpdateOptions{})
 	if err != nil {
 		h.logger.Error("Failed to update team", "name", name, "error", err)
@@ -403,15 +407,18 @@ func (h *TeamHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Info("Team updated", "name", name)
 
-	displayName, _, _ := unstructured.NestedString(updated.Object, "spec", "displayName")
-	if displayName == "" {
-		displayName = updated.GetName()
+	clusterCount := 0
+	allClusters, listErr := h.k8sClient.Dynamic().Resource(k8s.TenantClusterGVR).List(r.Context(), metav1.ListOptions{})
+	if listErr == nil && allClusters != nil {
+		for _, cluster := range allClusters.Items {
+			teamRefName, found, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+			if found && teamRefName == name {
+				clusterCount++
+			}
+		}
 	}
 
-	writeJSON(w, http.StatusOK, TeamResponse{
-		Name:        updated.GetName(),
-		DisplayName: displayName,
-	})
+	writeJSON(w, http.StatusOK, buildTeamResponse(updated, clusterCount))
 }
 
 // Delete deletes a team.
