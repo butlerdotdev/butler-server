@@ -364,6 +364,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 					r.Post("/", identityProviderHandler.Create)
 					r.Post("/test", identityProviderHandler.TestDiscovery)
 					r.Get("/{name}", identityProviderHandler.Get)
+					r.Put("/{name}", identityProviderHandler.Update)
 					r.Delete("/{name}", identityProviderHandler.Delete)
 					r.Post("/{name}/validate", identityProviderHandler.Validate)
 				})

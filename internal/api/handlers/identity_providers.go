@@ -362,6 +362,138 @@ func (h *IdentityProvidersHandler) Delete(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// Update updates an existing identity provider's configuration and/or credentials.
+func (h *IdentityProvidersHandler) Update(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	ctx := r.Context()
+
+	var req CreateIdentityProviderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Get existing IdentityProvider
+	idp, err := h.k8sClient.Dynamic().Resource(IdentityProviderGVR).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("identity provider %q not found", name))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get identity provider: %v", err))
+		return
+	}
+
+	// Update client secret if provided
+	if req.ClientSecret != "" {
+		secretNamespace := h.config.SystemNamespace
+		if secretNamespace == "" {
+			secretNamespace = "butler-system"
+		}
+
+		// Find existing secret reference
+		secretRef, _, _ := unstructured.NestedMap(idp.Object, "spec", "oidc", "clientSecretRef")
+		secretName := fmt.Sprintf("%s-oidc-secret", name)
+		if secretRef != nil {
+			if sn, ok := secretRef["name"].(string); ok && sn != "" {
+				secretName = sn
+			}
+			if ns, ok := secretRef["namespace"].(string); ok && ns != "" {
+				secretNamespace = ns
+			}
+		}
+
+		// Update the secret
+		secret, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				// Secret doesn't exist — create it
+				newSecret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      secretName,
+						Namespace: secretNamespace,
+						Labels: map[string]string{
+							"app.kubernetes.io/managed-by":            "butler",
+							"butler.butlerlabs.dev/identity-provider": name,
+						},
+					},
+					Type: corev1.SecretTypeOpaque,
+					Data: map[string][]byte{
+						"client-secret": []byte(req.ClientSecret),
+					},
+				}
+				_, err = h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Create(ctx, newSecret, metav1.CreateOptions{})
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create credentials secret: %v", err))
+					return
+				}
+			} else {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get credentials secret: %v", err))
+				return
+			}
+		} else {
+			secret.Data["client-secret"] = []byte(req.ClientSecret)
+			_, err = h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Update(ctx, secret, metav1.UpdateOptions{})
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update credentials secret: %v", err))
+				return
+			}
+		}
+	}
+
+	// Update OIDC config fields if provided
+	oidcConfig, _, _ := unstructured.NestedMap(idp.Object, "spec", "oidc")
+	if oidcConfig == nil {
+		oidcConfig = map[string]interface{}{}
+	}
+
+	if req.IssuerURL != "" {
+		oidcConfig["issuerURL"] = req.IssuerURL
+	}
+	if req.ClientID != "" {
+		oidcConfig["clientID"] = req.ClientID
+	}
+	if req.RedirectURL != "" {
+		oidcConfig["redirectURL"] = req.RedirectURL
+	}
+	if len(req.Scopes) > 0 {
+		oidcConfig["scopes"] = req.Scopes
+	}
+	if req.HostedDomain != "" {
+		oidcConfig["hostedDomain"] = req.HostedDomain
+	}
+	if req.GroupsClaim != "" {
+		oidcConfig["groupsClaim"] = req.GroupsClaim
+	}
+	if req.EmailClaim != "" {
+		oidcConfig["emailClaim"] = req.EmailClaim
+	}
+	// InsecureSkipVerify is a bool — always set it if the request includes it
+	oidcConfig["insecureSkipVerify"] = req.InsecureSkipVerify
+
+	if err := unstructured.SetNestedMap(idp.Object, oidcConfig, "spec", "oidc"); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update OIDC config: %v", err))
+		return
+	}
+
+	// Update display name if provided
+	if req.DisplayName != "" {
+		if err := unstructured.SetNestedField(idp.Object, req.DisplayName, "spec", "displayName"); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update display name: %v", err))
+			return
+		}
+	}
+
+	// Update the IdentityProvider CRD
+	updated, err := h.k8sClient.Dynamic().Resource(IdentityProviderGVR).Update(ctx, idp, metav1.UpdateOptions{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update identity provider: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, updated.Object)
+}
+
 // TestDiscovery tests OIDC discovery for a given issuer URL.
 func (h *IdentityProvidersHandler) TestDiscovery(w http.ResponseWriter, r *http.Request) {
 	var req TestDiscoveryRequest
