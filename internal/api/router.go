@@ -234,6 +234,9 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Get("/clusters/{namespace}/{name}/kubeconfig", clusterHandler.GetKubeconfig)
 			r.Get("/clusters/{namespace}/{name}/nodes", clusterHandler.GetNodes)
 			r.Get("/clusters/{namespace}/{name}/events", clusterHandler.GetEvents)
+			r.Get("/clusters/{namespace}/{name}/export", clusterHandler.ExportYAML)
+			r.Get("/clusters/{namespace}/{name}/machines", clusterHandler.ListMachineRequests)
+			r.Get("/clusters/{namespace}/{name}/load-balancers", clusterHandler.ListLoadBalancerRequests)
 
 			// Cluster addons
 			r.Get("/clusters/{namespace}/{name}/addons", addonsHandler.ListClusterAddons)
@@ -369,6 +372,11 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 					r.Delete("/{name}", identityProviderHandler.Delete)
 					r.Post("/{name}/validate", identityProviderHandler.Validate)
 				})
+
+				// Addon catalog management (admin only)
+				r.Post("/addons/catalog", addonsHandler.CreateAddonDefinition)
+				r.Put("/addons/catalog/{name}", addonsHandler.UpdateAddonDefinition)
+				r.Delete("/addons/catalog/{name}", addonsHandler.DeleteAddonDefinition)
 
 				// Network pools and IP allocations
 				r.Get("/networks", networksHandler.ListNetworkPools)

@@ -19,9 +19,13 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
+
+	"sigs.k8s.io/yaml"
 
 	"github.com/butlerdotdev/butler-server/internal/auth"
 	"github.com/butlerdotdev/butler-server/internal/config"
@@ -980,4 +984,124 @@ func buildComponentResourcesMap(cr *ComponentResourcesRequest) map[string]interf
 		}
 	}
 	return result
+}
+
+// ExportYAML returns a TenantCluster as YAML for export.
+func (h *ClusterHandler) ExportYAML(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+
+	cluster, err := h.k8sClient.GetTenantCluster(r.Context(), namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+
+	if user != nil {
+		if err := h.checkClusterAccess(user, cluster); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
+
+	// Deep copy to avoid mutating the cached object.
+	export := cluster.DeepCopy()
+	obj := export.Object
+
+	// Strip server-side fields for a clean export.
+	delete(obj, "status")
+	if meta, ok := obj["metadata"].(map[string]interface{}); ok {
+		delete(meta, "resourceVersion")
+		delete(meta, "uid")
+		delete(meta, "creationTimestamp")
+		delete(meta, "generation")
+		delete(meta, "managedFields")
+		delete(meta, "selfLink")
+		delete(meta, "ownerReferences")
+	}
+
+	yamlBytes, err := yaml.Marshal(obj)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to marshal YAML: %v", err))
+		return
+	}
+
+	// Sanitize filename to prevent header injection.
+	safeName := sanitizeFilename(name)
+	w.Header().Set("Content-Type", "application/x-yaml")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.yaml"`, safeName))
+	w.WriteHeader(http.StatusOK)
+	w.Write(yamlBytes)
+}
+
+// ListMachineRequests returns MachineRequests for a cluster.
+func (h *ClusterHandler) ListMachineRequests(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+
+	cluster, err := h.k8sClient.GetTenantCluster(r.Context(), namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+
+	if user != nil {
+		if err := h.checkClusterAccess(user, cluster); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
+
+	items := make([]map[string]interface{}, 0)
+	machines, err := h.k8sClient.ListMachineRequests(r.Context(), namespace, name)
+	if err != nil {
+		slog.Debug("failed to list machine requests (CRD may not exist)", "cluster", name, "error", err)
+	} else {
+		for _, m := range machines.Items {
+			items = append(items, m.Object)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"machineRequests": items})
+}
+
+// ListLoadBalancerRequests returns LoadBalancerRequests for a cluster.
+func (h *ClusterHandler) ListLoadBalancerRequests(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+
+	cluster, err := h.k8sClient.GetTenantCluster(r.Context(), namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+
+	if user != nil {
+		if err := h.checkClusterAccess(user, cluster); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
+
+	items := make([]map[string]interface{}, 0)
+	lbs, err := h.k8sClient.ListLoadBalancerRequests(r.Context(), namespace, name)
+	if err != nil {
+		slog.Debug("failed to list load balancer requests (CRD may not exist)", "cluster", name, "error", err)
+	} else {
+		for _, lb := range lbs.Items {
+			items = append(items, lb.Object)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"loadBalancerRequests": items})
+}
+
+// sanitizeFilename strips characters that could cause header injection.
+var safeFilenameRe = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
+
+func sanitizeFilename(name string) string {
+	return safeFilenameRe.ReplaceAllString(name, "_")
 }
