@@ -27,6 +27,7 @@ import (
 	"github.com/butlerdotdev/butler-server/internal/k8s"
 
 	"github.com/go-chi/chi/v5"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -878,6 +879,14 @@ func (h *AddonsHandler) CreateAddonDefinition(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
+	if req.DisplayName == "" {
+		writeError(w, http.StatusBadRequest, "displayName is required")
+		return
+	}
+	if req.Category == "" {
+		writeError(w, http.StatusBadRequest, "category is required")
+		return
+	}
 	if req.ChartRepository == "" || req.ChartName == "" {
 		writeError(w, http.StatusBadRequest, "chartRepository and chartName are required")
 		return
@@ -1051,6 +1060,10 @@ func (h *AddonsHandler) DeleteAddonDefinition(w http.ResponseWriter, r *http.Req
 		r.Context(), name, metav1.DeleteOptions{},
 	)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("addon definition not found: %s", name))
+			return
+		}
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete addon definition: %v", err))
 		return
 	}
