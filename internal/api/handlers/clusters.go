@@ -33,6 +33,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -622,17 +623,24 @@ func (h *ClusterHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	// Reject edits on clusters that aren't in a stable phase
 	phase, _, _ := unstructured.NestedString(cluster.Object, "status", "phase")
-	if phase == "Failed" || phase == "Deleting" {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot edit cluster in %s phase", phase))
+	stablePhases := map[string]bool{"Ready": true, "Pending": true, "": true}
+	if !stablePhases[phase] {
+		writeError(w, http.StatusConflict, fmt.Sprintf("cluster is in %s phase; wait for it to stabilize", phase))
 		return
 	}
 
-	// InfrastructureOverride is admin-only
+	// InfrastructureOverride is platform-admin-only
 	if len(req.InfrastructureOverride) > 0 {
-		if user == nil || !user.IsAdmin() {
+		if user == nil || !user.IsPlatformAdmin {
 			writeError(w, http.StatusForbidden, "infrastructure overrides require platform admin privileges")
 			return
 		}
+	}
+
+	// No-op guard: if no fields are set, return the current state without writing
+	if req.KubernetesVersion == nil && req.ControlPlane == nil && req.Workers == nil && len(req.InfrastructureOverride) == 0 {
+		writeJSON(w, http.StatusOK, cluster.Object)
+		return
 	}
 
 	// Validate and apply each field
@@ -648,8 +656,7 @@ func (h *ClusterHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := h.k8sClient.UpdateTenantCluster(r.Context(), cluster)
 	if err != nil {
-		if strings.Contains(err.Error(), "the object has been modified") ||
-			strings.Contains(err.Error(), "Conflict") {
+		if apierrors.IsConflict(err) {
 			// Re-fetch current state so the client can see what changed
 			current, fetchErr := h.k8sClient.GetTenantCluster(r.Context(), namespace, name)
 			if fetchErr != nil {
@@ -759,7 +766,14 @@ func (h *ClusterHandler) applyUpdateRequest(cluster *unstructured.Unstructured, 
 	}
 
 	if len(req.InfrastructureOverride) > 0 {
-		_ = unstructured.SetNestedField(cluster.Object, req.InfrastructureOverride, "spec", "infrastructureOverride")
+		existing, _, _ := unstructured.NestedMap(cluster.Object, "spec", "infrastructureOverride")
+		if existing == nil {
+			existing = make(map[string]interface{})
+		}
+		for k, v := range req.InfrastructureOverride {
+			existing[k] = v
+		}
+		_ = unstructured.SetNestedField(cluster.Object, existing, "spec", "infrastructureOverride")
 	}
 }
 
