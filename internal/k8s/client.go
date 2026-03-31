@@ -191,6 +191,12 @@ func (c *Client) PatchTenantCluster(ctx context.Context, namespace, name string,
 	)
 }
 
+// UpdateTenantCluster performs a full update on a TenantCluster.
+// The caller must set metadata.resourceVersion for optimistic concurrency.
+func (c *Client) UpdateTenantCluster(ctx context.Context, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	return c.dynamicClient.Resource(TenantClusterGVR).Namespace(obj.GetNamespace()).Update(ctx, obj, metav1.UpdateOptions{})
+}
+
 // ListProviderConfigs lists all ProviderConfig resources.
 func (c *Client) ListProviderConfigs(ctx context.Context, namespace string) (*unstructured.UnstructuredList, error) {
 	if namespace == "" {

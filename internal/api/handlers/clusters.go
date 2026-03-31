@@ -33,6 +33,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -541,6 +542,292 @@ func (h *ClusterHandler) Scale(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, patched.Object)
+}
+
+// UpdateRequest represents a cluster spec edit request.
+// Only non-nil fields are applied to the existing spec.
+type UpdateRequest struct {
+	// ResourceVersion is required for optimistic concurrency.
+	ResourceVersion string `json:"resourceVersion"`
+
+	// KubernetesVersion changes the target K8s version. No downgrades.
+	KubernetesVersion *string `json:"kubernetesVersion,omitempty"`
+
+	// ControlPlane edits. Only provided fields are applied.
+	ControlPlane *UpdateControlPlane `json:"controlPlane,omitempty"`
+
+	// Workers edits. Only provided fields are applied.
+	Workers *UpdateWorkers `json:"workers,omitempty"`
+
+	// InfrastructureOverride edits. Admin-only.
+	InfrastructureOverride map[string]interface{} `json:"infrastructureOverride,omitempty"`
+
+	// AcknowledgeDowngrade must be true when reducing CP replicas from 3 to 1.
+	AcknowledgeDowngrade bool `json:"acknowledgeDowngrade,omitempty"`
+}
+
+// UpdateControlPlane holds mutable control plane fields.
+type UpdateControlPlane struct {
+	Replicas  *int32                 `json:"replicas,omitempty"`
+	Resources map[string]interface{} `json:"resources,omitempty"`
+}
+
+// UpdateWorkers holds mutable worker fields.
+type UpdateWorkers struct {
+	Replicas        *int32                 `json:"replicas,omitempty"`
+	MachineTemplate map[string]interface{} `json:"machineTemplate,omitempty"`
+}
+
+// FieldError is a structured validation error for a specific field.
+type FieldError struct {
+	Field   string `json:"field"`
+	Reason  string `json:"reason"`
+	Current string `json:"current,omitempty"`
+}
+
+// Update applies spec edits to a TenantCluster with optimistic concurrency.
+// PUT /api/clusters/{namespace}/{name}
+func (h *ClusterHandler) Update(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+
+	cluster, err := h.k8sClient.GetTenantCluster(r.Context(), namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+
+	if user != nil {
+		if err := h.checkClusterAccess(user, cluster); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		teamRef, _, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+		if err := h.checkOperatePermission(user, teamRef, "edit"); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
+
+	var req UpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.ResourceVersion == "" {
+		writeError(w, http.StatusBadRequest, "resourceVersion is required for optimistic concurrency")
+		return
+	}
+
+	// Reject edits on clusters that aren't in a stable phase
+	phase, _, _ := unstructured.NestedString(cluster.Object, "status", "phase")
+	stablePhases := map[string]bool{"Ready": true, "Pending": true, "": true}
+	if !stablePhases[phase] {
+		writeError(w, http.StatusConflict, fmt.Sprintf("cluster is in %s phase; wait for it to stabilize", phase))
+		return
+	}
+
+	// InfrastructureOverride is platform-admin-only
+	if len(req.InfrastructureOverride) > 0 {
+		if user == nil || !user.IsPlatformAdmin {
+			writeError(w, http.StatusForbidden, "infrastructure overrides require platform admin privileges")
+			return
+		}
+	}
+
+	// No-op guard: if no fields are set, return the current state without writing
+	if req.KubernetesVersion == nil && req.ControlPlane == nil && req.Workers == nil && len(req.InfrastructureOverride) == 0 {
+		writeJSON(w, http.StatusOK, cluster.Object)
+		return
+	}
+
+	// Validate and apply each field
+	if errs := h.validateUpdateRequest(cluster, &req); len(errs) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"errors": errs})
+		return
+	}
+
+	h.applyUpdateRequest(cluster, &req)
+
+	// Set resourceVersion for optimistic concurrency
+	cluster.SetResourceVersion(req.ResourceVersion)
+
+	updated, err := h.k8sClient.UpdateTenantCluster(r.Context(), cluster)
+	if err != nil {
+		if apierrors.IsConflict(err) {
+			// Re-fetch current state so the client can see what changed
+			current, fetchErr := h.k8sClient.GetTenantCluster(r.Context(), namespace, name)
+			if fetchErr != nil {
+				writeError(w, http.StatusConflict, "cluster was modified by another user")
+				return
+			}
+			writeJSON(w, http.StatusConflict, map[string]interface{}{
+				"error":   "cluster was modified by another user",
+				"current": current.Object,
+			})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update cluster: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, updated.Object)
+}
+
+// validateUpdateRequest checks all fields in the update request for validity.
+func (h *ClusterHandler) validateUpdateRequest(cluster *unstructured.Unstructured, req *UpdateRequest) []FieldError {
+	var errs []FieldError
+
+	if req.KubernetesVersion != nil {
+		current, _, _ := unstructured.NestedString(cluster.Object, "spec", "kubernetesVersion")
+		if err := validateVersionUpgrade(current, *req.KubernetesVersion); err != nil {
+			errs = append(errs, FieldError{
+				Field:   "spec.kubernetesVersion",
+				Reason:  err.Error(),
+				Current: current,
+			})
+		}
+	}
+
+	if req.ControlPlane != nil && req.ControlPlane.Replicas != nil {
+		replicas := *req.ControlPlane.Replicas
+		if replicas != 1 && replicas != 3 {
+			errs = append(errs, FieldError{
+				Field:  "spec.controlPlane.replicas",
+				Reason: "must be 1 or 3 (odd numbers required for etcd quorum)",
+			})
+		}
+		if replicas == 1 {
+			currentReplicas, _, _ := unstructured.NestedInt64(cluster.Object, "spec", "controlPlane", "replicas")
+			if currentReplicas == 3 && !req.AcknowledgeDowngrade {
+				errs = append(errs, FieldError{
+					Field:   "spec.controlPlane.replicas",
+					Reason:  "reducing from 3 to 1 requires acknowledgeDowngrade: true",
+					Current: "3",
+				})
+			}
+		}
+	}
+
+	if req.Workers != nil {
+		if req.Workers.Replicas != nil {
+			replicas := *req.Workers.Replicas
+			if replicas < 1 || replicas > 100 {
+				errs = append(errs, FieldError{
+					Field:  "spec.workers.replicas",
+					Reason: "must be between 1 and 100",
+				})
+			}
+		}
+		if mt, ok := req.Workers.MachineTemplate["cpu"]; ok {
+			if cpu, ok := toInt64(mt); ok && cpu < 1 {
+				errs = append(errs, FieldError{
+					Field:  "spec.workers.machineTemplate.cpu",
+					Reason: "must be at least 1",
+				})
+			}
+		}
+	}
+
+	return errs
+}
+
+// applyUpdateRequest merges the request fields into the cluster object.
+func (h *ClusterHandler) applyUpdateRequest(cluster *unstructured.Unstructured, req *UpdateRequest) {
+	if req.KubernetesVersion != nil {
+		_ = unstructured.SetNestedField(cluster.Object, *req.KubernetesVersion, "spec", "kubernetesVersion")
+	}
+
+	if req.ControlPlane != nil {
+		if req.ControlPlane.Replicas != nil {
+			_ = unstructured.SetNestedField(cluster.Object, int64(*req.ControlPlane.Replicas), "spec", "controlPlane", "replicas")
+		}
+		if req.ControlPlane.Resources != nil {
+			_ = unstructured.SetNestedField(cluster.Object, req.ControlPlane.Resources, "spec", "controlPlane", "resources")
+		}
+	}
+
+	if req.Workers != nil {
+		if req.Workers.Replicas != nil {
+			_ = unstructured.SetNestedField(cluster.Object, int64(*req.Workers.Replicas), "spec", "workers", "replicas")
+		}
+		if req.Workers.MachineTemplate != nil {
+			existing, _, _ := unstructured.NestedMap(cluster.Object, "spec", "workers", "machineTemplate")
+			if existing == nil {
+				existing = make(map[string]interface{})
+			}
+			for k, v := range req.Workers.MachineTemplate {
+				existing[k] = v
+			}
+			_ = unstructured.SetNestedField(cluster.Object, existing, "spec", "workers", "machineTemplate")
+		}
+	}
+
+	if len(req.InfrastructureOverride) > 0 {
+		existing, _, _ := unstructured.NestedMap(cluster.Object, "spec", "infrastructureOverride")
+		if existing == nil {
+			existing = make(map[string]interface{})
+		}
+		for k, v := range req.InfrastructureOverride {
+			existing[k] = v
+		}
+		_ = unstructured.SetNestedField(cluster.Object, existing, "spec", "infrastructureOverride")
+	}
+}
+
+// validateVersionUpgrade ensures the target version is not a downgrade.
+func validateVersionUpgrade(current, target string) error {
+	if current == "" || target == "" {
+		return nil
+	}
+	currentParts := parseVersion(current)
+	targetParts := parseVersion(target)
+	if currentParts == nil || targetParts == nil {
+		return nil // let the CRD validation handle format issues
+	}
+	if targetParts[0] < currentParts[0] ||
+		(targetParts[0] == currentParts[0] && targetParts[1] < currentParts[1]) ||
+		(targetParts[0] == currentParts[0] && targetParts[1] == currentParts[1] && targetParts[2] < currentParts[2]) {
+		return fmt.Errorf("downgrade from %s to %s is not permitted", current, target)
+	}
+	return nil
+}
+
+// parseVersion extracts major, minor, patch from a "vX.Y.Z" string.
+func parseVersion(v string) []int {
+	v = strings.TrimPrefix(v, "v")
+	parts := strings.SplitN(v, ".", 3)
+	if len(parts) != 3 {
+		return nil
+	}
+	var result []int
+	for _, p := range parts {
+		n := 0
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return nil
+			}
+			n = n*10 + int(c-'0')
+		}
+		result = append(result, n)
+	}
+	return result
+}
+
+// toInt64 attempts to convert a JSON number to int64.
+// JSON numbers decode as float64 by default.
+func toInt64(v interface{}) (int64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int64(n), true
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	}
+	return 0, false
 }
 
 // ToggleWorkspaces enables or disables workspaces on a cluster.

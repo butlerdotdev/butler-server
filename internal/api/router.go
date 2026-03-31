@@ -229,6 +229,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Post("/clusters", clusterHandler.Create)
 			r.Get("/clusters/{namespace}/{name}", clusterHandler.Get)
 			r.Delete("/clusters/{namespace}/{name}", clusterHandler.Delete)
+			r.Put("/clusters/{namespace}/{name}", clusterHandler.Update)
 			r.Patch("/clusters/{namespace}/{name}/scale", clusterHandler.Scale)
 			r.Post("/clusters/{namespace}/{name}/settings/workspaces", clusterHandler.ToggleWorkspaces)
 			r.Get("/clusters/{namespace}/{name}/kubeconfig", clusterHandler.GetKubeconfig)
