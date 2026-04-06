@@ -96,6 +96,18 @@ var (
 		Version:  "v1alpha1",
 		Resource: "loadbalancerrequests",
 	}
+
+	TenantControlPlaneGVR = schema.GroupVersionResource{
+		Group:    "steward.butlerlabs.dev",
+		Version:  "v1alpha1",
+		Resource: "tenantcontrolplanes",
+	}
+
+	DataStoreGVR = schema.GroupVersionResource{
+		Group:    "steward.butlerlabs.dev",
+		Version:  "v1alpha1",
+		Resource: "datastores",
+	}
 )
 
 // Client wraps Kubernetes client functionality.
@@ -308,4 +320,24 @@ func (c *Client) ListLoadBalancerRequests(ctx context.Context, namespace, cluste
 	return c.dynamicClient.Resource(LoadBalancerRequestGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
+}
+
+// ListTenantControlPlanes lists all TenantControlPlane resources.
+func (c *Client) ListTenantControlPlanes(ctx context.Context) (*unstructured.UnstructuredList, error) {
+	return c.dynamicClient.Resource(TenantControlPlaneGVR).List(ctx, metav1.ListOptions{})
+}
+
+// GetTenantControlPlane gets a specific TenantControlPlane.
+func (c *Client) GetTenantControlPlane(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
+	return c.dynamicClient.Resource(TenantControlPlaneGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+// ListDataStores lists all DataStore resources in the steward-system namespace.
+func (c *Client) ListDataStores(ctx context.Context, namespace string) (*unstructured.UnstructuredList, error) {
+	return c.dynamicClient.Resource(DataStoreGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+}
+
+// GetDataStore gets a specific DataStore.
+func (c *Client) GetDataStore(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
+	return c.dynamicClient.Resource(DataStoreGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 }
