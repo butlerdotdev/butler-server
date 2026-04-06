@@ -332,12 +332,12 @@ func (c *Client) GetTenantControlPlane(ctx context.Context, namespace, name stri
 	return c.dynamicClient.Resource(TenantControlPlaneGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 }
 
-// ListDataStores lists all DataStore resources in the steward-system namespace.
-func (c *Client) ListDataStores(ctx context.Context, namespace string) (*unstructured.UnstructuredList, error) {
-	return c.dynamicClient.Resource(DataStoreGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+// ListDataStores lists all DataStore resources (cluster-scoped).
+func (c *Client) ListDataStores(ctx context.Context) (*unstructured.UnstructuredList, error) {
+	return c.dynamicClient.Resource(DataStoreGVR).List(ctx, metav1.ListOptions{})
 }
 
-// GetDataStore gets a specific DataStore.
-func (c *Client) GetDataStore(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
-	return c.dynamicClient.Resource(DataStoreGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+// GetDataStore gets a specific DataStore (cluster-scoped).
+func (c *Client) GetDataStore(ctx context.Context, name string) (*unstructured.Unstructured, error) {
+	return c.dynamicClient.Resource(DataStoreGVR).Get(ctx, name, metav1.GetOptions{})
 }
