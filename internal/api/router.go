@@ -22,6 +22,7 @@ import (
 	"net/http"
 
 	"github.com/butlerdotdev/butler-server/internal/api/handlers"
+	"github.com/butlerdotdev/butler-server/internal/audit"
 	"github.com/butlerdotdev/butler-server/internal/auth"
 	"github.com/butlerdotdev/butler-server/internal/config"
 	"github.com/butlerdotdev/butler-server/internal/k8s"
@@ -126,6 +127,9 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 		}))
 	}
 
+	// Audit emitter
+	auditEmitter := audit.NewEmitter(10000, "", cfg.Logger.With("component", "audit"))
+
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(
 		oidcProvider,
@@ -134,6 +138,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 		userService,
 		cfg.Config,
 		cfg.Logger.With("component", "auth"),
+		auditEmitter,
 	)
 	userHandler := handlers.NewUserHandler(
 		userService,
@@ -154,8 +159,9 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	workspaceHandler := handlers.NewWorkspaceHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "workspaces"))
 	observabilityHandler := handlers.NewObservabilityHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "observability"))
 	imagesHandler := handlers.NewImagesHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "images"))
-	configHandler := handlers.NewConfigHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "config"))
+	configHandler := handlers.NewConfigHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "config"), auditEmitter)
 	stewardHandler := handlers.NewStewardHandler(cfg.K8sClient, cfg.Config)
+	auditHandler := handlers.NewAuditHandler(auditEmitter)
 
 	// Auth middleware - SECURITY: Now re-validates team membership on every request
 	authMiddleware := auth.SessionMiddleware(auth.SessionMiddlewareConfig{
@@ -192,6 +198,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 		// Protected routes (authentication required)
 		r.Group(func(r chi.Router) {
 			r.Use(authMiddleware)
+			r.Use(audit.Middleware(auditEmitter))
 
 			// Auth endpoints
 			r.Post("/auth/logout", authHandler.Logout)
@@ -339,6 +346,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Get("/teams/{name}/clusters", teamHandler.ListClusters)
 			r.Get("/teams/{name}/members", teamHandler.ListMembers)
 			r.Get("/teams/{name}/groups", teamHandler.ListGroupSyncs)
+			r.Get("/teams/{name}/audit", auditHandler.ListTeam)
 
 			// Team provider management (team members can list, team admins can create/delete)
 			r.Get("/teams/{name}/providers", providerHandler.ListTeamProviders)
@@ -401,6 +409,9 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				// Platform configuration (admin only)
 				r.Get("/config", configHandler.GetConfig)
 				r.Put("/config", configHandler.UpdateConfig)
+
+				// Audit log (admin only)
+				r.Get("/audit", auditHandler.ListAll)
 
 				// Observability management (admin only)
 				r.Put("/observability/config", observabilityHandler.UpdateConfig)

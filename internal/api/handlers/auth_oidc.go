@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/butlerdotdev/butler-server/internal/audit"
 	"github.com/butlerdotdev/butler-server/internal/auth"
 	"github.com/butlerdotdev/butler-server/internal/config"
 )
@@ -35,6 +36,7 @@ type AuthHandler struct {
 	stateStore     *auth.StateStore
 	config         *config.Config
 	logger         *slog.Logger
+	auditEmitter   *audit.Emitter
 }
 
 // NewAuthHandler creates a new auth handler.
@@ -45,6 +47,7 @@ func NewAuthHandler(
 	userService *auth.UserService,
 	cfg *config.Config,
 	logger *slog.Logger,
+	auditEmitter *audit.Emitter,
 ) *AuthHandler {
 	return &AuthHandler{
 		oidcProvider:   oidcProvider,
@@ -54,6 +57,7 @@ func NewAuthHandler(
 		stateStore:     auth.NewStateStore(10 * time.Minute),
 		config:         cfg,
 		logger:         logger,
+		auditEmitter:   auditEmitter,
 	}
 }
 
@@ -224,6 +228,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		"teams", len(teams),
 		"isPlatformAdmin", isPlatformAdmin,
 	)
+	audit.RecordLogin(h.auditEmitter, claims.Email, "sso", r.RemoteAddr)
 
 	// Redirect to app
 	redirectURL := "/"
@@ -337,6 +342,7 @@ func (h *AuthHandler) InternalUserLogin(w http.ResponseWriter, r *http.Request) 
 		"teams", len(teams),
 		"isPlatformAdmin", user.IsPlatformAdmin,
 	)
+	audit.RecordLogin(h.auditEmitter, user.Email, "internal", r.RemoteAddr)
 
 	writeJSON(w, http.StatusOK, LoginResponse{
 		User: UserResponse{
@@ -363,16 +369,23 @@ func (h *AuthHandler) LegacyLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Check legacy admin credentials
 	if req.Username != h.config.Auth.AdminUsername || req.Password != h.config.Auth.AdminPassword {
+		audit.RecordLoginFailed(h.auditEmitter, req.Username, "legacy", r.RemoteAddr, "invalid credentials")
 		writeError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 
+	audit.RecordLogin(h.auditEmitter, req.Username, "legacy", r.RemoteAddr)
 	h.createLegacyAdminSession(w, r)
 }
 
 // Logout handles user logout.
 // POST /api/auth/logout
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	if user != nil {
+		audit.RecordLogout(h.auditEmitter, user.Email, r.RemoteAddr)
+	}
+
 	// Clear session cookie
 	http.SetCookie(w, &http.Cookie{
 		Name:     "butler_session",
