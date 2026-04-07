@@ -313,6 +313,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Post("/image-syncs", imagesHandler.CreateImageSync)
 			r.Get("/image-syncs/{namespace}/{name}", imagesHandler.GetImageSync)
 			r.Delete("/image-syncs/{namespace}/{name}", imagesHandler.DeleteImageSync)
+			r.Put("/image-syncs/{namespace}/{name}", imagesHandler.UpdateImageSync)
 
 			// Image factory proxy
 			r.Get("/image-factory/catalog", imagesHandler.GetFactoryCatalog)
