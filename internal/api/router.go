@@ -155,6 +155,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	observabilityHandler := handlers.NewObservabilityHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "observability"))
 	imagesHandler := handlers.NewImagesHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "images"))
 	configHandler := handlers.NewConfigHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "config"))
+	stewardHandler := handlers.NewStewardHandler(cfg.K8sClient, cfg.Config)
 
 	// Auth middleware - SECURITY: Now re-validates team membership on every request
 	authMiddleware := auth.SessionMiddleware(auth.SessionMiddlewareConfig{
@@ -220,6 +221,12 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Post("/management/gitops/export-catalog", gitopsHandler.ExportManagementCatalogAddon)
 			r.Post("/management/gitops/migrate", gitopsHandler.ExportAllManagementAddons)
 
+			// Steward: TenantControlPlane and DataStore visibility
+			r.Get("/management/tenantcontrolplanes", stewardHandler.ListTenantControlPlanes)
+			r.Get("/management/tenantcontrolplanes/{namespace}/{name}", stewardHandler.GetTenantControlPlane)
+			r.Get("/management/datastores", stewardHandler.ListDataStores)
+			r.Get("/management/datastores/{name}", stewardHandler.GetDataStore)
+
 			// Addon catalog
 			r.Get("/addons/catalog", addonsHandler.GetCatalog)
 			r.Get("/addons/catalog/{name}", addonsHandler.GetAddonDefinition)
@@ -238,6 +245,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Get("/clusters/{namespace}/{name}/export", clusterHandler.ExportYAML)
 			r.Get("/clusters/{namespace}/{name}/machines", clusterHandler.ListMachineRequests)
 			r.Get("/clusters/{namespace}/{name}/load-balancers", clusterHandler.ListLoadBalancerRequests)
+			r.Get("/clusters/{namespace}/{name}/tenantcontrolplane", stewardHandler.GetClusterTenantControlPlane)
 
 			// Cluster addons
 			r.Get("/clusters/{namespace}/{name}/addons", addonsHandler.ListClusterAddons)
