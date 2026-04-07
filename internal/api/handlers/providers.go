@@ -97,13 +97,21 @@ type CreateProviderRequest struct {
 	AzureLocation       string `json:"azureLocation,omitempty"`
 	AzureVNetName       string `json:"azureVnetName,omitempty"`
 	AzureSubnetName     string `json:"azureSubnetName,omitempty"`
+	AzureVMSize         string `json:"azureVmSize,omitempty"`
+	AzureImageURN       string `json:"azureImageUrn,omitempty"`
 
 	// GCP
 	GCPProjectID      string `json:"gcpProjectId,omitempty"`
 	GCPRegion         string `json:"gcpRegion,omitempty"`
 	GCPServiceAccount string `json:"gcpServiceAccount,omitempty"`
 	GCPNetwork        string `json:"gcpNetwork,omitempty"`
-	GCPSubnetwork     string `json:"gcpSubnetwork,omitempty"`
+	GCPSubnetwork     string   `json:"gcpSubnetwork,omitempty"`
+	GCPZone           string   `json:"gcpZone,omitempty"`
+	GCPMachineType    string   `json:"gcpMachineType,omitempty"`
+	GCPImageProject   string   `json:"gcpImageProject,omitempty"`
+	GCPImageFamily    string   `json:"gcpImageFamily,omitempty"`
+	GCPImage          string   `json:"gcpImage,omitempty"`
+	GCPTags           []string `json:"gcpTags,omitempty"`
 
 	// Network configuration
 	NetworkMode       string   `json:"networkMode,omitempty"`
@@ -403,6 +411,12 @@ func (h *ProvidersHandler) createProvider(w http.ResponseWriter, r *http.Request
 		if req.AzureSubnetName != "" {
 			azureConfig["subnetName"] = req.AzureSubnetName
 		}
+		if req.AzureVMSize != "" {
+			azureConfig["vmSize"] = req.AzureVMSize
+		}
+		if req.AzureImageURN != "" {
+			azureConfig["imageURN"] = req.AzureImageURN
+		}
 		spec["azure"] = azureConfig
 
 	case "gcp":
@@ -415,6 +429,28 @@ func (h *ProvidersHandler) createProvider(w http.ResponseWriter, r *http.Request
 		}
 		if req.GCPSubnetwork != "" {
 			gcpConfig["subnetwork"] = req.GCPSubnetwork
+		}
+		if req.GCPZone != "" {
+			gcpConfig["zone"] = req.GCPZone
+		}
+		if req.GCPMachineType != "" {
+			gcpConfig["machineType"] = req.GCPMachineType
+		}
+		if req.GCPImageProject != "" {
+			gcpConfig["imageProject"] = req.GCPImageProject
+		}
+		if req.GCPImageFamily != "" {
+			gcpConfig["imageFamily"] = req.GCPImageFamily
+		}
+		if req.GCPImage != "" {
+			gcpConfig["image"] = req.GCPImage
+		}
+		if len(req.GCPTags) > 0 {
+			tags := make([]interface{}, len(req.GCPTags))
+			for i, t := range req.GCPTags {
+				tags[i] = t
+			}
+			gcpConfig["tags"] = tags
 		}
 		spec["gcp"] = gcpConfig
 	}
@@ -737,7 +773,7 @@ func (h *ProvidersHandler) Update(w http.ResponseWriter, r *http.Request) {
 			specChanged = true
 		}
 	case "azure":
-		if req.AzureSubscriptionID != "" || req.AzureResourceGroup != "" || req.AzureLocation != "" || req.AzureVNetName != "" || req.AzureSubnetName != "" {
+		if req.AzureSubscriptionID != "" || req.AzureResourceGroup != "" || req.AzureLocation != "" || req.AzureVNetName != "" || req.AzureSubnetName != "" || req.AzureVMSize != "" || req.AzureImageURN != "" {
 			azureConfig, _, _ := unstructured.NestedMap(existing.Object, "spec", "azure")
 			if azureConfig == nil {
 				azureConfig = map[string]interface{}{}
@@ -757,11 +793,17 @@ func (h *ProvidersHandler) Update(w http.ResponseWriter, r *http.Request) {
 			if req.AzureSubnetName != "" {
 				azureConfig["subnetName"] = req.AzureSubnetName
 			}
+			if req.AzureVMSize != "" {
+				azureConfig["vmSize"] = req.AzureVMSize
+			}
+			if req.AzureImageURN != "" {
+				azureConfig["imageURN"] = req.AzureImageURN
+			}
 			spec["azure"] = azureConfig
 			specChanged = true
 		}
 	case "gcp":
-		if req.GCPProjectID != "" || req.GCPRegion != "" || req.GCPNetwork != "" || req.GCPSubnetwork != "" {
+		if req.GCPProjectID != "" || req.GCPRegion != "" || req.GCPNetwork != "" || req.GCPSubnetwork != "" || req.GCPZone != "" || req.GCPMachineType != "" || req.GCPImageProject != "" || req.GCPImageFamily != "" || req.GCPImage != "" || len(req.GCPTags) > 0 {
 			gcpConfig, _, _ := unstructured.NestedMap(existing.Object, "spec", "gcp")
 			if gcpConfig == nil {
 				gcpConfig = map[string]interface{}{}
@@ -777,6 +819,28 @@ func (h *ProvidersHandler) Update(w http.ResponseWriter, r *http.Request) {
 			}
 			if req.GCPSubnetwork != "" {
 				gcpConfig["subnetwork"] = req.GCPSubnetwork
+			}
+			if req.GCPZone != "" {
+				gcpConfig["zone"] = req.GCPZone
+			}
+			if req.GCPMachineType != "" {
+				gcpConfig["machineType"] = req.GCPMachineType
+			}
+			if req.GCPImageProject != "" {
+				gcpConfig["imageProject"] = req.GCPImageProject
+			}
+			if req.GCPImageFamily != "" {
+				gcpConfig["imageFamily"] = req.GCPImageFamily
+			}
+			if req.GCPImage != "" {
+				gcpConfig["image"] = req.GCPImage
+			}
+			if len(req.GCPTags) > 0 {
+				tags := make([]interface{}, len(req.GCPTags))
+				for i, t := range req.GCPTags {
+					tags[i] = t
+				}
+				gcpConfig["tags"] = tags
 			}
 			spec["gcp"] = gcpConfig
 			specChanged = true
