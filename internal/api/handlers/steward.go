@@ -88,6 +88,7 @@ func (h *StewardHandler) GetClusterTenantControlPlane(w http.ResponseWriter, r *
 		return
 	}
 
+	// TCP name matches TenantCluster name by convention (butler-controller creates it this way)
 	tcp, err := h.k8sClient.GetTenantControlPlane(r.Context(), tenantNS, clusterName)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "TenantControlPlane not found for cluster")
