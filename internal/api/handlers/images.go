@@ -72,6 +72,13 @@ type CreateImageSyncRequest struct {
 	DisplayName    string `json:"displayName,omitempty"`
 }
 
+// UpdateImageSyncRequest represents an image sync update request.
+type UpdateImageSyncRequest struct {
+	DisplayName  *string `json:"displayName,omitempty"`
+	Format       *string `json:"format,omitempty"`
+	TransferMode *string `json:"transferMode,omitempty"`
+}
+
 // --- Image Sync CRUD ---
 
 // ListImageSyncs handles GET /api/image-syncs.
@@ -316,6 +323,86 @@ func (h *ImagesHandler) DeleteImageSync(w http.ResponseWriter, r *http.Request) 
 
 	h.logger.Info("Deleted ImageSync", "name", name, "namespace", namespace)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "image sync deletion initiated"})
+}
+
+// UpdateImageSync handles PUT /api/image-syncs/{namespace}/{name}.
+func (h *ImagesHandler) UpdateImageSync(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+	ctx := r.Context()
+
+	var req UpdateImageSyncRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Fetch the existing ImageSync
+	imageSync, err := h.k8sClient.Dynamic().Resource(imageSyncGVR).Namespace(namespace).Get(
+		ctx, name, metav1.GetOptions{},
+	)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("image sync not found: %v", err))
+		return
+	}
+
+	// Authorization: require admin or operator role
+	if user != nil {
+		if user.SelectedTeam != "" {
+			if user.SelectedTeamRole == auth.RoleViewer {
+				writeError(w, http.StatusForbidden, "viewer role cannot update image syncs")
+				return
+			}
+		} else if !user.IsAdmin() {
+			writeError(w, http.StatusForbidden, "image sync update requires admin role or team context")
+			return
+		}
+	}
+
+	// Apply mutable field updates
+	spec, _, _ := unstructured.NestedMap(imageSync.Object, "spec")
+	if spec == nil {
+		spec = map[string]interface{}{}
+	}
+
+	changed := false
+	if req.DisplayName != nil {
+		spec["displayName"] = *req.DisplayName
+		changed = true
+	}
+	if req.Format != nil {
+		spec["format"] = *req.Format
+		changed = true
+	}
+	if req.TransferMode != nil {
+		spec["transferMode"] = *req.TransferMode
+		changed = true
+	}
+
+	// If no changes, return the existing object as-is
+	if !changed {
+		writeJSON(w, http.StatusOK, imageSync.Object)
+		return
+	}
+
+	if err := unstructured.SetNestedMap(imageSync.Object, spec, "spec"); err != nil {
+		h.logger.Error("Failed to set spec on ImageSync", "error", err, "name", name, "namespace", namespace)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update image sync spec: %v", err))
+		return
+	}
+
+	updated, err := h.k8sClient.Dynamic().Resource(imageSyncGVR).Namespace(namespace).Update(
+		ctx, imageSync, metav1.UpdateOptions{},
+	)
+	if err != nil {
+		h.logger.Error("Failed to update ImageSync", "error", err, "name", name, "namespace", namespace)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update image sync: %v", err))
+		return
+	}
+
+	h.logger.Info("Updated ImageSync", "name", name, "namespace", namespace)
+	writeJSON(w, http.StatusOK, updated.Object)
 }
 
 // --- Factory Proxy Endpoints ---
