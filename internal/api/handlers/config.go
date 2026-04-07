@@ -23,6 +23,7 @@ import (
 	"net/http"
 
 	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
+	"github.com/butlerdotdev/butler-server/internal/audit"
 	"github.com/butlerdotdev/butler-server/internal/config"
 	"github.com/butlerdotdev/butler-server/internal/k8s"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -30,17 +31,19 @@ import (
 
 // ConfigHandler handles ButlerConfig management API requests.
 type ConfigHandler struct {
-	k8sClient *k8s.Client
-	config    *config.Config
-	logger    *slog.Logger
+	k8sClient    *k8s.Client
+	config       *config.Config
+	logger       *slog.Logger
+	auditEmitter *audit.Emitter
 }
 
 // NewConfigHandler creates a new config handler.
-func NewConfigHandler(k8sClient *k8s.Client, cfg *config.Config, logger *slog.Logger) *ConfigHandler {
+func NewConfigHandler(k8sClient *k8s.Client, cfg *config.Config, logger *slog.Logger, auditEmitter *audit.Emitter) *ConfigHandler {
 	return &ConfigHandler{
-		k8sClient: k8sClient,
-		config:    cfg,
-		logger:    logger,
+		k8sClient:    k8sClient,
+		config:       cfg,
+		logger:       logger,
+		auditEmitter: auditEmitter,
 	}
 }
 
@@ -61,6 +64,7 @@ type ButlerConfigResponse struct {
 
 	// Integrations
 	ImageFactory     *ImageFactoryInfo `json:"imageFactory,omitempty"`
+	Audit            *AuditInfo        `json:"audit,omitempty"`
 	SSHAuthorizedKey string            `json:"sshAuthorizedKey,omitempty"`
 
 	// Read-only status
@@ -132,6 +136,13 @@ type ImageFactoryInfo struct {
 	AutoSync           *bool  `json:"autoSync,omitempty"`
 }
 
+// AuditInfo contains audit log configuration.
+type AuditInfo struct {
+	Enabled    *bool  `json:"enabled,omitempty"`
+	WebhookURL string `json:"webhookURL,omitempty"`
+	BufferSize *int32 `json:"bufferSize,omitempty"`
+}
+
 // ConfigStatusInfo contains read-only platform status.
 type ConfigStatusInfo struct {
 	TeamCount                int32  `json:"teamCount"`
@@ -150,6 +161,7 @@ type UpdateConfigRequest struct {
 	DefaultTeamLimits           *TeamLimitsInfo            `json:"defaultTeamLimits,omitempty"`
 	DefaultControlPlaneResources *CPResourcesInfo          `json:"defaultControlPlaneResources,omitempty"`
 	ImageFactory                *ImageFactoryInfo          `json:"imageFactory,omitempty"`
+	Audit                       *AuditInfo                 `json:"audit,omitempty"`
 	SSHAuthorizedKey            *string                    `json:"sshAuthorizedKey,omitempty"`
 }
 
@@ -206,6 +218,12 @@ func (h *ConfigHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("Failed to re-read ButlerConfig", "error", err)
 		writeError(w, http.StatusInternalServerError, "config updated but failed to read back")
 		return
+	}
+
+	// Sync audit emitter settings from updated config
+	if h.auditEmitter != nil {
+		h.auditEmitter.SetEnabled(updated.IsAuditEnabled())
+		h.auditEmitter.SetWebhookURL(updated.GetAuditWebhookURL())
 	}
 
 	resp := h.buildResponse(updated)
@@ -280,6 +298,14 @@ func (h *ConfigHandler) buildResponse(bc *butlerv1alpha1.ButlerConfig) ButlerCon
 		}
 		if cpr.Scheduler != nil {
 			resp.DefaultControlPlaneResources.Scheduler = buildComponentResourcesInfo(cpr.Scheduler)
+		}
+	}
+
+	if bc.Spec.Audit != nil {
+		resp.Audit = &AuditInfo{
+			Enabled:    bc.Spec.Audit.Enabled,
+			WebhookURL: bc.Spec.Audit.WebhookURL,
+			BufferSize: bc.Spec.Audit.BufferSize,
 		}
 	}
 
@@ -421,6 +447,14 @@ func (h *ConfigHandler) applyUpdate(bc *butlerv1alpha1.ButlerConfig, req *Update
 			}
 		}
 		bc.Spec.ImageFactory = ifCfg
+	}
+
+	if req.Audit != nil {
+		bc.Spec.Audit = &butlerv1alpha1.AuditConfig{
+			Enabled:    req.Audit.Enabled,
+			WebhookURL: req.Audit.WebhookURL,
+			BufferSize: req.Audit.BufferSize,
+		}
 	}
 
 	if req.SSHAuthorizedKey != nil {
