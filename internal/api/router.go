@@ -129,6 +129,26 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 
 	// Audit emitter
 	auditEmitter := audit.NewEmitter(10000, "", cfg.Logger.With("component", "audit"))
+	auditEmitter.SetHub(wsHub)
+
+	// Wire session resolver for per-client notification filtering
+	wsHub.SetSessionResolver(func(r *http.Request) (*websocket.SessionInfo, error) {
+		cookie, err := r.Cookie("butler_session")
+		if err != nil {
+			return nil, err
+		}
+		session, err := sessionService.ValidateSession(cookie.Value)
+		if err != nil {
+			return nil, err
+		}
+		info := &websocket.SessionInfo{
+			IsPlatformAdmin: session.IsPlatformAdmin,
+		}
+		for _, tm := range session.Teams {
+			info.Teams = append(info.Teams, websocket.TeamInfo{Name: tm.Name})
+		}
+		return info, nil
+	})
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(
@@ -159,7 +179,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	workspaceHandler := handlers.NewWorkspaceHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "workspaces"))
 	observabilityHandler := handlers.NewObservabilityHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "observability"))
 	imagesHandler := handlers.NewImagesHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "images"))
-	configHandler := handlers.NewConfigHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "config"), auditEmitter)
+	configHandler := handlers.NewConfigHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "config"), auditEmitter, wsHub)
 	stewardHandler := handlers.NewStewardHandler(cfg.K8sClient, cfg.Config)
 	auditHandler := handlers.NewAuditHandler(auditEmitter)
 

@@ -29,21 +29,28 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+// WebhookConfigurable is something that accepts a webhook URL update at runtime.
+type WebhookConfigurable interface {
+	SetWebhookURL(url string)
+}
+
 // ConfigHandler handles ButlerConfig management API requests.
 type ConfigHandler struct {
-	k8sClient    *k8s.Client
-	config       *config.Config
-	logger       *slog.Logger
-	auditEmitter *audit.Emitter
+	k8sClient       *k8s.Client
+	config          *config.Config
+	logger          *slog.Logger
+	auditEmitter    *audit.Emitter
+	notificationHub WebhookConfigurable
 }
 
 // NewConfigHandler creates a new config handler.
-func NewConfigHandler(k8sClient *k8s.Client, cfg *config.Config, logger *slog.Logger, auditEmitter *audit.Emitter) *ConfigHandler {
+func NewConfigHandler(k8sClient *k8s.Client, cfg *config.Config, logger *slog.Logger, auditEmitter *audit.Emitter, notificationHub WebhookConfigurable) *ConfigHandler {
 	return &ConfigHandler{
-		k8sClient:    k8sClient,
-		config:       cfg,
-		logger:       logger,
-		auditEmitter: auditEmitter,
+		k8sClient:       k8sClient,
+		config:          cfg,
+		logger:          logger,
+		auditEmitter:    auditEmitter,
+		notificationHub: notificationHub,
 	}
 }
 
@@ -64,8 +71,9 @@ type ButlerConfigResponse struct {
 
 	// Integrations
 	ImageFactory     *ImageFactoryInfo `json:"imageFactory,omitempty"`
-	Audit            *AuditInfo        `json:"audit,omitempty"`
-	SSHAuthorizedKey string            `json:"sshAuthorizedKey,omitempty"`
+	Audit            *AuditInfo         `json:"audit,omitempty"`
+	Notifications    *NotificationsInfo `json:"notifications,omitempty"`
+	SSHAuthorizedKey string             `json:"sshAuthorizedKey,omitempty"`
 
 	// Read-only status
 	Status *ConfigStatusInfo `json:"status"`
@@ -136,6 +144,11 @@ type ImageFactoryInfo struct {
 	AutoSync           *bool  `json:"autoSync,omitempty"`
 }
 
+// NotificationsInfo contains notification forwarding configuration.
+type NotificationsInfo struct {
+	WebhookURL string `json:"webhookURL,omitempty"`
+}
+
 // AuditInfo contains audit log configuration.
 type AuditInfo struct {
 	Enabled    *bool  `json:"enabled,omitempty"`
@@ -162,6 +175,7 @@ type UpdateConfigRequest struct {
 	DefaultControlPlaneResources *CPResourcesInfo          `json:"defaultControlPlaneResources,omitempty"`
 	ImageFactory                *ImageFactoryInfo          `json:"imageFactory,omitempty"`
 	Audit                       *AuditInfo                 `json:"audit,omitempty"`
+	Notifications               *NotificationsInfo         `json:"notifications,omitempty"`
 	SSHAuthorizedKey            *string                    `json:"sshAuthorizedKey,omitempty"`
 }
 
@@ -224,6 +238,11 @@ func (h *ConfigHandler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if h.auditEmitter != nil {
 		h.auditEmitter.SetEnabled(updated.IsAuditEnabled())
 		h.auditEmitter.SetWebhookURL(updated.GetAuditWebhookURL())
+	}
+
+	// Sync notification hub webhook from updated config
+	if h.notificationHub != nil {
+		h.notificationHub.SetWebhookURL(updated.GetNotificationsWebhookURL())
 	}
 
 	resp := h.buildResponse(updated)
@@ -306,6 +325,12 @@ func (h *ConfigHandler) buildResponse(bc *butlerv1alpha1.ButlerConfig) ButlerCon
 			Enabled:    bc.Spec.Audit.Enabled,
 			WebhookURL: bc.Spec.Audit.WebhookURL,
 			BufferSize: bc.Spec.Audit.BufferSize,
+		}
+	}
+
+	if bc.Spec.Notifications != nil {
+		resp.Notifications = &NotificationsInfo{
+			WebhookURL: bc.Spec.Notifications.WebhookURL,
 		}
 	}
 
@@ -454,6 +479,12 @@ func (h *ConfigHandler) applyUpdate(bc *butlerv1alpha1.ButlerConfig, req *Update
 			Enabled:    req.Audit.Enabled,
 			WebhookURL: req.Audit.WebhookURL,
 			BufferSize: req.Audit.BufferSize,
+		}
+	}
+
+	if req.Notifications != nil {
+		bc.Spec.Notifications = &butlerv1alpha1.NotificationsConfig{
+			WebhookURL: req.Notifications.WebhookURL,
 		}
 	}
 
