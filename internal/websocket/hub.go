@@ -17,8 +17,10 @@ limitations under the License.
 package websocket
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -27,8 +29,10 @@ import (
 	"github.com/butlerdotdev/butler-server/internal/k8s"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/watch"
 )
 
@@ -49,6 +53,7 @@ const (
 	MessageTypePing          MessageType = "ping"
 	MessageTypePong          MessageType = "pong"
 	MessageTypeError         MessageType = "error"
+	MessageTypeNotification  MessageType = "notification"
 )
 
 // Message represents a WebSocket message.
@@ -68,10 +73,46 @@ type ClusterDeletePayload struct {
 	Namespace string `json:"namespace"`
 }
 
+// NotificationPayload is sent for real-time notifications.
+type NotificationPayload struct {
+	ID          string       `json:"id"`
+	Title       string       `json:"title"`
+	Message     string       `json:"message"`
+	Severity    string       `json:"severity"`
+	Category    string       `json:"category"`
+	Timestamp   time.Time    `json:"timestamp"`
+	ResourceRef *ResourceRef `json:"resourceRef,omitempty"`
+}
+
+// ResourceRef identifies the resource a notification relates to.
+type ResourceRef struct {
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace,omitempty"`
+	Team      string `json:"team,omitempty"`
+}
+
+// SessionInfo contains the user identity resolved from a WebSocket connection.
+type SessionInfo struct {
+	IsPlatformAdmin bool
+	Teams           []TeamInfo
+}
+
+// TeamInfo contains team membership data.
+type TeamInfo struct {
+	Name string
+}
+
+// SessionResolverFunc resolves user session from an HTTP request.
+type SessionResolverFunc func(r *http.Request) (*SessionInfo, error)
+
 // Hub manages WebSocket connections and cluster watches.
 type Hub struct {
-	k8sClient *k8s.Client
-	log       *slog.Logger
+	k8sClient       *k8s.Client
+	log             *slog.Logger
+	sessionResolver SessionResolverFunc
+	webhookURL      string
+	httpClient      *http.Client
 
 	clients    map[*Client]bool
 	register   chan *Client
@@ -83,9 +124,11 @@ type Hub struct {
 
 // Client represents a WebSocket client connection.
 type Client struct {
-	hub  *Hub
-	conn *websocket.Conn
-	send chan Message
+	hub             *Hub
+	conn            *websocket.Conn
+	send            chan Message
+	teams           []string
+	isPlatformAdmin bool
 }
 
 // NewHub creates a new WebSocket hub.
@@ -93,11 +136,22 @@ func NewHub(k8sClient *k8s.Client, log *slog.Logger) *Hub {
 	return &Hub{
 		k8sClient:  k8sClient,
 		log:        log,
+		httpClient: &http.Client{Timeout: 5 * time.Second},
 		clients:    make(map[*Client]bool),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		broadcast:  make(chan Message, 256),
 	}
+}
+
+// SetSessionResolver sets the function used to resolve user sessions from WebSocket upgrade requests.
+func (h *Hub) SetSessionResolver(resolver SessionResolverFunc) {
+	h.sessionResolver = resolver
+}
+
+// SetWebhookURL sets the URL for forwarding notifications to external systems.
+func (h *Hub) SetWebhookURL(url string) {
+	h.webhookURL = url
 }
 
 // Run starts the hub's main loop.
@@ -136,7 +190,79 @@ func (h *Hub) Run() {
 	}
 }
 
+// BroadcastNotification sends a notification to clients that have access to the relevant team.
+// Platform admins receive all notifications. Non-admins only receive notifications
+// where resourceRef.team matches one of their teams. Team-less notifications
+// (e.g., security events) are only sent to platform admins.
+func (h *Hub) BroadcastNotification(n NotificationPayload) {
+	if n.ID == "" {
+		n.ID = uuid.New().String()
+	}
+	if n.Timestamp.IsZero() {
+		n.Timestamp = time.Now()
+	}
+
+	msg := Message{Type: MessageTypeNotification, Payload: n}
+
+	h.mu.RLock()
+	for client := range h.clients {
+		if !clientCanReceive(client, n) {
+			continue
+		}
+		select {
+		case client.send <- msg:
+		default:
+			// Client buffer full, skip
+		}
+	}
+	h.mu.RUnlock()
+
+	// Forward to external webhook if configured
+	if h.webhookURL != "" {
+		go h.sendNotificationWebhook(n)
+	}
+}
+
+func (h *Hub) sendNotificationWebhook(n NotificationPayload) {
+	body, err := json.Marshal(n)
+	if err != nil {
+		h.log.Error("Failed to marshal notification for webhook", "error", err)
+		return
+	}
+
+	resp, err := h.httpClient.Post(h.webhookURL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		h.log.Error("Failed to send notification webhook", "error", err, "url", h.webhookURL)
+		return
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		h.log.Warn("Notification webhook returned non-success status",
+			slog.Int("statusCode", resp.StatusCode),
+			slog.String("url", h.webhookURL),
+		)
+	}
+}
+
+func clientCanReceive(c *Client, n NotificationPayload) bool {
+	if c.isPlatformAdmin {
+		return true
+	}
+	if n.ResourceRef == nil || n.ResourceRef.Team == "" {
+		return false
+	}
+	for _, team := range c.teams {
+		if team == n.ResourceRef.Team {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Hub) watchClusters() {
+	previousPhases := make(map[string]string)
+
 	for {
 		h.log.Info("Starting TenantCluster watch")
 
@@ -158,11 +284,28 @@ func (h *Hub) watchClusters() {
 					Payload: ClusterUpdatePayload{Cluster: event.Object},
 				}
 
+				// Detect phase transitions and emit notifications
+				if obj, ok := event.Object.(*unstructured.Unstructured); ok {
+					key := obj.GetNamespace() + "/" + obj.GetName()
+					newPhase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
+					prevPhase := previousPhases[key]
+
+					if newPhase != "" && newPhase != prevPhase {
+						previousPhases[key] = newPhase
+						if n := h.clusterPhaseNotification(obj, prevPhase, newPhase); n != nil {
+							h.BroadcastNotification(*n)
+						}
+					}
+				}
+
 			case watch.Deleted:
 				if obj, ok := event.Object.(interface {
 					GetName() string
 					GetNamespace() string
 				}); ok {
+					// Clean up phase tracking
+					delete(previousPhases, obj.GetNamespace()+"/"+obj.GetName())
+
 					h.broadcast <- Message{
 						Type: MessageTypeClusterDelete,
 						Payload: ClusterDeletePayload{
@@ -170,6 +313,18 @@ func (h *Hub) watchClusters() {
 							Namespace: obj.GetNamespace(),
 						},
 					}
+
+					h.BroadcastNotification(NotificationPayload{
+						Title:    fmt.Sprintf("Cluster %s deleted", obj.GetName()),
+						Message:  fmt.Sprintf("Cluster in namespace %s has been deleted", obj.GetNamespace()),
+						Severity: "warning",
+						Category: "cluster",
+						ResourceRef: &ResourceRef{
+							Kind:      "TenantCluster",
+							Name:      obj.GetName(),
+							Namespace: obj.GetNamespace(),
+						},
+					})
 				}
 
 			case watch.Error:
@@ -182,6 +337,54 @@ func (h *Hub) watchClusters() {
 	}
 }
 
+func (h *Hub) clusterPhaseNotification(obj *unstructured.Unstructured, oldPhase, newPhase string) *NotificationPayload {
+	name := obj.GetName()
+	ns := obj.GetNamespace()
+	teamRef, _, _ := unstructured.NestedString(obj.Object, "spec", "teamRef", "name")
+
+	ref := &ResourceRef{
+		Kind:      "TenantCluster",
+		Name:      name,
+		Namespace: ns,
+		Team:      teamRef,
+	}
+
+	switch newPhase {
+	case "Ready":
+		if oldPhase == "Provisioning" || oldPhase == "Updating" || oldPhase == "Installing" {
+			return &NotificationPayload{
+				Title:       fmt.Sprintf("Cluster %s is ready", name),
+				Message:     "Provisioning completed successfully.",
+				Severity:    "success",
+				Category:    "cluster",
+				ResourceRef: ref,
+			}
+		}
+	case "Failed":
+		failureMsg, _, _ := unstructured.NestedString(obj.Object, "status", "failureMessage")
+		if failureMsg == "" {
+			failureMsg = "Check cluster status for details."
+		}
+		return &NotificationPayload{
+			Title:       fmt.Sprintf("Cluster %s has failed", name),
+			Message:     failureMsg,
+			Severity:    "error",
+			Category:    "cluster",
+			ResourceRef: ref,
+		}
+	case "Degraded":
+		return &NotificationPayload{
+			Title:       fmt.Sprintf("Cluster %s is degraded", name),
+			Message:     "One or more components are unhealthy.",
+			Severity:    "warning",
+			Category:    "cluster",
+			ResourceRef: ref,
+		}
+	}
+
+	return nil
+}
+
 // HandleClusterWatch handles WebSocket connections for cluster updates.
 func (h *Hub) HandleClusterWatch(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -190,10 +393,24 @@ func (h *Hub) HandleClusterWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Extract team memberships for per-client notification filtering
+	var teams []string
+	var isPlatformAdmin bool
+	if h.sessionResolver != nil {
+		if session, err := h.sessionResolver(r); err == nil && session != nil {
+			isPlatformAdmin = session.IsPlatformAdmin
+			for _, tm := range session.Teams {
+				teams = append(teams, tm.Name)
+			}
+		}
+	}
+
 	client := &Client{
-		hub:  h,
-		conn: conn,
-		send: make(chan Message, 256),
+		hub:             h,
+		conn:            conn,
+		send:            make(chan Message, 256),
+		teams:           teams,
+		isPlatformAdmin: isPlatformAdmin,
 	}
 
 	h.register <- client

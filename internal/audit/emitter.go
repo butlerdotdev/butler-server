@@ -22,16 +22,24 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	ws "github.com/butlerdotdev/butler-server/internal/websocket"
 )
 
 // Emitter coordinates audit event emission to all configured targets:
 // structured logs (always), in-memory ring buffer (always), and webhook (optional).
+// NotificationBroadcaster is the interface for sending real-time notifications.
+type NotificationBroadcaster interface {
+	BroadcastNotification(ws.NotificationPayload)
+}
+
 type Emitter struct {
 	buffer     *RingBuffer
 	logger     *slog.Logger
 	webhookURL string
 	httpClient *http.Client
 	enabled    bool
+	hub        NotificationBroadcaster
 }
 
 // NewEmitter creates a new audit emitter.
@@ -53,6 +61,11 @@ func (e *Emitter) SetEnabled(enabled bool) {
 // SetWebhookURL updates the webhook URL at runtime.
 func (e *Emitter) SetWebhookURL(url string) {
 	e.webhookURL = url
+}
+
+// SetHub sets the notification broadcaster for real-time push.
+func (e *Emitter) SetHub(hub NotificationBroadcaster) {
+	e.hub = hub
 }
 
 // Emit records an audit event to all configured targets.
@@ -81,6 +94,13 @@ func (e *Emitter) Emit(event Event) {
 	// 3. Webhook — optional, async (fire-and-forget)
 	if e.webhookURL != "" {
 		go e.sendWebhook(event)
+	}
+
+	// 4. Real-time notification — bridge audit events to WebSocket notifications
+	if e.hub != nil {
+		if n := shouldNotify(event); n != nil {
+			e.hub.BroadcastNotification(*n)
+		}
 	}
 }
 
