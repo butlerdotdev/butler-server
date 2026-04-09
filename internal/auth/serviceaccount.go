@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -63,11 +64,12 @@ const (
 
 // CLIServiceAccountManager handles ServiceAccount lifecycle for CLI users.
 type CLIServiceAccountManager struct {
-	clientset   kubernetes.Interface
-	config      *rest.Config
-	logger      *slog.Logger
-	namespace   string
-	tokenExpiry time.Duration
+	clientset      kubernetes.Interface
+	config         *rest.Config
+	logger         *slog.Logger
+	namespace      string
+	tokenExpiry    time.Duration
+	externalAPIURL string // external K8s API URL for kubeconfigs (overrides config.Host)
 }
 
 // NewCLIServiceAccountManager creates a new manager.
@@ -77,13 +79,15 @@ func NewCLIServiceAccountManager(
 	logger *slog.Logger,
 	namespace string,
 	tokenExpiry time.Duration,
+	externalAPIURL string,
 ) *CLIServiceAccountManager {
 	return &CLIServiceAccountManager{
-		clientset:   clientset,
-		config:      config,
-		logger:      logger,
-		namespace:   namespace,
-		tokenExpiry: tokenExpiry,
+		clientset:      clientset,
+		config:         config,
+		logger:         logger,
+		namespace:      namespace,
+		tokenExpiry:    tokenExpiry,
+		externalAPIURL: externalAPIURL,
 	}
 }
 
@@ -313,13 +317,25 @@ func (m *CLIServiceAccountManager) BuildKubeconfig(token, saName string) ([]byte
 	userName := saName
 
 	kubeconfig := clientcmdapi.NewConfig()
-	kubeconfig.Clusters[clusterName] = &clientcmdapi.Cluster{
-		Server:                   m.config.Host,
-		CertificateAuthorityData: m.config.CAData,
+	caData := m.config.CAData
+	// When running in-cluster, CAData is empty and CAFile points to the
+	// in-cluster CA certificate. Read it so the kubeconfig is self-contained.
+	if len(caData) == 0 && m.config.CAFile != "" {
+		data, err := os.ReadFile(m.config.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading CA certificate from %s: %w", m.config.CAFile, err)
+		}
+		caData = data
 	}
-	// If no CA data but a CA file is set, reference it
-	if len(kubeconfig.Clusters[clusterName].CertificateAuthorityData) == 0 && m.config.CAFile != "" {
-		kubeconfig.Clusters[clusterName].CertificateAuthority = m.config.CAFile
+
+	serverURL := m.config.Host
+	if m.externalAPIURL != "" {
+		serverURL = m.externalAPIURL
+	}
+
+	kubeconfig.Clusters[clusterName] = &clientcmdapi.Cluster{
+		Server:                   serverURL,
+		CertificateAuthorityData: caData,
 	}
 
 	kubeconfig.AuthInfos[userName] = &clientcmdapi.AuthInfo{

@@ -163,6 +163,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			cfg.Logger.With("component", "cli-sa-manager"),
 			cfg.Config.SystemNamespace,
 			cfg.Config.CLIAuth.TokenExpiry,
+			cfg.Config.CLIAuth.ExternalAPIURL,
 		)
 
 		deviceFlowHandler = handlers.NewDeviceFlowHandler(

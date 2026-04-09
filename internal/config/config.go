@@ -49,6 +49,11 @@ type CLIAuthConfig struct {
 
 	// DeviceCodeExpiry is how long a device code is valid before it expires.
 	DeviceCodeExpiry time.Duration
+
+	// ExternalAPIURL is the external Kubernetes API server URL used in
+	// kubeconfigs issued to CLI users. Required when the server runs
+	// in-cluster since the in-cluster service IP is not reachable externally.
+	ExternalAPIURL string
 }
 
 // ServerConfig holds general server configuration.
@@ -147,6 +152,7 @@ func Load() *Config {
 			RefreshExpiry:    getDurationEnv("BUTLER_CLI_REFRESH_EXPIRY", 7*24*time.Hour),
 			SACleanupTTL:     getDurationEnv("BUTLER_CLI_SA_TTL", 30*24*time.Hour),
 			DeviceCodeExpiry: getDurationEnv("BUTLER_CLI_DEVICE_CODE_EXPIRY", 15*time.Minute),
+			ExternalAPIURL:  getEnv("BUTLER_CLI_EXTERNAL_API_URL", ""),
 		},
 		TenantNamespace: getEnv("BUTLER_TENANT_NAMESPACE", "butler-tenants"),
 		SystemNamespace: getEnv("BUTLER_SYSTEM_NAMESPACE", "butler-system"),
