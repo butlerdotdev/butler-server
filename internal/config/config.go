@@ -27,9 +27,28 @@ type Config struct {
 	Server          ServerConfig
 	Auth            AuthConfig
 	OIDC            OIDCConfig
+	CLIAuth         CLIAuthConfig
 	TenantNamespace string
 	SystemNamespace string
 	FrontendURL     string // For dev mode when frontend runs separately
+}
+
+// CLIAuthConfig holds configuration for the CLI device flow authentication.
+type CLIAuthConfig struct {
+	// Enabled controls whether CLI device flow auth endpoints are active.
+	Enabled bool
+
+	// TokenExpiry is the lifetime of SA tokens issued to CLI users.
+	TokenExpiry time.Duration
+
+	// RefreshExpiry is the lifetime of refresh tokens issued to CLI users.
+	RefreshExpiry time.Duration
+
+	// SACleanupTTL is how long unused CLI ServiceAccounts are kept before deletion.
+	SACleanupTTL time.Duration
+
+	// DeviceCodeExpiry is how long a device code is valid before it expires.
+	DeviceCodeExpiry time.Duration
 }
 
 // ServerConfig holds general server configuration.
@@ -121,6 +140,13 @@ func Load() *Config {
 			EmailClaim:               getEnv("BUTLER_OIDC_EMAIL_CLAIM", "email"),
 			GoogleServiceAccountJSON: getEnv("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
 			GoogleAdminEmail:         getEnv("GOOGLE_ADMIN_EMAIL", ""),
+		},
+		CLIAuth: CLIAuthConfig{
+			Enabled:          getBoolEnv("BUTLER_CLI_AUTH_ENABLED", true),
+			TokenExpiry:      getDurationEnv("BUTLER_CLI_TOKEN_EXPIRY", 24*time.Hour),
+			RefreshExpiry:    getDurationEnv("BUTLER_CLI_REFRESH_EXPIRY", 7*24*time.Hour),
+			SACleanupTTL:     getDurationEnv("BUTLER_CLI_SA_TTL", 30*24*time.Hour),
+			DeviceCodeExpiry: getDurationEnv("BUTLER_CLI_DEVICE_CODE_EXPIRY", 15*time.Minute),
 		},
 		TenantNamespace: getEnv("BUTLER_TENANT_NAMESPACE", "butler-tenants"),
 		SystemNamespace: getEnv("BUTLER_SYSTEM_NAMESPACE", "butler-system"),

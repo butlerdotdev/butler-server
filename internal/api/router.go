@@ -20,6 +20,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/butlerdotdev/butler-server/internal/api/handlers"
 	"github.com/butlerdotdev/butler-server/internal/audit"
@@ -150,6 +151,36 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 		return info, nil
 	})
 
+	// Initialize device flow for CLI authentication
+	var deviceFlowHandler *handlers.DeviceFlowHandler
+	if cfg.Config.CLIAuth.Enabled {
+		deviceStore := auth.NewDeviceStore()
+		deviceStore.StartCleanup(context.Background(), 1*time.Minute)
+
+		saManager := auth.NewCLIServiceAccountManager(
+			cfg.K8sClient.Clientset(),
+			cfg.K8sClient.Config(),
+			cfg.Logger.With("component", "cli-sa-manager"),
+			cfg.Config.SystemNamespace,
+			cfg.Config.CLIAuth.TokenExpiry,
+		)
+
+		deviceFlowHandler = handlers.NewDeviceFlowHandler(
+			deviceStore,
+			saManager,
+			teamResolver,
+			userService,
+			sessionService,
+			cfg.Config,
+			cfg.Logger.With("component", "cli-device-flow"),
+			auditEmitter,
+		)
+
+		cfg.Logger.Info("CLI device flow authentication enabled")
+	} else {
+		cfg.Logger.Info("CLI device flow authentication disabled")
+	}
+
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(
 		oidcProvider,
@@ -213,6 +244,14 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			// Invite flow (public - user clicking invite link)
 			r.Get("/invite/{token}", userHandler.ValidateInvite)
 			r.Post("/set-password", userHandler.SetPassword)
+
+			// CLI device flow (public endpoints)
+			if deviceFlowHandler != nil {
+				r.Post("/cli/device", deviceFlowHandler.DeviceAuthorize)
+				r.Post("/cli/token", deviceFlowHandler.DeviceToken)
+				r.Post("/cli/verify", deviceFlowHandler.DeviceVerify)
+				r.Post("/cli/refresh", deviceFlowHandler.DeviceRefresh)
+			}
 		})
 
 		// Protected routes (authentication required)
@@ -226,6 +265,11 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Post("/auth/refresh-permissions", authHandler.RefreshPermissions)
 			r.Get("/auth/me", authHandler.Me)
 			r.Get("/auth/teams", authHandler.Teams)
+
+			// CLI device flow approval (requires authenticated session)
+			if deviceFlowHandler != nil {
+				r.Post("/auth/cli/approve", deviceFlowHandler.DeviceApprove)
+			}
 
 			// Management cluster
 			r.Get("/management", clusterHandler.GetManagement)
