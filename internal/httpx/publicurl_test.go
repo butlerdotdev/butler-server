@@ -129,6 +129,52 @@ func TestPublicBaseURL(t *testing.T) {
 			host: "butler.example.com", xfp: "gopher",
 			want: "http://butler.example.com",
 		},
+		{
+			name:  "uppercase X-Forwarded-Proto is honored",
+			base:  defaultBase, trust: true,
+			host: "butler.example.com", xfp: "HTTPS",
+			want: "https://butler.example.com",
+		},
+		{
+			name:  "whitespace-padded X-Forwarded-Proto is honored",
+			base:  defaultBase, trust: true,
+			host: "butler.example.com", xfp: " https ",
+			want: "https://butler.example.com",
+		},
+		{
+			name:  "X-Forwarded-Host carrying a path is rejected",
+			base:  defaultBase, trust: true,
+			host: "butler.example.com", xfh: "evil.example.com/path",
+			want: "http://butler.example.com",
+		},
+		{
+			name:  "X-Forwarded-Host carrying a scheme is rejected",
+			base:  defaultBase, trust: true,
+			host: "butler.example.com", xfh: "https://evil.example.com",
+			want: "http://butler.example.com",
+		},
+		{
+			name:  "X-Forwarded-Host carrying a query is rejected",
+			base:  defaultBase, trust: true,
+			host: "butler.example.com", xfh: "evil.example.com?a=b",
+			want: "http://butler.example.com",
+		},
+		{
+			name:  "X-Forwarded-Host carrying embedded whitespace is rejected",
+			base:  defaultBase, trust: true,
+			host: "butler.example.com", xfh: "evil.example.com foo",
+			want: "http://butler.example.com",
+		},
+		{
+			name:     "FrontendURL trailing slash trimmed",
+			frontend: "https://butler.example.com/", base: defaultBase,
+			host: "ignored.example.com", want: "https://butler.example.com",
+		},
+		{
+			name: "BaseURL trailing slash trimmed",
+			base: "https://butler.example.com/",
+			host: "ignored.example.com", want: "https://butler.example.com",
+		},
 	}
 
 	for _, tt := range tests {

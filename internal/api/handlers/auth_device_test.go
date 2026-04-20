@@ -113,3 +113,25 @@ func TestDeviceAuthorize_IgnoresForwardedHeadersWithoutTrust(t *testing.T) {
 		t.Errorf("verification_uri = %q, must reflect the real request Host", resp.VerificationURI)
 	}
 }
+
+// TestDeviceAuthorize_ErrorsWhenNoPublicURLDerivable closes the last
+// coverage gap: with config at defaults and an empty Host on the
+// request, the helper returns an empty string and the handler must
+// fail with HTTP 500 rather than fall back to the broken localhost
+// default that shipped the original bug.
+func TestDeviceAuthorize_ErrorsWhenNoPublicURLDerivable(t *testing.T) {
+	h := newDeviceAuthorizeHandler()
+
+	req := httptest.NewRequest("POST", "/api/auth/cli/device", nil)
+	req.Host = ""
+	rec := httptest.NewRecorder()
+
+	h.DeviceAuthorize(rec, req)
+
+	if rec.Code != 500 {
+		t.Fatalf("status = %d, want 500 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "server misconfigured") {
+		t.Errorf("body = %q, want phrase 'server misconfigured'", rec.Body.String())
+	}
+}

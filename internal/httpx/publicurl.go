@@ -76,10 +76,10 @@ const baseURLDefaultPlaceholder = "http://localhost:8080"
 // operator's browser.
 func PublicBaseURL(r *http.Request, cfg *config.Config) string {
 	if cfg.FrontendURL != "" {
-		return cfg.FrontendURL
+		return strings.TrimRight(cfg.FrontendURL, "/")
 	}
 	if cfg.Server.BaseURL != "" && cfg.Server.BaseURL != baseURLDefaultPlaceholder {
-		return cfg.Server.BaseURL
+		return strings.TrimRight(cfg.Server.BaseURL, "/")
 	}
 
 	host := derivedHost(r, cfg.Server.TrustProxyHeaders)
@@ -91,15 +91,19 @@ func PublicBaseURL(r *http.Request, cfg *config.Config) string {
 }
 
 // derivedScheme returns the scheme the caller is reaching this server
-// under. r.TLS != nil is treated as ground truth because TLS terminates
-// at this process in that topology; in that case any X-Forwarded-Proto
-// header is untrusted client input and must not override it.
+// under. When r.TLS is non-nil, TLS terminates at this process and
+// local state is authoritative regardless of any forwarded header,
+// which may be attacker-supplied or stale from a previous hop. The
+// X-Forwarded-Proto fallback is honored only when the operator has
+// opted in via TrustProxyHeaders; the value is lowercased and trimmed
+// to tolerate proxies that emit "HTTPS" or include whitespace.
 func derivedScheme(r *http.Request, trust bool) string {
 	if r.TLS != nil {
 		return "https"
 	}
 	if trust {
-		if p := r.Header.Get("X-Forwarded-Proto"); p == "http" || p == "https" {
+		p := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
+		if p == "http" || p == "https" {
 			return p
 		}
 	}
@@ -108,17 +112,35 @@ func derivedScheme(r *http.Request, trust bool) string {
 
 // derivedHost returns the host:port the client used to reach the
 // server. X-Forwarded-Host is honored only when the operator has opted
-// in via TrustProxyHeaders; its first comma-separated value wins.
+// in via TrustProxyHeaders; its leftmost comma-separated value wins,
+// which matches the convention used by ALB, CloudFront, and nginx
+// defaults. Values carrying path, query, fragment, scheme, or
+// whitespace characters are rejected as malformed and the code falls
+// through to r.Host, so a misconfigured upstream proxy cannot inject
+// a URL path into the emitted base URL.
 func derivedHost(r *http.Request, trust bool) string {
 	if trust {
 		if h := r.Header.Get("X-Forwarded-Host"); h != "" {
 			if i := strings.Index(h, ","); i >= 0 {
 				h = h[:i]
 			}
-			return strings.TrimSpace(h)
+			h = strings.TrimSpace(h)
+			if h != "" && isValidHostHeader(h) {
+				return h
+			}
 		}
 	}
 	return r.Host
+}
+
+// isValidHostHeader reports whether s could plausibly be a bare
+// host[:port] value. It rejects any character that indicates the value
+// carries a URL path, query, fragment, scheme, or embedded whitespace.
+// The check is intentionally strict and does not attempt full RFC
+// grammar validation; its purpose is to fail closed when an upstream
+// proxy emits something other than a host.
+func isValidHostHeader(s string) bool {
+	return !strings.ContainsAny(s, " \t\r\n/?#\\")
 }
 
 // stripDefaultPort removes :443 under https and :80 under http. It
