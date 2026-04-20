@@ -27,6 +27,7 @@ import (
 	"github.com/butlerdotdev/butler-server/internal/audit"
 	"github.com/butlerdotdev/butler-server/internal/auth"
 	"github.com/butlerdotdev/butler-server/internal/config"
+	"github.com/butlerdotdev/butler-server/internal/httpx"
 )
 
 // DeviceFlowHandler handles the OAuth 2.0 Device Authorization Grant endpoints
@@ -68,6 +69,13 @@ func NewDeviceFlowHandler(
 // DeviceAuthorize initiates a device authorization flow.
 // POST /api/auth/cli/device
 func (h *DeviceFlowHandler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
+	base := httpx.PublicBaseURL(r, h.config)
+	if base == "" {
+		h.logger.Warn("Device authorization failed: no public URL derivable", "host", r.Host)
+		writeError(w, http.StatusInternalServerError, "server misconfigured: cannot determine public URL")
+		return
+	}
+
 	dc, err := h.deviceStore.Create(h.config.CLIAuth.DeviceCodeExpiry)
 	if err != nil {
 		h.logger.Error("Failed to create device code", "error", err)
@@ -75,11 +83,7 @@ func (h *DeviceFlowHandler) DeviceAuthorize(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	verificationURI := h.config.FrontendURL
-	if verificationURI == "" {
-		verificationURI = h.config.Server.BaseURL
-	}
-	verificationURI = verificationURI + "/auth/device"
+	verificationURI := base + "/auth/device"
 
 	h.logger.Info("Device authorization initiated",
 		"userCode", dc.UserCode,

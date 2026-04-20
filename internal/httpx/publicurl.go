@@ -21,10 +21,22 @@ limitations under the License.
 package httpx
 
 import (
+	"net"
 	"net/http"
+	"strings"
 
 	"github.com/butlerdotdev/butler-server/internal/config"
 )
+
+// baseURLDefaultPlaceholder is the BUTLER_BASE_URL default that config
+// loading applies when the env var is unset. PublicBaseURL treats a
+// BaseURL equal to this literal as "unset" so that default deployments
+// fall through to request-based derivation instead of advertising
+// localhost. When BUTLER_BASE_URL moves to an empty default (after
+// invite URL construction migrates off the startup capture in
+// internal/auth/users.go), this constant and the comparison using it
+// can be removed.
+const baseURLDefaultPlaceholder = "http://localhost:8080"
 
 // PublicBaseURL returns the scheme://host (no trailing slash, no path)
 // that the server should advertise to clients when producing a URL that
@@ -63,5 +75,66 @@ import (
 // attacker-controlled URL that the CLI would later open in the
 // operator's browser.
 func PublicBaseURL(r *http.Request, cfg *config.Config) string {
-	return ""
+	if cfg.FrontendURL != "" {
+		return cfg.FrontendURL
+	}
+	if cfg.Server.BaseURL != "" && cfg.Server.BaseURL != baseURLDefaultPlaceholder {
+		return cfg.Server.BaseURL
+	}
+
+	host := derivedHost(r, cfg.Server.TrustProxyHeaders)
+	if host == "" {
+		return ""
+	}
+	scheme := derivedScheme(r, cfg.Server.TrustProxyHeaders)
+	return scheme + "://" + stripDefaultPort(host, scheme)
+}
+
+// derivedScheme returns the scheme the caller is reaching this server
+// under. r.TLS != nil is treated as ground truth because TLS terminates
+// at this process in that topology; in that case any X-Forwarded-Proto
+// header is untrusted client input and must not override it.
+func derivedScheme(r *http.Request, trust bool) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if trust {
+		if p := r.Header.Get("X-Forwarded-Proto"); p == "http" || p == "https" {
+			return p
+		}
+	}
+	return "http"
+}
+
+// derivedHost returns the host:port the client used to reach the
+// server. X-Forwarded-Host is honored only when the operator has opted
+// in via TrustProxyHeaders; its first comma-separated value wins.
+func derivedHost(r *http.Request, trust bool) string {
+	if trust {
+		if h := r.Header.Get("X-Forwarded-Host"); h != "" {
+			if i := strings.Index(h, ","); i >= 0 {
+				h = h[:i]
+			}
+			return strings.TrimSpace(h)
+		}
+	}
+	return r.Host
+}
+
+// stripDefaultPort removes :443 under https and :80 under http. It
+// uses net.SplitHostPort so bracketed IPv6 literals are handled
+// correctly; the host is re-bracketed on return if the parsed value
+// contains a colon (meaning it came from an IPv6 literal).
+func stripDefaultPort(host, scheme string) string {
+	h, p, err := net.SplitHostPort(host)
+	if err != nil {
+		return host
+	}
+	if (scheme == "https" && p == "443") || (scheme == "http" && p == "80") {
+		if strings.Contains(h, ":") {
+			return "[" + h + "]"
+		}
+		return h
+	}
+	return host
 }
