@@ -62,6 +62,14 @@ type ServerConfig struct {
 	// Used for generating invite links, OAuth redirects, etc.
 	// Example: https://butler.example.com
 	BaseURL string
+
+	// TrustProxyHeaders controls whether the server honors the
+	// X-Forwarded-Proto and X-Forwarded-Host request headers when
+	// deriving its own public URL. Set true only when a trusted ingress
+	// or load balancer strips client-supplied values and sets its own;
+	// otherwise an unauthenticated client can inject these headers and
+	// cause the server to return an attacker-controlled URL.
+	TrustProxyHeaders bool
 }
 
 // AuthConfig holds authentication configuration.
