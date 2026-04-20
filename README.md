@@ -129,6 +129,9 @@ Environment variables:
 | `BUTLER_ADMIN_PASSWORD` | (required) | Admin password |
 | `BUTLER_TENANT_NAMESPACE` | `butler-tenants` | Tenant cluster namespace |
 | `BUTLER_SYSTEM_NAMESPACE` | `butler-system` | System namespace |
+| `BUTLER_BASE_URL` | `http://localhost:8080` | Override for the public URL. When left at the default placeholder, request handlers derive the URL from the incoming request instead of advertising localhost. Set to the public URL (`https://butler.example.com`) only when request-based derivation is not viable. |
+| `BUTLER_FRONTEND_URL` | (unset) | Hard override that beats `BUTLER_BASE_URL` and request derivation. Use when the frontend runs on a different host than the server. |
+| `BUTLER_TRUST_PROXY_HEADERS` | `false` | Honor `X-Forwarded-Proto` and `X-Forwarded-Host` when deriving the public URL. Set `true` only when a trusted ingress or load balancer strips client-supplied values and replaces them; otherwise any client can set these headers and cause the server to return an attacker-controlled URL in responses like the CLI device-flow `verification_uri`. Most Kubernetes deployments terminate TLS at an ingress controller (nginx-ingress, Traefik, Envoy) that sets `X-Forwarded-Proto` and `X-Forwarded-Host` on its own. In that topology the expected setting is `true`; without it the emitted URL uses `http` even though the client reached the ingress over `https`, because the server itself sees plain HTTP. Confirm that the ingress strips the incoming headers and writes its own before flipping the flag. |
 
 ## Development
 

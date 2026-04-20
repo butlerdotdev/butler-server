@@ -1,4 +1,6 @@
 secrets/
+.secrets/
+
 # Binaries
 bin/
 *.exe

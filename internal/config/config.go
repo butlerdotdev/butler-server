@@ -30,7 +30,14 @@ type Config struct {
 	CLIAuth         CLIAuthConfig
 	TenantNamespace string
 	SystemNamespace string
-	FrontendURL     string // For dev mode when frontend runs separately
+
+	// FrontendURL is the operator-provided public URL of the Butler
+	// Console. When set, it overrides Server.BaseURL and any URL the
+	// server would otherwise derive from the incoming request. Use it
+	// when the frontend runs on a different host than the server (dev
+	// mode, split deployments) or when request-based derivation needs
+	// to be bypassed entirely.
+	FrontendURL string
 }
 
 // CLIAuthConfig holds configuration for the CLI device flow authentication.
@@ -58,10 +65,23 @@ type CLIAuthConfig struct {
 
 // ServerConfig holds general server configuration.
 type ServerConfig struct {
-	// BaseURL is the public URL of the Butler Console
-	// Used for generating invite links, OAuth redirects, etc.
+	// BaseURL is the operator-provided public URL that the server
+	// advertises to clients when emitting self-referential URLs
+	// (invite links, OAuth redirects, CLI device-flow verification
+	// URIs in fallback paths). When unset or left at the default
+	// placeholder "http://localhost:8080", request-handling code
+	// derives the URL from the incoming HTTP request instead of
+	// advertising localhost. FrontendURL overrides this when set.
 	// Example: https://butler.example.com
 	BaseURL string
+
+	// TrustProxyHeaders controls whether the server honors the
+	// X-Forwarded-Proto and X-Forwarded-Host request headers when
+	// deriving its own public URL. Set true only when a trusted ingress
+	// or load balancer strips client-supplied values and sets its own;
+	// otherwise an unauthenticated client can inject these headers and
+	// cause the server to return an attacker-controlled URL.
+	TrustProxyHeaders bool
 }
 
 // AuthConfig holds authentication configuration.
@@ -124,7 +144,8 @@ type OIDCConfig struct {
 func Load() *Config {
 	cfg := &Config{
 		Server: ServerConfig{
-			BaseURL: getEnv("BUTLER_BASE_URL", "http://localhost:8080"),
+			BaseURL:           getEnv("BUTLER_BASE_URL", "http://localhost:8080"),
+			TrustProxyHeaders: getBoolEnv("BUTLER_TRUST_PROXY_HEADERS", false),
 		},
 		Auth: AuthConfig{
 			JWTSecret:     getEnv("BUTLER_JWT_SECRET", "butler-dev-secret-change-me-in-production"),
