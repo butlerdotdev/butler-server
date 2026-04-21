@@ -48,12 +48,18 @@ func Middleware(emitter *Emitter) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Capture request body (up to 2KB) and restore for downstream
+			// Capture request body and restore for downstream handlers.
+			// Read the full body so downstream gets everything, but only
+			// log a truncated summary for audit purposes.
 			var bodySummary string
 			if r.Body != nil && method != http.MethodDelete {
-				bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2048))
+				bodyBytes, _ := io.ReadAll(r.Body)
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-				bodySummary = ScrubRequestBody(bodyBytes)
+				summary := bodyBytes
+				if len(summary) > 2048 {
+					summary = summary[:2048]
+				}
+				bodySummary = ScrubRequestBody(summary)
 			}
 
 			// Wrap response writer to capture status code

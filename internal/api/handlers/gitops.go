@@ -1840,7 +1840,8 @@ func (h *GitOpsHandler) ExportAllManagementAddons(w http.ResponseWriter, r *http
 
 	var req gitops.MigrateToGitOpsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid request body")
+		h.logger.Error("Failed to decode migrate request", "component", "gitops", "error", err)
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
 
