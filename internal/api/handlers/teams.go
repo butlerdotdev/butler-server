@@ -62,6 +62,7 @@ type TeamResponse struct {
 	ResourceLimits  map[string]interface{}  `json:"resourceLimits,omitempty"`
 	ResourceUsage   map[string]interface{}  `json:"resourceUsage,omitempty"`
 	ClusterDefaults map[string]interface{}  `json:"clusterDefaults,omitempty"`
+	Environments    []map[string]interface{} `json:"environments,omitempty"`
 }
 
 // TeamMemberResponse represents a team member in API responses.
@@ -139,6 +140,22 @@ func buildTeamResponse(team *unstructured.Unstructured, clusterCount int) TeamRe
 	// Extract cluster defaults from spec
 	if defaults, found, _ := unstructured.NestedMap(team.Object, "spec", "clusterDefaults"); found {
 		resp.ClusterDefaults = defaults
+	}
+
+	// Extract environments (ADR-009). The console env picker keys on
+	// this field; without it the picker stays empty even when the
+	// Team CRD carries envs. Each entry is passed through as a map so
+	// nested limits and access structures reach the client unchanged.
+	if envs, found, _ := unstructured.NestedSlice(team.Object, "spec", "environments"); found {
+		out := make([]map[string]interface{}, 0, len(envs))
+		for _, e := range envs {
+			if em, ok := e.(map[string]interface{}); ok {
+				out = append(out, em)
+			}
+		}
+		if len(out) > 0 {
+			resp.Environments = out
+		}
 	}
 
 	return resp
