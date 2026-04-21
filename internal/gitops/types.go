@@ -19,6 +19,7 @@ package gitops
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -181,20 +182,14 @@ func ParseRepoFullName(fullName string) (owner, repo string, err error) {
 }
 
 // ParseRepoURL parses a Git repository URL and returns the owner and repo name.
+// Handles any host (github.com, gitlab.com, self-hosted instances).
 func ParseRepoURL(repoURL string) (owner, repo string, err error) {
 	repoURL = strings.TrimSuffix(repoURL, ".git")
 
-	if strings.Contains(repoURL, "github.com/") {
-		parts := strings.Split(repoURL, "github.com/")
-		if len(parts) == 2 {
-			return ParseRepoFullName(parts[1])
-		}
-	}
-
-	if strings.Contains(repoURL, "gitlab.com/") {
-		parts := strings.Split(repoURL, "gitlab.com/")
-		if len(parts) == 2 {
-			return ParseRepoFullName(parts[1])
+	if u, parseErr := url.Parse(repoURL); parseErr == nil && u.Host != "" {
+		path := strings.TrimPrefix(u.Path, "/")
+		if path != "" {
+			return ParseRepoFullName(path)
 		}
 	}
 
