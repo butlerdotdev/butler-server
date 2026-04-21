@@ -267,9 +267,15 @@ func (h *GitOpsHandler) EnableGitOps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := h.getGitToken(ctx)
+	gitConfig, err := h.getGitProviderConfig(ctx)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, "Git provider not configured")
+		return
+	}
+
+	token, err := h.k8sClient.GetSecretValue(ctx, h.config.SystemNamespace, gitConfig.SecretName, "token")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Failed to get git token")
 		return
 	}
 
@@ -288,6 +294,7 @@ func (h *GitOpsHandler) EnableGitOps(w http.ResponseWriter, r *http.Request) {
 	bootstrapper := gitops.NewFluxBootstrapper(kubeconfig)
 	result, err := bootstrapper.Bootstrap(ctx, gitops.BootstrapOptions{
 		Provider:        req.Provider,
+		GitProviderType: gitConfig.Type,
 		Owner:           owner,
 		Repository:      repoName,
 		Branch:          req.Branch,
@@ -1260,9 +1267,15 @@ func (h *GitOpsHandler) EnableManagementGitOps(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	token, err := h.getGitToken(ctx)
+	mgmtGitConfig, err := h.getGitProviderConfig(ctx)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, "Git provider not configured")
+		return
+	}
+
+	token, err := h.k8sClient.GetSecretValue(ctx, h.config.SystemNamespace, mgmtGitConfig.SecretName, "token")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Failed to get git token")
 		return
 	}
 
@@ -1280,15 +1293,16 @@ func (h *GitOpsHandler) EnableManagementGitOps(w http.ResponseWriter, r *http.Re
 
 	bootstrapper := gitops.NewFluxBootstrapper(kubeconfig)
 	result, err := bootstrapper.Bootstrap(ctx, gitops.BootstrapOptions{
-		Provider:   "github",
-		Owner:      owner,
-		Repository: repoName,
-		Branch:     req.Branch,
-		Path:       req.Path,
-		Token:      token,
-		Private:    req.Private,
-		Personal:   true,
-		Cluster:    "management",
+		Provider:        "fluxcd",
+		GitProviderType: mgmtGitConfig.Type,
+		Owner:           owner,
+		Repository:      repoName,
+		Branch:          req.Branch,
+		Path:            req.Path,
+		Token:           token,
+		Private:         req.Private,
+		Personal:        true,
+		Cluster:         "management",
 	})
 	if err != nil {
 		h.logger.Error("Flux bootstrap failed", "error", err)
@@ -2089,14 +2103,6 @@ func (h *GitOpsHandler) getGitClient(ctx context.Context) (gitops.GitProvider, e
 		return nil, err
 	}
 	return h.createGitClient(ctx, cfg)
-}
-
-func (h *GitOpsHandler) getGitToken(ctx context.Context) (string, error) {
-	cfg, err := h.getGitProviderConfig(ctx)
-	if err != nil {
-		return "", err
-	}
-	return h.k8sClient.GetSecretValue(ctx, h.config.SystemNamespace, cfg.SecretName, "token")
 }
 
 func parseGitHubURL(url string) (owner, repo string, err error) {

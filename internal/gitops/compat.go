@@ -80,7 +80,8 @@ func NewFluxBootstrapper(kubeconfig []byte) *FluxBootstrapper {
 
 // BootstrapOptions contains options for Flux bootstrap.
 type BootstrapOptions struct {
-	Provider        string
+	Provider        string // GitOps tool: fluxcd, argocd
+	GitProviderType string // Git host: github, gitlab
 	Owner           string
 	Repository      string
 	Branch          string
@@ -92,9 +93,9 @@ type BootstrapOptions struct {
 	ComponentsExtra []string
 }
 
-// Bootstrap runs flux bootstrap github.
-// CRITICAL: This writes the kubeconfig to a temp file and passes --kubeconfig
-// to ensure flux targets the tenant cluster, not the management cluster.
+// Bootstrap runs flux bootstrap for the configured git provider.
+// Writes the kubeconfig to a temp file and passes --kubeconfig to ensure
+// flux targets the tenant cluster, not the management cluster.
 func (f *FluxBootstrapper) Bootstrap(ctx context.Context, opts BootstrapOptions) (*BootstrapResult, error) {
 	if !IsFluxCLIAvailable() {
 		return nil, fmt.Errorf("flux CLI not available")
@@ -106,8 +107,10 @@ func (f *FluxBootstrapper) Bootstrap(ctx context.Context, opts BootstrapOptions)
 	}
 	defer cleanup()
 
+	subCmd, tokenEnv := fluxBootstrapParams(opts.GitProviderType)
+
 	args := []string{
-		"bootstrap", "github",
+		"bootstrap", subCmd,
 		"--kubeconfig", kubeconfigPath,
 		"--owner", opts.Owner,
 		"--repository", opts.Repository,
@@ -129,7 +132,7 @@ func (f *FluxBootstrapper) Bootstrap(ctx context.Context, opts BootstrapOptions)
 
 	env := os.Environ()
 	if opts.Token != "" {
-		env = append(env, "GITHUB_TOKEN="+opts.Token)
+		env = append(env, tokenEnv+"="+opts.Token)
 	}
 	cmd.Env = env
 
@@ -397,4 +400,15 @@ func ValuesToYAML(values map[string]interface{}) (string, error) {
 // NewNamespace creates a new Kubernetes Namespace resource.
 func NewNamespace(name string) *K8sNamespace {
 	return NewK8sNamespace(name)
+}
+
+// fluxBootstrapParams returns the flux bootstrap subcommand and token env var
+// for the given git provider type.
+func fluxBootstrapParams(gitProvider string) (subCmd, tokenEnv string) {
+	switch gitProvider {
+	case "gitlab":
+		return "gitlab", "GITLAB_TOKEN"
+	default:
+		return "github", "GITHUB_TOKEN"
+	}
 }
