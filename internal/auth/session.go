@@ -17,10 +17,20 @@ limitations under the License.
 package auth
 
 import (
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// NormalizeEmail returns the canonical form of an email address for
+// Butler identity comparisons: trimmed of surrounding whitespace and
+// lowercased. Per ADR-010 this is applied at session creation so all
+// downstream consumers (middleware, impersonation headers, application
+// audit logs) read a single canonical form.
+func NormalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
 
 // TeamMembership represents a user's membership in a team.
 type TeamMembership struct {
@@ -73,6 +83,19 @@ type UserSession struct {
 	// For platform admins without explicit membership, this defaults to "admin".
 	// This is NOT persisted in JWT - it's set per-request by middleware.
 	SelectedTeamRole string `json:"-"`
+
+	// SelectedEnvironment is the env context from X-Butler-Environment
+	// header. Used with SelectedTeam to scope authorization to a specific
+	// Team.spec.environments[] entry. Empty when the header is absent.
+	// Not persisted in JWT; set per-request by middleware.
+	SelectedEnvironment string `json:"-"`
+
+	// SelectedEnvironmentRole is the user's effective role in the selected
+	// environment. Computed as the additive max of SelectedTeamRole and
+	// the role resolved from Team.spec.environments[].access for this user.
+	// Env access can only elevate a team role, never reduce it
+	// (ADR-009 additive-only inheritance).
+	SelectedEnvironmentRole string `json:"-"`
 }
 
 // SessionClaims are the JWT claims for a user session.
@@ -98,6 +121,10 @@ func NewSessionService(secret string, expiry time.Duration) *SessionService {
 // CreateSession creates a new session token for a user.
 func (s *SessionService) CreateSession(user *UserSession) (string, error) {
 	now := time.Now()
+	// Canonicalize email at the single funnel for session issuance.
+	// Every call path (OIDC callback, internal login, device flow,
+	// refresh, admin impersonation) passes through here.
+	user.Email = NormalizeEmail(user.Email)
 	claims := &SessionClaims{
 		UserSession: *user,
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -134,6 +161,10 @@ func (s *SessionService) ValidateSession(tokenString string) (*UserSession, erro
 		return nil, ErrInvalidToken
 	}
 
+	// Canonicalize email on every session read so downstream consumers
+	// (impersonation, audit logs, webhook creator-email matching) see
+	// the same form. Pre-upgrade sessions may carry mixed-case emails.
+	claims.UserSession.Email = NormalizeEmail(claims.UserSession.Email)
 	return &claims.UserSession, nil
 }
 
@@ -271,6 +302,45 @@ func (u *UserSession) CanViewInSelectedTeam() bool {
 
 	// Team selected - any role can view
 	return u.SelectedTeamRole != ""
+}
+
+// effectiveEnvRole returns the additive max of SelectedTeamRole and
+// SelectedEnvironmentRole when an env is selected. When no env is
+// selected the SelectedTeamRole is authoritative. ADR-009 says env
+// access can only elevate a team-level role, never reduce it; the max
+// composition here is how that promise is delivered at session time.
+func (u *UserSession) effectiveEnvRole() string {
+	if u.SelectedEnvironment == "" {
+		return u.SelectedTeamRole
+	}
+	return HighestRole([]string{u.SelectedTeamRole, u.SelectedEnvironmentRole})
+}
+
+// CanOperateInSelectedEnvironment checks if the user can mutate
+// resources scoped to the selected environment. Mirrors
+// CanOperateInSelectedTeam but uses the env-aware effective role. When
+// no env is selected this falls back to team-level semantics.
+func (u *UserSession) CanOperateInSelectedEnvironment() bool {
+	if u.SelectedEnvironment == "" {
+		return u.CanOperateInSelectedTeam()
+	}
+	if u.IsPlatformAdmin {
+		return true
+	}
+	role := u.effectiveEnvRole()
+	return role == RoleAdmin || role == RoleOperator
+}
+
+// CanViewInSelectedEnvironment checks if the user can read resources
+// scoped to the selected environment.
+func (u *UserSession) CanViewInSelectedEnvironment() bool {
+	if u.SelectedEnvironment == "" {
+		return u.CanViewInSelectedTeam()
+	}
+	if u.IsPlatformAdmin {
+		return true
+	}
+	return u.effectiveEnvRole() != ""
 }
 
 // Role constants
