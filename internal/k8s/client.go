@@ -205,6 +205,7 @@ func NewClientFromRESTConfig(config *rest.Config) (*Client, error) {
 	return &Client{
 		clientset:     clientset,
 		dynamicClient: dynamicClient,
+		config:        config,
 	}, nil
 }
 
