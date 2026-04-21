@@ -1347,6 +1347,7 @@ func (h *GitOpsHandler) EnableManagementGitOps(w http.ResponseWriter, r *http.Re
 		AuthorEmail:     authorEmail,
 		Personal:        true,
 		Cluster:         "management",
+		ComponentsExtra: req.ComponentsExtra,
 	})
 	if err != nil {
 		h.logger.Error("Flux bootstrap failed", "error", err)
