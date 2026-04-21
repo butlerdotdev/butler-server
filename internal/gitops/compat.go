@@ -19,6 +19,7 @@ package gitops
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,24 @@ import (
 
 	"sigs.k8s.io/yaml"
 )
+
+// HostnameFromURL extracts the hostname from a URL string.
+// Returns empty string for empty input or the well-known defaults
+// (github.com, gitlab.com) since flux uses those by default.
+func HostnameFromURL(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := u.Hostname()
+	if host == "github.com" || host == "gitlab.com" {
+		return ""
+	}
+	return host
+}
 
 // Compatibility Layer
 //
@@ -82,6 +101,7 @@ func NewFluxBootstrapper(kubeconfig []byte) *FluxBootstrapper {
 type BootstrapOptions struct {
 	Provider        string // GitOps tool: fluxcd, argocd
 	GitProviderType string // Git host: github, gitlab
+	Hostname        string // Self-hosted instance hostname (e.g. gitlab.example.com)
 	Owner           string
 	Repository      string
 	Branch          string
@@ -118,11 +138,17 @@ func (f *FluxBootstrapper) Bootstrap(ctx context.Context, opts BootstrapOptions)
 		"--path", opts.Path,
 	}
 
+	if opts.Hostname != "" {
+		args = append(args, "--hostname", opts.Hostname)
+	}
 	if opts.Personal {
 		args = append(args, "--personal")
 	}
 	if opts.Private {
 		args = append(args, "--private")
+	}
+	if opts.GitProviderType == "gitlab" {
+		args = append(args, "--token-auth")
 	}
 	if len(opts.ComponentsExtra) > 0 {
 		args = append(args, "--components-extra="+strings.Join(opts.ComponentsExtra, ","))

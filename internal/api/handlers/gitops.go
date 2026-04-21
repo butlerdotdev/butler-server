@@ -295,6 +295,7 @@ func (h *GitOpsHandler) EnableGitOps(w http.ResponseWriter, r *http.Request) {
 	result, err := bootstrapper.Bootstrap(ctx, gitops.BootstrapOptions{
 		Provider:        req.Provider,
 		GitProviderType: gitConfig.Type,
+		Hostname:        gitops.HostnameFromURL(gitConfig.URL),
 		Owner:           owner,
 		Repository:      repoName,
 		Branch:          req.Branch,
@@ -1295,6 +1296,7 @@ func (h *GitOpsHandler) EnableManagementGitOps(w http.ResponseWriter, r *http.Re
 	result, err := bootstrapper.Bootstrap(ctx, gitops.BootstrapOptions{
 		Provider:        "fluxcd",
 		GitProviderType: mgmtGitConfig.Type,
+		Hostname:        gitops.HostnameFromURL(mgmtGitConfig.URL),
 		Owner:           owner,
 		Repository:      repoName,
 		Branch:          req.Branch,
