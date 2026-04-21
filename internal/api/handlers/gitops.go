@@ -291,6 +291,20 @@ func (h *GitOpsHandler) EnableGitOps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve author identity from the token for commit attribution.
+	var authorName, authorEmail string
+	gitProvider, err := gitops.NewGitProvider(gitops.GitProviderConfig{
+		Type:  gitConfig.Type,
+		Token: token,
+		URL:   gitConfig.URL,
+	})
+	if err == nil {
+		if validation, err := gitProvider.ValidateToken(ctx); err == nil && validation.Valid {
+			authorName = validation.Name
+			authorEmail = validation.Email
+		}
+	}
+
 	bootstrapper := gitops.NewFluxBootstrapper(kubeconfig)
 	result, err := bootstrapper.Bootstrap(ctx, gitops.BootstrapOptions{
 		Provider:        req.Provider,
@@ -302,6 +316,9 @@ func (h *GitOpsHandler) EnableGitOps(w http.ResponseWriter, r *http.Request) {
 		Path:            req.Path,
 		Token:           token,
 		Private:         req.Private,
+		ReadWriteKey:    true,
+		AuthorName:      authorName,
+		AuthorEmail:     authorEmail,
 		Personal:        true,
 		Cluster:         name,
 		ComponentsExtra: req.ComponentsExtra,
@@ -1292,6 +1309,19 @@ func (h *GitOpsHandler) EnableManagementGitOps(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	var authorName, authorEmail string
+	mgmtProvider, err := gitops.NewGitProvider(gitops.GitProviderConfig{
+		Type:  mgmtGitConfig.Type,
+		Token: token,
+		URL:   mgmtGitConfig.URL,
+	})
+	if err == nil {
+		if validation, err := mgmtProvider.ValidateToken(ctx); err == nil && validation.Valid {
+			authorName = validation.Name
+			authorEmail = validation.Email
+		}
+	}
+
 	bootstrapper := gitops.NewFluxBootstrapper(kubeconfig)
 	result, err := bootstrapper.Bootstrap(ctx, gitops.BootstrapOptions{
 		Provider:        "fluxcd",
@@ -1303,6 +1333,9 @@ func (h *GitOpsHandler) EnableManagementGitOps(w http.ResponseWriter, r *http.Re
 		Path:            req.Path,
 		Token:           token,
 		Private:         req.Private,
+		ReadWriteKey:    true,
+		AuthorName:      authorName,
+		AuthorEmail:     authorEmail,
 		Personal:        true,
 		Cluster:         "management",
 	})

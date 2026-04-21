@@ -73,6 +73,7 @@ func (p *GitLabProvider) ValidateToken(ctx context.Context) (*TokenValidation, e
 
 	return &TokenValidation{
 		Valid:    true,
+		Name:     user.Name,
 		Username: user.Username,
 		Email:    user.Email,
 	}, nil

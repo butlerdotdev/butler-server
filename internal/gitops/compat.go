@@ -101,7 +101,7 @@ func NewFluxBootstrapper(kubeconfig []byte) *FluxBootstrapper {
 type BootstrapOptions struct {
 	Provider        string // GitOps tool: fluxcd, argocd
 	GitProviderType string // Git host: github, gitlab
-	Hostname        string // Self-hosted instance hostname (e.g. gitlab.example.com)
+	Hostname        string // Self-hosted instance hostname
 	Owner           string
 	Repository      string
 	Branch          string
@@ -109,6 +109,9 @@ type BootstrapOptions struct {
 	Token           string
 	Personal        bool
 	Private         bool
+	ReadWriteKey    bool
+	AuthorName      string
+	AuthorEmail     string
 	Cluster         string
 	ComponentsExtra []string
 }
@@ -146,6 +149,15 @@ func (f *FluxBootstrapper) Bootstrap(ctx context.Context, opts BootstrapOptions)
 	}
 	if opts.Private {
 		args = append(args, "--private")
+	}
+	if opts.ReadWriteKey {
+		args = append(args, "--read-write-key")
+	}
+	if opts.AuthorName != "" {
+		args = append(args, "--author-name", opts.AuthorName)
+	}
+	if opts.AuthorEmail != "" {
+		args = append(args, "--author-email", opts.AuthorEmail)
 	}
 	if opts.GitProviderType == "gitlab" {
 		args = append(args, "--token-auth")

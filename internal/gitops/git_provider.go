@@ -40,6 +40,7 @@ type GitProvider interface {
 // TokenValidation contains the result of token validation.
 type TokenValidation struct {
 	Valid    bool
+	Name     string // Display name from the git provider
 	Username string
 	Email    string
 	Scopes   []string

@@ -86,6 +86,7 @@ func (p *GitHubProvider) ValidateToken(ctx context.Context) (*TokenValidation, e
 
 	validation := &TokenValidation{
 		Valid:    true,
+		Name:     user.GetName(),
 		Username: user.GetLogin(),
 		Email:    user.GetEmail(),
 	}
