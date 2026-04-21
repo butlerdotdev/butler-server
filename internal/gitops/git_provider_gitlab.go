@@ -79,6 +79,48 @@ func (p *GitLabProvider) ValidateToken(ctx context.Context) (*TokenValidation, e
 }
 
 func (p *GitLabProvider) ListRepositories(ctx context.Context) ([]*Repository, error) {
+	const maxRepos = 200
+
+	if p.organization != "" {
+		return p.listGroupProjects(ctx, maxRepos)
+	}
+	return p.listAllProjects(ctx, maxRepos)
+}
+
+// listGroupProjects uses the Groups API to list projects scoped to a group.
+func (p *GitLabProvider) listGroupProjects(ctx context.Context, maxRepos int) ([]*Repository, error) {
+	var allRepos []*Repository
+	opts := &gitlab.ListGroupProjectsOptions{
+		IncludeSubGroups: gitlab.Ptr(true),
+		OrderBy:          gitlab.Ptr("updated_at"),
+		Sort:             gitlab.Ptr("desc"),
+		ListOptions:      gitlab.ListOptions{PerPage: 100},
+	}
+
+	for {
+		projects, resp, err := p.client.Groups.ListGroupProjects(p.organization, opts, gitlab.WithContext(ctx))
+		if err != nil {
+			return nil, p.wrapError(err, resp)
+		}
+
+		for _, proj := range projects {
+			allRepos = append(allRepos, projectToRepository(proj))
+			if len(allRepos) >= maxRepos {
+				return allRepos, nil
+			}
+		}
+
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+
+	return allRepos, nil
+}
+
+// listAllProjects lists all projects the token has access to.
+func (p *GitLabProvider) listAllProjects(ctx context.Context, maxRepos int) ([]*Repository, error) {
 	var allRepos []*Repository
 	opts := &gitlab.ListProjectsOptions{
 		Membership: gitlab.Ptr(true),
@@ -96,11 +138,10 @@ func (p *GitLabProvider) ListRepositories(ctx context.Context) ([]*Repository, e
 		}
 
 		for _, proj := range projects {
-			if p.organization != "" && proj.Namespace != nil && proj.Namespace.Path != p.organization {
-				continue
-			}
-
 			allRepos = append(allRepos, projectToRepository(proj))
+			if len(allRepos) >= maxRepos {
+				return allRepos, nil
+			}
 		}
 
 		if resp.NextPage == 0 {
