@@ -1429,3 +1429,103 @@ var safeFilenameRe = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
 func sanitizeFilename(name string) string {
 	return safeFilenameRe.ReplaceAllString(name, "_")
 }
+
+// ChangeEnvironmentRequest is the body for the env-change endpoint.
+// Empty string removes the env label entirely (valid when the team
+// has no envs defined; the TC webhook rejects label removal otherwise).
+type ChangeEnvironmentRequest struct {
+	Environment string `json:"environment"`
+}
+
+// ChangeEnvironment moves a TenantCluster into a different environment
+// by patching the butler.butlerlabs.dev/environment label and setting
+// the butler.butlerlabs.dev/migration-operation annotation the TC
+// admission webhook requires for env-label mutations (ADR-009 phased
+// migration). Body: {"environment": "<env-name>"} or
+// {"environment": ""} to clear.
+// PUT /api/clusters/{namespace}/{name}/environment
+func (h *ClusterHandler) ChangeEnvironment(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+
+	cluster, err := h.k8sClient.GetTenantCluster(r.Context(), namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+
+	if user != nil {
+		if err := h.checkClusterAccess(user, cluster); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		teamRef, _, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+		if err := h.checkOperatePermission(user, teamRef, "move-environment"); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+	}
+
+	var req ChangeEnvironmentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	target := strings.TrimSpace(req.Environment)
+
+	labels := cluster.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	current := labels["butler.butlerlabs.dev/environment"]
+	if current == target {
+		writeJSON(w, http.StatusOK, cluster.Object)
+		return
+	}
+
+	if target == "" {
+		delete(labels, "butler.butlerlabs.dev/environment")
+	} else {
+		labels["butler.butlerlabs.dev/environment"] = target
+	}
+	cluster.SetLabels(labels)
+
+	// The TC admission webhook (ADR-009) gates env-label changes on
+	// the migration-operation annotation being literally "true". Set
+	// it unconditionally on the outgoing update; leaving it in place
+	// after the fact matches butleradm env migrate's behavior.
+	annotations := cluster.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations["butler.butlerlabs.dev/migration-operation"] = "true"
+	cluster.SetAnnotations(annotations)
+
+	impClient := h.k8sClient
+	if user != nil && user.Email != "" {
+		asUser, impErr := h.k8sClient.AsUser(user.Email)
+		if impErr != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to build impersonating client: %v", impErr))
+			return
+		}
+		impClient = asUser
+	}
+
+	updated, err := impClient.Dynamic().Resource(k8s.TenantClusterGVR).Namespace(namespace).Update(
+		r.Context(), cluster, metav1.UpdateOptions{},
+	)
+	if err != nil {
+		if writeWebhookError(w, err) {
+			return
+		}
+		if apierrors.IsConflict(err) {
+			writeError(w, http.StatusConflict, "cluster was modified concurrently; retry")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to update environment: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, updated.Object)
+}
