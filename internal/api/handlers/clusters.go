@@ -409,22 +409,59 @@ func (h *ClusterHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Stamp the creator-email annotation so the TenantCluster admission
+	// webhook's MaxClustersPerMember identity check (ADR-009) and the
+	// controller's owner-annotation chain can attribute this TC to the
+	// caller. Webhook enforces that the annotation matches the admission
+	// request's UserInfo.Username, which is why we also impersonate
+	// below (ADR-010).
+	metadata := map[string]interface{}{
+		"name":      req.Name,
+		"namespace": req.Namespace,
+	}
+	if user != nil && user.Email != "" {
+		metadata["annotations"] = map[string]interface{}{
+			"butler.butlerlabs.dev/creator-email": user.Email,
+		}
+	}
+	// Propagate the selected environment as a label so the TC belongs
+	// to the requested env for admission-time quota and per-member cap
+	// enforcement. The session resolves env scope from the
+	// X-Butler-Environment header (see middleware).
+	if user != nil && user.SelectedEnvironment != "" {
+		metadata["labels"] = map[string]interface{}{
+			"butler.butlerlabs.dev/environment": user.SelectedEnvironment,
+		}
+	}
+
 	cluster := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "butler.butlerlabs.dev/v1alpha1",
 			"kind":       "TenantCluster",
-			"metadata": map[string]interface{}{
-				"name":      req.Name,
-				"namespace": req.Namespace,
-			},
-			"spec": spec,
+			"metadata":   metadata,
+			"spec":       spec,
 		},
 	}
 
-	created, err := h.k8sClient.Dynamic().Resource(k8s.TenantClusterGVR).Namespace(req.Namespace).Create(
+	// Impersonate the caller so the admission webhook observes the
+	// authenticated user's email as UserInfo.Username and validates
+	// the creator-email annotation against it.
+	impClient := h.k8sClient
+	if user != nil && user.Email != "" {
+		asUser, impErr := h.k8sClient.AsUser(user.Email)
+		if impErr != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to build impersonating client: %v", impErr))
+			return
+		}
+		impClient = asUser
+	}
+	created, err := impClient.Dynamic().Resource(k8s.TenantClusterGVR).Namespace(req.Namespace).Create(
 		r.Context(), cluster, metav1.CreateOptions{},
 	)
 	if err != nil {
+		if writeWebhookError(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create cluster: %v", err))
 		return
 	}

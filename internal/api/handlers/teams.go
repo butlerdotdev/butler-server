@@ -299,6 +299,7 @@ type CreateTeamRequest struct {
 // Create creates a new team.
 // POST /api/teams
 func (h *TeamHandler) Create(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
 	var req CreateTeamRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -328,10 +329,24 @@ func (h *TeamHandler) Create(w http.ResponseWriter, r *http.Request) {
 		unstructured.SetNestedField(team.Object, req.Namespace, "spec", "namespace")
 	}
 
-	created, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Create(r.Context(), team, metav1.CreateOptions{})
+	// Impersonate the caller on create so the Team admission webhook
+	// (ADR-009) sees the authenticated user's email when enforcing the
+	// on-create platform-admin gate for spec.resourceLimits /
+	// spec.environments[].limits present at creation time.
+	impClient, impErr := h.k8sClient.AsUser(user.Email)
+	if impErr != nil {
+		h.logger.Error("Failed to build impersonating client", "email", user.Email, "error", impErr)
+		writeError(w, http.StatusInternalServerError, "Failed to authorize create")
+		return
+	}
+	created, err := impClient.Dynamic().Resource(auth.TeamGVR).Create(r.Context(), team, metav1.CreateOptions{})
 	if err != nil {
 		if strings.Contains(err.Error(), "already exists") {
 			writeError(w, http.StatusConflict, "Team already exists")
+			return
+		}
+		if writeWebhookError(w, err) {
+			h.logger.Warn("Team create denied by admission webhook", "name", req.Name, "user", user.Email, "error", err)
 			return
 		}
 		h.logger.Error("Failed to create team", "name", req.Name, "error", err)
@@ -365,6 +380,7 @@ type UpdateTeamRequest struct {
 // PUT /api/teams/{name}
 func (h *TeamHandler) Update(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
+	user := auth.UserFromContext(r.Context())
 
 	var req UpdateTeamRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -398,8 +414,22 @@ func (h *TeamHandler) Update(w http.ResponseWriter, r *http.Request) {
 		unstructured.SetNestedField(team.Object, req.ClusterDefaults, "spec", "clusterDefaults")
 	}
 
-	updated, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Update(r.Context(), team, metav1.UpdateOptions{})
+	// Impersonate the caller on the outgoing Update so the Team
+	// admission webhook (ADR-009) sees the authenticated user's email
+	// for its platform-admin / team-admin split. Reads use the shared
+	// server-SA client (no admission webhook fires on reads).
+	impClient, impErr := h.k8sClient.AsUser(user.Email)
+	if impErr != nil {
+		h.logger.Error("Failed to build impersonating client", "email", user.Email, "error", impErr)
+		writeError(w, http.StatusInternalServerError, "Failed to authorize update")
+		return
+	}
+	updated, err := impClient.Dynamic().Resource(auth.TeamGVR).Update(r.Context(), team, metav1.UpdateOptions{})
 	if err != nil {
+		if writeWebhookError(w, err) {
+			h.logger.Warn("Team update denied by admission webhook", "name", name, "user", user.Email, "error", err)
+			return
+		}
 		h.logger.Error("Failed to update team", "name", name, "error", err)
 		writeError(w, http.StatusInternalServerError, "Failed to update team")
 		return
