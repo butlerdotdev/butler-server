@@ -204,35 +204,25 @@ func (p *FluxProvider) CheckInstalled(ctx context.Context, kubeconfig []byte) (*
 		return status, nil
 	}
 
-	fluxComponents := []string{
-		"source-controller",
-		"kustomize-controller",
-		"helm-controller",
-		"notification-controller",
+	deployments, err := clientset.AppsV1().Deployments("flux-system").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list flux-system deployments: %w", err)
 	}
 
-	status.Components = make([]ComponentStatus, 0, len(fluxComponents))
+	status.Components = make([]ComponentStatus, 0, len(deployments.Items))
 	allReady := true
 
-	for _, component := range fluxComponents {
-		deployment, err := clientset.AppsV1().Deployments("flux-system").Get(ctx, component, metav1.GetOptions{})
-
-		compStatus := ComponentStatus{Name: component}
-
-		if err != nil {
-			compStatus.Ready = false
-			compStatus.Message = "not found"
-			allReady = false
-		} else {
-			compStatus.Ready = deployment.Status.ReadyReplicas > 0
-			if !compStatus.Ready {
-				compStatus.Message = "not ready"
-				allReady = false
-			} else {
-				compStatus.Message = "ready"
-			}
+	for _, deployment := range deployments.Items {
+		compStatus := ComponentStatus{
+			Name:  deployment.Name,
+			Ready: deployment.Status.ReadyReplicas > 0,
 		}
-
+		if compStatus.Ready {
+			compStatus.Message = "ready"
+		} else {
+			compStatus.Message = "not ready"
+			allReady = false
+		}
 		status.Components = append(status.Components, compStatus)
 	}
 
