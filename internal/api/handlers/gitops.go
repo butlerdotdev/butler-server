@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"sort"
 	"strings"
 
 	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
@@ -1032,6 +1033,7 @@ func (h *GitOpsHandler) ExportAllAddons(w http.ResponseWriter, r *http.Request) 
 	var allFiles []gitops.FileCommit
 	var fileNames []string
 	migratedCount := 0
+	seenNamespaces := make(map[string]bool)
 
 	for _, migration := range req.Releases {
 		key := fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
@@ -1058,6 +1060,13 @@ func (h *GitOpsHandler) ExportAllAddons(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			h.logger.Warn("Failed to generate manifests for release", "release", release.Name, "error", err)
 			continue
+		}
+
+		// Only one directory should declare a given namespace.
+		if seenNamespaces[release.Namespace] {
+			stripDuplicateNamespace(manifests)
+		} else {
+			seenNamespaces[release.Namespace] = true
 		}
 
 		var basePath string
@@ -1893,6 +1902,7 @@ func (h *GitOpsHandler) ExportAllManagementAddons(w http.ResponseWriter, r *http
 	var allFiles []gitops.FileCommit
 	var fileNames []string
 	migratedCount := 0
+	seenNamespaces := make(map[string]bool)
 
 	basePath := req.BasePath
 	if basePath == "" {
@@ -1924,6 +1934,13 @@ func (h *GitOpsHandler) ExportAllManagementAddons(w http.ResponseWriter, r *http
 		if err != nil {
 			h.logger.Warn("Failed to generate manifests for release", "release", release.Name, "error", err)
 			continue
+		}
+
+		// Only one directory should declare a given namespace.
+		if seenNamespaces[release.Namespace] {
+			stripDuplicateNamespace(manifests)
+		} else {
+			seenNamespaces[release.Namespace] = true
 		}
 
 		var categoryPath string
@@ -2168,4 +2185,26 @@ func randomSuffix() string {
 		return "0000"
 	}
 	return fmt.Sprintf("%04d", n.Int64()+1000)
+}
+
+// stripDuplicateNamespace removes namespace.yaml from a manifest set if the
+// namespace was already declared by a previous release, and rebuilds the
+// kustomization.yaml to match.
+func stripDuplicateNamespace(manifests map[string][]byte) {
+	delete(manifests, "namespace.yaml")
+	var resources []string
+	for name := range manifests {
+		if name != "kustomization.yaml" {
+			resources = append(resources, name)
+		}
+	}
+	sort.Strings(resources)
+	var b strings.Builder
+	b.WriteString("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n")
+	for _, r := range resources {
+		b.WriteString("- ")
+		b.WriteString(r)
+		b.WriteByte('\n')
+	}
+	manifests["kustomization.yaml"] = []byte(b.String())
 }
