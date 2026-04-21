@@ -102,6 +102,7 @@ func (p *FluxProvider) GenerateReleaseManifests(cfg ReleaseConfig) (map[string][
 func (p *FluxProvider) buildHelmRelease(cfg ReleaseConfig, namespace, interval, repoName string) *FluxHelmRelease {
 	hr := NewFluxHelmRelease(cfg.Name, namespace)
 	hr.Spec.Interval = interval
+	hr.Spec.ReleaseName = cfg.Name
 	hr.Spec.Chart = FluxHelmChartTemplate{
 		Spec: FluxHelmChartTemplateSpec{
 			Chart:    cfg.ChartName,
