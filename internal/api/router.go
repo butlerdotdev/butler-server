@@ -52,14 +52,9 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	teamResolver := auth.NewTeamResolver(cfg.K8sClient.Dynamic(), cfg.Logger.With("component", "teams"))
 
 	// User service for internal user management
-	baseURL := cfg.Config.Server.BaseURL
-	if baseURL == "" {
-		baseURL = "http://localhost:8080" // Default for dev
-	}
 	userService := auth.NewUserService(
 		cfg.K8sClient.Dynamic(),
 		cfg.K8sClient.Clientset(),
-		baseURL,
 		cfg.Logger.With("component", "users"),
 	)
 
@@ -332,7 +327,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Get("/config", gitopsHandler.GetConfig)
 				r.Post("/config", gitopsHandler.SaveConfig)
 				r.Get("/repos", gitopsHandler.ListRepositories)
-				r.Get("/repos/{owner}/{repo}/branches", gitopsHandler.ListBranches)
+				r.Get("/repos/branches", gitopsHandler.ListBranches)
 				r.Post("/preview", gitopsHandler.PreviewManifest)
 			})
 

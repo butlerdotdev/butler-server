@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"sort"
 	"strings"
 
 	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
@@ -200,13 +201,17 @@ func (h *GitOpsHandler) ListRepositories(w http.ResponseWriter, r *http.Request)
 }
 
 // ListBranches lists branches for a repository.
+// Accepts ?repo=owner/repo (supports nested groups like group/subgroup/repo).
 func (h *GitOpsHandler) ListBranches(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	owner := chi.URLParam(r, "owner")
-	repo := chi.URLParam(r, "repo")
-
-	if owner == "" || repo == "" {
-		writeError(w, http.StatusBadRequest, "Owner and repo are required")
+	fullName := r.URL.Query().Get("repo")
+	if fullName == "" {
+		writeError(w, http.StatusBadRequest, "repo query parameter is required")
+		return
+	}
+	owner, repo, err := gitops.ParseRepoFullName(fullName)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid repository name")
 		return
 	}
 
@@ -267,9 +272,15 @@ func (h *GitOpsHandler) EnableGitOps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := h.getGitToken(ctx)
+	gitConfig, err := h.getGitProviderConfig(ctx)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, "Git provider not configured")
+		return
+	}
+
+	token, err := h.k8sClient.GetSecretValue(ctx, h.config.SystemNamespace, gitConfig.SecretName, "token")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Failed to get git token")
 		return
 	}
 
@@ -285,15 +296,34 @@ func (h *GitOpsHandler) EnableGitOps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve author identity from the token for commit attribution.
+	var authorName, authorEmail string
+	gitProvider, err := gitops.NewGitProvider(gitops.GitProviderConfig{
+		Type:  gitConfig.Type,
+		Token: token,
+		URL:   gitConfig.URL,
+	})
+	if err == nil {
+		if validation, err := gitProvider.ValidateToken(ctx); err == nil && validation.Valid {
+			authorName = validation.Name
+			authorEmail = validation.Email
+		}
+	}
+
 	bootstrapper := gitops.NewFluxBootstrapper(kubeconfig)
 	result, err := bootstrapper.Bootstrap(ctx, gitops.BootstrapOptions{
 		Provider:        req.Provider,
+		GitProviderType: gitConfig.Type,
+		Hostname:        gitops.HostnameFromURL(gitConfig.URL),
 		Owner:           owner,
 		Repository:      repoName,
 		Branch:          req.Branch,
 		Path:            req.Path,
 		Token:           token,
 		Private:         req.Private,
+		ReadWriteKey:    true,
+		AuthorName:      authorName,
+		AuthorEmail:     authorEmail,
 		Personal:        true,
 		Cluster:         name,
 		ComponentsExtra: req.ComponentsExtra,
@@ -1007,6 +1037,7 @@ func (h *GitOpsHandler) ExportAllAddons(w http.ResponseWriter, r *http.Request) 
 	var allFiles []gitops.FileCommit
 	var fileNames []string
 	migratedCount := 0
+	seenNamespaces := make(map[string]bool)
 
 	for _, migration := range req.Releases {
 		key := fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
@@ -1033,6 +1064,13 @@ func (h *GitOpsHandler) ExportAllAddons(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			h.logger.Warn("Failed to generate manifests for release", "release", release.Name, "error", err)
 			continue
+		}
+
+		// Only one directory should declare a given namespace.
+		if seenNamespaces[release.Namespace] {
+			stripDuplicateNamespace(manifests)
+		} else {
+			seenNamespaces[release.Namespace] = true
 		}
 
 		var basePath string
@@ -1260,9 +1298,15 @@ func (h *GitOpsHandler) EnableManagementGitOps(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	token, err := h.getGitToken(ctx)
+	mgmtGitConfig, err := h.getGitProviderConfig(ctx)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, "Git provider not configured")
+		return
+	}
+
+	token, err := h.k8sClient.GetSecretValue(ctx, h.config.SystemNamespace, mgmtGitConfig.SecretName, "token")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Failed to get git token")
 		return
 	}
 
@@ -1278,17 +1322,36 @@ func (h *GitOpsHandler) EnableManagementGitOps(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	var authorName, authorEmail string
+	mgmtProvider, err := gitops.NewGitProvider(gitops.GitProviderConfig{
+		Type:  mgmtGitConfig.Type,
+		Token: token,
+		URL:   mgmtGitConfig.URL,
+	})
+	if err == nil {
+		if validation, err := mgmtProvider.ValidateToken(ctx); err == nil && validation.Valid {
+			authorName = validation.Name
+			authorEmail = validation.Email
+		}
+	}
+
 	bootstrapper := gitops.NewFluxBootstrapper(kubeconfig)
 	result, err := bootstrapper.Bootstrap(ctx, gitops.BootstrapOptions{
-		Provider:   "github",
-		Owner:      owner,
-		Repository: repoName,
-		Branch:     req.Branch,
-		Path:       req.Path,
-		Token:      token,
-		Private:    req.Private,
-		Personal:   true,
-		Cluster:    "management",
+		Provider:        "fluxcd",
+		GitProviderType: mgmtGitConfig.Type,
+		Hostname:        gitops.HostnameFromURL(mgmtGitConfig.URL),
+		Owner:           owner,
+		Repository:      repoName,
+		Branch:          req.Branch,
+		Path:            req.Path,
+		Token:           token,
+		Private:         req.Private,
+		ReadWriteKey:    true,
+		AuthorName:      authorName,
+		AuthorEmail:     authorEmail,
+		Personal:        true,
+		Cluster:         "management",
+		ComponentsExtra: req.ComponentsExtra,
 	})
 	if err != nil {
 		h.logger.Error("Flux bootstrap failed", "error", err)
@@ -1701,12 +1764,11 @@ func (h *GitOpsHandler) ExportManagementCatalogAddon(w http.ResponseWriter, r *h
 		return
 	}
 
-	parts := strings.Split(req.Repository, "/")
-	if len(parts) != 2 {
-		writeError(w, http.StatusBadRequest, "Invalid repository format, expected owner/repo")
+	owner, repo, err := gitops.ParseRepoFullName(req.Repository)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid repository format: %v", err))
 		return
 	}
-	owner, repo := parts[0], parts[1]
 
 	branch := req.Branch
 	if branch == "" {
@@ -1791,7 +1853,8 @@ func (h *GitOpsHandler) ExportAllManagementAddons(w http.ResponseWriter, r *http
 
 	var req gitops.MigrateToGitOpsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "Invalid request body")
+		h.logger.Error("Failed to decode migrate request", "component", "gitops", "error", err)
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
 
@@ -1843,6 +1906,7 @@ func (h *GitOpsHandler) ExportAllManagementAddons(w http.ResponseWriter, r *http
 	var allFiles []gitops.FileCommit
 	var fileNames []string
 	migratedCount := 0
+	seenNamespaces := make(map[string]bool)
 
 	basePath := req.BasePath
 	if basePath == "" {
@@ -1874,6 +1938,13 @@ func (h *GitOpsHandler) ExportAllManagementAddons(w http.ResponseWriter, r *http
 		if err != nil {
 			h.logger.Warn("Failed to generate manifests for release", "release", release.Name, "error", err)
 			continue
+		}
+
+		// Only one directory should declare a given namespace.
+		if seenNamespaces[release.Namespace] {
+			stripDuplicateNamespace(manifests)
+		} else {
+			seenNamespaces[release.Namespace] = true
 		}
 
 		var categoryPath string
@@ -2091,14 +2162,6 @@ func (h *GitOpsHandler) getGitClient(ctx context.Context) (gitops.GitProvider, e
 	return h.createGitClient(ctx, cfg)
 }
 
-func (h *GitOpsHandler) getGitToken(ctx context.Context) (string, error) {
-	cfg, err := h.getGitProviderConfig(ctx)
-	if err != nil {
-		return "", err
-	}
-	return h.k8sClient.GetSecretValue(ctx, h.config.SystemNamespace, cfg.SecretName, "token")
-}
-
 func parseGitHubURL(url string) (owner, repo string, err error) {
 	url = strings.TrimSuffix(url, ".git")
 
@@ -2126,4 +2189,29 @@ func randomSuffix() string {
 		return "0000"
 	}
 	return fmt.Sprintf("%04d", n.Int64()+1000)
+}
+
+// stripDuplicateNamespace removes namespace.yaml from a manifest set if the
+// namespace was already declared by a previous release, and rebuilds the
+// kustomization.yaml to match.
+func stripDuplicateNamespace(manifests map[string][]byte) {
+	if _, ok := manifests["namespace.yaml"]; !ok {
+		return
+	}
+	delete(manifests, "namespace.yaml")
+	var resources []string
+	for name := range manifests {
+		if name != "kustomization.yaml" {
+			resources = append(resources, name)
+		}
+	}
+	sort.Strings(resources)
+	var b strings.Builder
+	b.WriteString("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n")
+	for _, r := range resources {
+		b.WriteString("- ")
+		b.WriteString(r)
+		b.WriteByte('\n')
+	}
+	manifests["kustomization.yaml"] = []byte(b.String())
 }

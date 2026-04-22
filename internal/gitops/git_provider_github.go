@@ -86,6 +86,7 @@ func (p *GitHubProvider) ValidateToken(ctx context.Context) (*TokenValidation, e
 
 	validation := &TokenValidation{
 		Valid:    true,
+		Name:     user.GetName(),
 		Username: user.GetLogin(),
 		Email:    user.GetEmail(),
 	}
@@ -99,6 +100,8 @@ func (p *GitHubProvider) ValidateToken(ctx context.Context) (*TokenValidation, e
 
 // ListRepositories returns repositories accessible to the user.
 func (p *GitHubProvider) ListRepositories(ctx context.Context) ([]*Repository, error) {
+	const maxRepos = 200
+
 	var allRepos []*Repository
 	opts := &github.RepositoryListOptions{
 		Sort:        "updated",
@@ -128,6 +131,9 @@ func (p *GitHubProvider) ListRepositories(ctx context.Context) ([]*Repository, e
 				HTMLURL:       r.GetHTMLURL(),
 				UpdatedAt:     r.GetUpdatedAt().Format("2006-01-02T15:04:05Z"),
 			})
+			if len(allRepos) >= maxRepos {
+				return allRepos, nil
+			}
 		}
 
 		if resp.NextPage == 0 {

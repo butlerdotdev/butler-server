@@ -160,24 +160,17 @@ func detectGitOpsEngine(ctx context.Context, clientset *kubernetes.Clientset) *G
 }
 
 func detectFlux(ctx context.Context, clientset *kubernetes.Clientset) *GitOpsEngineStatus {
-	fluxComponents := []string{
-		"source-controller",
-		"kustomize-controller",
-		"helm-controller",
-		"notification-controller",
+	deployments, err := clientset.AppsV1().Deployments("flux-system").List(ctx, metav1.ListOptions{})
+	if err != nil || len(deployments.Items) == 0 {
+		return nil
 	}
 
 	var readyComponents []string
 	var version string
 
-	for _, component := range fluxComponents {
-		deployment, err := clientset.AppsV1().Deployments("flux-system").Get(ctx, component, metav1.GetOptions{})
-		if err != nil {
-			continue
-		}
-
+	for _, deployment := range deployments.Items {
 		if deployment.Status.ReadyReplicas > 0 {
-			readyComponents = append(readyComponents, component)
+			readyComponents = append(readyComponents, deployment.Name)
 
 			if version == "" && len(deployment.Spec.Template.Spec.Containers) > 0 {
 				image := deployment.Spec.Template.Spec.Containers[0].Image

@@ -19,6 +19,7 @@ package gitops
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,24 @@ import (
 
 	"sigs.k8s.io/yaml"
 )
+
+// HostnameFromURL extracts the hostname from a URL string.
+// Returns empty string for empty input or the well-known defaults
+// (github.com, gitlab.com) since flux uses those by default.
+func HostnameFromURL(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "github.com") || strings.EqualFold(host, "gitlab.com") {
+		return ""
+	}
+	return host
+}
 
 // Compatibility Layer
 //
@@ -80,7 +99,9 @@ func NewFluxBootstrapper(kubeconfig []byte) *FluxBootstrapper {
 
 // BootstrapOptions contains options for Flux bootstrap.
 type BootstrapOptions struct {
-	Provider        string
+	Provider        string // GitOps tool: fluxcd, argocd
+	GitProviderType string // Git host: github, gitlab
+	Hostname        string // Self-hosted instance hostname
 	Owner           string
 	Repository      string
 	Branch          string
@@ -88,13 +109,16 @@ type BootstrapOptions struct {
 	Token           string
 	Personal        bool
 	Private         bool
+	ReadWriteKey    bool
+	AuthorName      string
+	AuthorEmail     string
 	Cluster         string
 	ComponentsExtra []string
 }
 
-// Bootstrap runs flux bootstrap github.
-// CRITICAL: This writes the kubeconfig to a temp file and passes --kubeconfig
-// to ensure flux targets the tenant cluster, not the management cluster.
+// Bootstrap runs flux bootstrap for the configured git provider.
+// Writes the kubeconfig to a temp file and passes --kubeconfig to ensure
+// flux targets the tenant cluster, not the management cluster.
 func (f *FluxBootstrapper) Bootstrap(ctx context.Context, opts BootstrapOptions) (*BootstrapResult, error) {
 	if !IsFluxCLIAvailable() {
 		return nil, fmt.Errorf("flux CLI not available")
@@ -106,8 +130,10 @@ func (f *FluxBootstrapper) Bootstrap(ctx context.Context, opts BootstrapOptions)
 	}
 	defer cleanup()
 
+	subCmd, tokenEnv := fluxBootstrapParams(opts.GitProviderType)
+
 	args := []string{
-		"bootstrap", "github",
+		"bootstrap", subCmd,
 		"--kubeconfig", kubeconfigPath,
 		"--owner", opts.Owner,
 		"--repository", opts.Repository,
@@ -115,11 +141,25 @@ func (f *FluxBootstrapper) Bootstrap(ctx context.Context, opts BootstrapOptions)
 		"--path", opts.Path,
 	}
 
+	if opts.Hostname != "" {
+		args = append(args, "--hostname", opts.Hostname)
+	}
 	if opts.Personal {
 		args = append(args, "--personal")
 	}
 	if opts.Private {
 		args = append(args, "--private")
+	}
+	if opts.GitProviderType == "gitlab" {
+		args = append(args, "--token-auth")
+	} else if opts.ReadWriteKey {
+		args = append(args, "--read-write-key")
+	}
+	if opts.AuthorName != "" {
+		args = append(args, "--author-name", opts.AuthorName)
+	}
+	if opts.AuthorEmail != "" {
+		args = append(args, "--author-email", opts.AuthorEmail)
 	}
 	if len(opts.ComponentsExtra) > 0 {
 		args = append(args, "--components-extra="+strings.Join(opts.ComponentsExtra, ","))
@@ -129,7 +169,7 @@ func (f *FluxBootstrapper) Bootstrap(ctx context.Context, opts BootstrapOptions)
 
 	env := os.Environ()
 	if opts.Token != "" {
-		env = append(env, "GITHUB_TOKEN="+opts.Token)
+		env = append(env, tokenEnv+"="+opts.Token)
 	}
 	cmd.Env = env
 
@@ -397,4 +437,15 @@ func ValuesToYAML(values map[string]interface{}) (string, error) {
 // NewNamespace creates a new Kubernetes Namespace resource.
 func NewNamespace(name string) *K8sNamespace {
 	return NewK8sNamespace(name)
+}
+
+// fluxBootstrapParams returns the flux bootstrap subcommand and token env var
+// for the given git provider type.
+func fluxBootstrapParams(gitProvider string) (subCmd, tokenEnv string) {
+	switch gitProvider {
+	case "gitlab":
+		return "gitlab", "GITLAB_TOKEN"
+	default:
+		return "github", "GITHUB_TOKEN"
+	}
 }

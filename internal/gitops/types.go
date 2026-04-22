@@ -19,6 +19,7 @@ package gitops
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -167,34 +168,25 @@ type Branch struct {
 
 // Helper Functions
 
-// ParseRepoFullName parses "owner/repo" format into owner and repo.
+// ParseRepoFullName parses "owner/repo" or "group/subgroup/repo" into owner and repo.
+// Splits on the last slash so that nested GitLab groups are kept in the owner part.
 func ParseRepoFullName(fullName string) (owner, repo string, err error) {
-	for i := 0; i < len(fullName); i++ {
-		if fullName[i] == '/' {
-			if i == 0 || i == len(fullName)-1 {
-				return "", "", fmt.Errorf("invalid repository format: %q", fullName)
-			}
-			return fullName[:i], fullName[i+1:], nil
-		}
+	idx := strings.LastIndex(fullName, "/")
+	if idx <= 0 || idx == len(fullName)-1 {
+		return "", "", fmt.Errorf("invalid repository format: %q (expected owner/repo)", fullName)
 	}
-	return "", "", fmt.Errorf("invalid repository format: %q (expected owner/repo)", fullName)
+	return fullName[:idx], fullName[idx+1:], nil
 }
 
 // ParseRepoURL parses a Git repository URL and returns the owner and repo name.
+// Handles any host (github.com, gitlab.com, self-hosted instances).
 func ParseRepoURL(repoURL string) (owner, repo string, err error) {
 	repoURL = strings.TrimSuffix(repoURL, ".git")
 
-	if strings.Contains(repoURL, "github.com/") {
-		parts := strings.Split(repoURL, "github.com/")
-		if len(parts) == 2 {
-			return ParseRepoFullName(parts[1])
-		}
-	}
-
-	if strings.Contains(repoURL, "gitlab.com/") {
-		parts := strings.Split(repoURL, "gitlab.com/")
-		if len(parts) == 2 {
-			return ParseRepoFullName(parts[1])
+	if u, parseErr := url.Parse(repoURL); parseErr == nil && u.Host != "" {
+		path := strings.TrimPrefix(u.Path, "/")
+		if path != "" {
+			return ParseRepoFullName(path)
 		}
 	}
 

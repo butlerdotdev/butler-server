@@ -16,6 +16,8 @@ limitations under the License.
 
 package gitops
 
+import "strings"
+
 // Flux resource types for YAML generation.
 // Reference: https://fluxcd.io/flux/components/
 
@@ -192,8 +194,9 @@ type K8sNamespaceMetadata struct {
 }
 
 // NewFluxHelmRepository creates a new HelmRepository with defaults.
+// OCI URLs (oci://) automatically get type: oci set.
 func NewFluxHelmRepository(name, namespace, url string) *FluxHelmRepository {
-	return &FluxHelmRepository{
+	repo := &FluxHelmRepository{
 		APIVersion: "source.toolkit.fluxcd.io/v1",
 		Kind:       "HelmRepository",
 		Metadata: FluxMetadata{
@@ -205,6 +208,10 @@ func NewFluxHelmRepository(name, namespace, url string) *FluxHelmRepository {
 			Interval: "1h",
 		},
 	}
+	if strings.HasPrefix(url, "oci://") {
+		repo.Spec.Type = "oci"
+	}
+	return repo
 }
 
 // NewFluxHelmRelease creates a new HelmRelease with defaults.

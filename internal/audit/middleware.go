@@ -48,12 +48,18 @@ func Middleware(emitter *Emitter) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Capture request body (up to 2KB) and restore for downstream
+			// Capture request body and restore for downstream handlers.
+			// Cap at 10 MB to prevent OOM from oversized payloads.
 			var bodySummary string
 			if r.Body != nil && method != http.MethodDelete {
-				bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2048))
+				const maxBodyRead = 10 << 20 // 10 MB
+				bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, maxBodyRead))
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-				bodySummary = ScrubRequestBody(bodyBytes)
+				summary := bodyBytes
+				if len(summary) > 2048 {
+					summary = summary[:2048]
+				}
+				bodySummary = ScrubRequestBody(summary)
 			}
 
 			// Wrap response writer to capture status code
