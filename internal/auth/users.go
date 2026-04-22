@@ -73,16 +73,14 @@ type UserInfo struct {
 type UserService struct {
 	dynamicClient dynamic.Interface
 	clientset     kubernetes.Interface
-	baseURL       string
 	logger        *slog.Logger
 }
 
 // NewUserService creates a new user service.
-func NewUserService(dynamicClient dynamic.Interface, clientset kubernetes.Interface, baseURL string, logger *slog.Logger) *UserService {
+func NewUserService(dynamicClient dynamic.Interface, clientset kubernetes.Interface, logger *slog.Logger) *UserService {
 	return &UserService{
 		dynamicClient: dynamicClient,
 		clientset:     clientset,
-		baseURL:       baseURL,
 		logger:        logger,
 	}
 }
@@ -110,7 +108,9 @@ type EnsureSSOUserRequest struct {
 }
 
 // CreateUser creates a new internal user and returns an invite URL.
-func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest) (*CreateUserResult, error) {
+// The publicBaseURL parameter is the scheme://host callers should use
+// for building the invite link (derived per-request via httpx.PublicBaseURL).
+func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest, publicBaseURL string) (*CreateUserResult, error) {
 	// Generate username from email if not provided
 	username := req.Username
 	if username == "" {
@@ -179,7 +179,7 @@ func (s *UserService) CreateUser(ctx context.Context, req CreateUserRequest) (*C
 		s.logger.Warn("Failed to update user status", "error", err)
 	}
 
-	inviteURL := fmt.Sprintf("%s/invite/%s", s.baseURL, inviteToken)
+	inviteURL := fmt.Sprintf("%s/invite/%s", publicBaseURL, inviteToken)
 
 	return &CreateUserResult{
 		User: &UserInfo{
@@ -504,7 +504,9 @@ func (s *UserService) SetPassword(ctx context.Context, token, password string) (
 }
 
 // RegenerateInvite regenerates the invite token for an internal user.
-func (s *UserService) RegenerateInvite(ctx context.Context, username string) (string, error) {
+// The publicBaseURL parameter is the scheme://host callers should use
+// for building the invite link (derived per-request via httpx.PublicBaseURL).
+func (s *UserService) RegenerateInvite(ctx context.Context, username string, publicBaseURL string) (string, error) {
 	user, err := s.dynamicClient.Resource(UserGVR).Get(ctx, username, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -542,7 +544,7 @@ func (s *UserService) RegenerateInvite(ctx context.Context, username string) (st
 		return "", fmt.Errorf("failed to update user status: %w", err)
 	}
 
-	return fmt.Sprintf("%s/invite/%s", s.baseURL, inviteToken), nil
+	return fmt.Sprintf("%s/invite/%s", publicBaseURL, inviteToken), nil
 }
 
 // AuthenticateInternal authenticates an internal user with email/username and password.

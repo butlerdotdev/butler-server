@@ -30,6 +30,7 @@ import (
 
 	"github.com/butlerdotdev/butler-server/internal/auth"
 	"github.com/butlerdotdev/butler-server/internal/config"
+	"github.com/butlerdotdev/butler-server/internal/httpx"
 	"github.com/butlerdotdev/butler-server/internal/k8s"
 
 	"github.com/go-chi/chi/v5"
@@ -175,7 +176,7 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		Username:    req.Username,
 		Email:       req.Email,
 		DisplayName: req.DisplayName,
-	})
+	}, httpx.PublicBaseURL(r, h.config))
 
 	if err != nil {
 		if errors.Is(err, auth.ErrUserExists) {
@@ -315,7 +316,7 @@ func (h *UserHandler) EnableUser(w http.ResponseWriter, r *http.Request) {
 func (h *UserHandler) RegenerateInvite(w http.ResponseWriter, r *http.Request) {
 	username := chi.URLParam(r, "username")
 
-	inviteURL, err := h.userService.RegenerateInvite(r.Context(), username)
+	inviteURL, err := h.userService.RegenerateInvite(r.Context(), username, httpx.PublicBaseURL(r, h.config))
 	if err != nil {
 		if errors.Is(err, auth.ErrUserNotFound) {
 			writeError(w, http.StatusNotFound, "User not found")
