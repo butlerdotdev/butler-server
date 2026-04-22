@@ -79,6 +79,10 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 			// Read team context from header (sent by frontend when scoped to a team)
 			selectedTeam := r.Header.Get("X-Butler-Team")
 
+			// Read env context; same pattern as X-Butler-Team. Empty when
+			// the header is absent, which falls back to team-level scoping.
+			selectedEnv := r.Header.Get("X-Butler-Environment")
+
 			// Platform admins path
 			if user.IsPlatformAdmin {
 				// When requests come through the Backstage portal proxy, all
@@ -111,11 +115,15 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 						user.SelectedTeamRole = RoleAdmin
 					}
 
+					resolveEnvContext(r.Context(), cfg.TeamResolver, user, selectedEnv)
+
 					if cfg.Logger != nil {
 						cfg.Logger.Debug("Platform admin with team context",
 							"email", user.Email,
 							"selectedTeam", selectedTeam,
 							"selectedTeamRole", user.SelectedTeamRole,
+							"selectedEnv", user.SelectedEnvironment,
+							"selectedEnvRole", user.SelectedEnvironmentRole,
 						)
 					}
 				} else {
@@ -185,6 +193,7 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 				if membership != nil {
 					user.SelectedTeam = selectedTeam
 					user.SelectedTeamRole = membership.Role
+					resolveEnvContext(r.Context(), cfg.TeamResolver, user, selectedEnv)
 				}
 				// If user doesn't have membership in selected team, leave SelectedTeam empty
 				// This will cause authorization checks to fail appropriately
@@ -195,6 +204,26 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// resolveEnvContext sets user.SelectedEnvironment and
+// user.SelectedEnvironmentRole from the selectedEnv header value.
+// No-op when the header is empty. Resolution failures leave the env
+// context empty rather than blocking the request; env-awareness is a
+// scoping refinement, not a gate, and application-level authorization
+// falls back to team-level scoping on resolver failure. ADR-009
+// additive-only inheritance: env role never reduces team role, which
+// is enforced by the max composition in the session helpers.
+func resolveEnvContext(ctx context.Context, resolver *TeamResolver, user *UserSession, selectedEnv string) {
+	if selectedEnv == "" || resolver == nil {
+		return
+	}
+	user.SelectedEnvironment = selectedEnv
+	role, err := resolver.ResolveEnvironmentRole(ctx, user.SelectedTeam, selectedEnv, user.Email, user.Groups)
+	if err != nil {
+		return
+	}
+	user.SelectedEnvironmentRole = role
 }
 
 // findTeamMembership finds a team membership by name from a list

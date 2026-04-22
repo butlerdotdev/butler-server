@@ -151,6 +151,36 @@ func (c *Client) Config() *rest.Config {
 	return c.config
 }
 
+// ButlerAPIUsersGroup is the fixed impersonation group carrying the
+// RBAC butler-server users need to perform webhook-gated mutations.
+// See ADR-010.
+const ButlerAPIUsersGroup = "butler-api-users"
+
+// AsUser returns a new Client whose outgoing apiserver calls carry
+// Kubernetes impersonation headers identifying the given user. Used
+// by handlers that MUTATE webhook-gated resources (Team spec changes,
+// TenantCluster create/update) so the admission webhook sees the
+// authenticated end-user's identity instead of butler-server's SA.
+// See ADR-010 for the full decision: opt-in per call, reads stay on
+// the shared server-SA client, the impersonation payload is fixed at
+// the user's canonical email + butler-api-users group +
+// system:authenticated.
+//
+// Returns the original client unchanged when userEmail is empty so
+// handlers can pass session.Email through without a guard; empty
+// email means we fell back to SA identity by design.
+func (c *Client) AsUser(userEmail string) (*Client, error) {
+	if userEmail == "" || c.config == nil {
+		return c, nil
+	}
+	cfg := rest.CopyConfig(c.config)
+	cfg.Impersonate = rest.ImpersonationConfig{
+		UserName: userEmail,
+		Groups:   []string{ButlerAPIUsersGroup, "system:authenticated"},
+	}
+	return NewClientFromRESTConfig(cfg)
+}
+
 // NewClientFromKubeconfig creates a client from a kubeconfig string.
 func NewClientFromKubeconfig(kubeconfig string) (*Client, error) {
 	config, err := clientcmd.RESTConfigFromKubeConfig([]byte(kubeconfig))
@@ -175,6 +205,7 @@ func NewClientFromRESTConfig(config *rest.Config) (*Client, error) {
 	return &Client{
 		clientset:     clientset,
 		dynamicClient: dynamicClient,
+		config:        config,
 	}, nil
 }
 

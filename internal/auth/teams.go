@@ -508,3 +508,88 @@ func (r *TeamResolver) GetTeamGroupSyncs(ctx context.Context, teamName string) (
 
 	return result, nil
 }
+
+// ResolveEnvironmentRole returns the user's role inside a specific
+// environment of a team. Reads Team.spec.environments[] for the named
+// env, walks its access.users (case-insensitive email match) and
+// access.groups (IdP-aware match, same conventions as team-level
+// resolution), and returns the highest role found. Empty string means
+// the user has no explicit env-level access and will inherit the
+// team-level role via the additive-max merge in session helpers.
+//
+// Returns "" and nil error when the team or env is not defined, when
+// no env access block is set, or when the user is not listed. Returns
+// a non-nil error only for cluster-level read failures.
+func (r *TeamResolver) ResolveEnvironmentRole(ctx context.Context, teamName, envName, email string, idpGroups []string) (string, error) {
+	if teamName == "" || envName == "" {
+		return "", nil
+	}
+
+	team, err := r.client.Resource(TeamGVR).Get(ctx, teamName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("get team %q: %w", teamName, err)
+	}
+
+	envs, found, err := unstructured.NestedSlice(team.Object, "spec", "environments")
+	if err != nil || !found {
+		return "", nil
+	}
+
+	for _, e := range envs {
+		env, ok := e.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _, _ := unstructured.NestedString(env, "name")
+		if name != envName {
+			continue
+		}
+
+		// Match access.users by email (case-insensitive, same as team).
+		roles := []string{}
+		if users, _, _ := unstructured.NestedSlice(env, "access", "users"); len(users) > 0 {
+			for _, u := range users {
+				user, ok := u.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				userEmail, _, _ := unstructured.NestedString(user, "name")
+				if !strings.EqualFold(userEmail, email) {
+					continue
+				}
+				role, _, _ := unstructured.NestedString(user, "role")
+				if role == "" {
+					role = RoleViewer
+				}
+				roles = append(roles, role)
+			}
+		}
+
+		// Match access.groups via the same group-lookup conventions used
+		// at team level. Env access subjects must already be in team
+		// access per ADR-009 membership check, so this mirrors the
+		// existing matcher to avoid semantic drift.
+		if groups, _, _ := unstructured.NestedSlice(env, "access", "groups"); len(groups) > 0 {
+			groupSet := buildGroupLookupSet(idpGroups)
+			for _, g := range groups {
+				grp, ok := g.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				grpName, _, _ := unstructured.NestedString(grp, "name")
+				if grpName == "" || !r.groupMatches(grpName, groupSet) {
+					continue
+				}
+				role, _, _ := unstructured.NestedString(grp, "role")
+				if role == "" {
+					role = RoleViewer
+				}
+				roles = append(roles, role)
+			}
+		}
+
+		return HighestRole(roles), nil
+	}
+
+	return "", nil
+}

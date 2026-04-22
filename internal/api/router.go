@@ -310,6 +310,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Delete("/clusters/{namespace}/{name}", clusterHandler.Delete)
 			r.Put("/clusters/{namespace}/{name}", clusterHandler.Update)
 			r.Patch("/clusters/{namespace}/{name}/scale", clusterHandler.Scale)
+			r.Put("/clusters/{namespace}/{name}/environment", clusterHandler.ChangeEnvironment)
 			r.Post("/clusters/{namespace}/{name}/settings/workspaces", clusterHandler.ToggleWorkspaces)
 			r.Get("/clusters/{namespace}/{name}/kubeconfig", clusterHandler.GetKubeconfig)
 			r.Get("/clusters/{namespace}/{name}/nodes", clusterHandler.GetNodes)
@@ -418,6 +419,15 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Post("/teams/{name}/providers", providerHandler.CreateTeamProvider)
 			r.Post("/teams/{name}/providers/test", providerHandler.TestConnection)
 			r.Delete("/teams/{name}/providers/{namespace}/{providerName}", providerHandler.DeleteTeamProvider)
+
+			// Team environment management (ADR-009). The Team admission
+			// webhook is the authoritative gate for mutation authority
+			// (team admin for env limits, platform admin for resource
+			// limits); these handlers impersonate the caller so the
+			// webhook sees the real identity.
+			r.Post("/teams/{name}/environments", teamHandler.AddEnvironment)
+			r.Put("/teams/{name}/environments/{env}", teamHandler.UpdateEnvironment)
+			r.Delete("/teams/{name}/environments/{env}", teamHandler.RemoveEnvironment)
 
 			// User listing (any authenticated user can view)
 			r.Get("/users", userHandler.ListUsers)
