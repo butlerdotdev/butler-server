@@ -38,11 +38,39 @@ type EnvironmentLimits struct {
 	MaxClustersPerMember *int32 `json:"maxClustersPerMember,omitempty"`
 }
 
+// EnvironmentAccessUser is one entry in the env access.users list.
+// Role must be admin / operator / viewer per ADR-009.
+type EnvironmentAccessUser struct {
+	Name string `json:"name"`
+	Role string `json:"role"`
+}
+
+// EnvironmentAccessGroup is one entry in the env access.groups list.
+type EnvironmentAccessGroup struct {
+	Name             string `json:"name"`
+	Role             string `json:"role"`
+	IdentityProvider string `json:"identityProvider,omitempty"`
+}
+
+// EnvironmentAccess is the ADR-009 additive-only RBAC block. Env
+// access elevates team members within this env; it cannot reduce a
+// team-level role (webhook enforces this at admission).
+type EnvironmentAccess struct {
+	Users  []EnvironmentAccessUser  `json:"users,omitempty"`
+	Groups []EnvironmentAccessGroup `json:"groups,omitempty"`
+}
+
 // EnvironmentRequest is the POST/PUT body for env create/update.
-// Omitted limits fields leave the env uncapped within the Team ceiling.
+// Omitted fields leave the env unchanged. ClusterDefaults is passed
+// through as a map so new default fields land without a server
+// schema bump — the Team CRD is the source of truth for the field
+// set.
 type EnvironmentRequest struct {
-	Name   string             `json:"name"`
-	Limits *EnvironmentLimits `json:"limits,omitempty"`
+	Name            string                 `json:"name"`
+	Description     string                 `json:"description,omitempty"`
+	Limits          *EnvironmentLimits     `json:"limits,omitempty"`
+	Access          *EnvironmentAccess     `json:"access,omitempty"`
+	ClusterDefaults map[string]interface{} `json:"clusterDefaults,omitempty"`
 }
 
 // AddEnvironment appends an environment to Team.spec.environments[].
@@ -262,11 +290,14 @@ func (h *TeamHandler) updateTeamAsUser(ctx context.Context, team *unstructured.U
 
 // envToUnstructured renders an EnvironmentRequest into the
 // map[string]interface{} shape Team.spec.environments[] expects.
-// Limits fields are only emitted when set so unset fields do not pin
-// a cap of zero on the CRD.
+// Optional fields are elided when unset so the CRD does not pin
+// empty structures.
 func envToUnstructured(req *EnvironmentRequest) map[string]interface{} {
 	env := map[string]interface{}{
 		"name": req.Name,
+	}
+	if req.Description != "" {
+		env["description"] = req.Description
 	}
 	if req.Limits != nil {
 		limits := map[string]interface{}{}
@@ -279,6 +310,39 @@ func envToUnstructured(req *EnvironmentRequest) map[string]interface{} {
 		if len(limits) > 0 {
 			env["limits"] = limits
 		}
+	}
+	if req.Access != nil {
+		access := map[string]interface{}{}
+		if len(req.Access.Users) > 0 {
+			users := make([]interface{}, 0, len(req.Access.Users))
+			for _, u := range req.Access.Users {
+				users = append(users, map[string]interface{}{
+					"name": u.Name,
+					"role": u.Role,
+				})
+			}
+			access["users"] = users
+		}
+		if len(req.Access.Groups) > 0 {
+			groups := make([]interface{}, 0, len(req.Access.Groups))
+			for _, g := range req.Access.Groups {
+				entry := map[string]interface{}{
+					"name": g.Name,
+					"role": g.Role,
+				}
+				if g.IdentityProvider != "" {
+					entry["identityProvider"] = g.IdentityProvider
+				}
+				groups = append(groups, entry)
+			}
+			access["groups"] = groups
+		}
+		if len(access) > 0 {
+			env["access"] = access
+		}
+	}
+	if len(req.ClusterDefaults) > 0 {
+		env["clusterDefaults"] = req.ClusterDefaults
 	}
 	return env
 }
