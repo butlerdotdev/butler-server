@@ -1764,12 +1764,11 @@ func (h *GitOpsHandler) ExportManagementCatalogAddon(w http.ResponseWriter, r *h
 		return
 	}
 
-	parts := strings.Split(req.Repository, "/")
-	if len(parts) != 2 {
-		writeError(w, http.StatusBadRequest, "Invalid repository format, expected owner/repo")
+	owner, repo, err := gitops.ParseRepoFullName(req.Repository)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid repository format: %v", err))
 		return
 	}
-	owner, repo := parts[0], parts[1]
 
 	branch := req.Branch
 	if branch == "" {

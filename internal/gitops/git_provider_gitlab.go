@@ -211,7 +211,7 @@ func (p *GitLabProvider) GetBranchSHA(ctx context.Context, owner, repo, branch s
 	pid := owner + "/" + repo
 	b, resp, err := p.client.Branches.GetBranch(pid, branch, gitlab.WithContext(ctx))
 	if err != nil {
-		return "", p.wrapError(err, resp)
+		return "", fmt.Errorf("GetBranchSHA(project=%q, branch=%q): %w", pid, branch, p.wrapError(err, resp))
 	}
 	if b.Commit == nil {
 		return "", fmt.Errorf("branch %q has no commit", branch)
