@@ -34,7 +34,6 @@ func init() {
 type GitLabProvider struct {
 	client       *gitlab.Client
 	organization string
-	baseURL      string
 }
 
 var _ GitProvider = (*GitLabProvider)(nil)
@@ -54,7 +53,6 @@ func NewGitLabProvider(cfg GitProviderConfig) (GitProvider, error) {
 	return &GitLabProvider{
 		client:       client,
 		organization: cfg.Organization,
-		baseURL:      baseURL,
 	}, nil
 }
 
@@ -71,12 +69,20 @@ func (p *GitLabProvider) ValidateToken(ctx context.Context) (*TokenValidation, e
 		return nil, fmt.Errorf("failed to validate token: %w", err)
 	}
 
-	return &TokenValidation{
+	validation := &TokenValidation{
 		Valid:    true,
 		Name:     user.Name,
 		Username: user.Username,
 		Email:    user.Email,
-	}, nil
+	}
+
+	// Retrieve PAT scopes via self-introspection endpoint.
+	pat, _, patErr := p.client.PersonalAccessTokens.GetSinglePersonalAccessToken(gitlab.WithContext(ctx))
+	if patErr == nil && pat != nil {
+		validation.Scopes = pat.Scopes
+	}
+
+	return validation, nil
 }
 
 func (p *GitLabProvider) ListRepositories(ctx context.Context) ([]*Repository, error) {
@@ -167,11 +173,11 @@ func (p *GitLabProvider) GetRepository(ctx context.Context, owner, repo string) 
 func (p *GitLabProvider) ListBranches(ctx context.Context, owner, repo string) ([]*Branch, error) {
 	pid := owner + "/" + repo
 
-	proj, _, _ := p.client.Projects.GetProject(pid, nil, gitlab.WithContext(ctx))
-	defaultBranch := ""
-	if proj != nil {
-		defaultBranch = proj.DefaultBranch
+	proj, resp, err := p.client.Projects.GetProject(pid, nil, gitlab.WithContext(ctx))
+	if err != nil {
+		return nil, p.wrapError(err, resp)
 	}
+	defaultBranch := proj.DefaultBranch
 
 	var allBranches []*Branch
 	opts := &gitlab.ListBranchesOptions{
@@ -207,6 +213,9 @@ func (p *GitLabProvider) GetBranchSHA(ctx context.Context, owner, repo, branch s
 	if err != nil {
 		return "", p.wrapError(err, resp)
 	}
+	if b.Commit == nil {
+		return "", fmt.Errorf("branch %q has no commit", branch)
+	}
 	return b.Commit.ID, nil
 }
 
@@ -240,19 +249,39 @@ func (p *GitLabProvider) CommitFiles(ctx context.Context, owner, repo, branch, m
 	return p.commitActions(ctx, owner, repo, branch, message, files)
 }
 
-// commitActions uses GitLab's native multi-file commit endpoint. Each file is
-// checked for existence to determine whether to use "create" or "update".
+// commitActions uses GitLab's native multi-file commit endpoint. A single tree
+// listing determines which files exist so we can choose create vs update.
 func (p *GitLabProvider) commitActions(ctx context.Context, owner, repo, branch, message string, files []FileCommit) (*CommitResult, error) {
 	pid := owner + "/" + repo
+
+	// Build a set of existing file paths with a single API call.
+	existing := make(map[string]bool)
+	opts := &gitlab.ListTreeOptions{
+		Ref:       gitlab.Ptr(branch),
+		Recursive: gitlab.Ptr(true),
+		ListOptions: gitlab.ListOptions{PerPage: 100},
+	}
+	for {
+		nodes, resp, err := p.client.Repositories.ListTree(pid, opts, gitlab.WithContext(ctx))
+		if err != nil {
+			// If the branch is empty or repo is new, treat all files as creates.
+			break
+		}
+		for _, n := range nodes {
+			if n.Type == "blob" {
+				existing[n.Path] = true
+			}
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
 
 	actions := make([]*gitlab.CommitActionOptions, len(files))
 	for i, f := range files {
 		action := gitlab.FileCreate
-		// Check if the file already exists to decide create vs update.
-		_, _, err := p.client.RepositoryFiles.GetFileMetaData(pid, f.Path, &gitlab.GetFileMetaDataOptions{
-			Ref: gitlab.Ptr(branch),
-		}, gitlab.WithContext(ctx))
-		if err == nil {
+		if existing[f.Path] {
 			action = gitlab.FileUpdate
 		}
 

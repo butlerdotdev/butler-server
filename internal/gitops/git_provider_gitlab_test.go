@@ -17,6 +17,7 @@ limitations under the License.
 package gitops
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -84,6 +85,13 @@ func TestGitLabProvider_ValidateToken(t *testing.T) {
 			"id":       1,
 		})
 	})
+	mux.HandleFunc("/api/v4/personal_access_tokens/self", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":     1,
+			"scopes": []string{"api", "read_repository"},
+			"active": true,
+		})
+	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -107,6 +115,9 @@ func TestGitLabProvider_ValidateToken(t *testing.T) {
 	}
 	if v.Email != "test@example.com" {
 		t.Errorf("Email = %q, want %q", v.Email, "test@example.com")
+	}
+	if len(v.Scopes) != 2 || v.Scopes[0] != "api" {
+		t.Errorf("Scopes = %v, want [api read_repository]", v.Scopes)
 	}
 }
 
@@ -257,6 +268,73 @@ func TestParseRepoURL_SelfHosted(t *testing.T) {
 				t.Errorf("got (%q, %q), want (%q, %q)", owner, repo, tt.wantOwner, tt.wantRepo)
 			}
 		})
+	}
+}
+
+func TestGitLabProvider_GetFileContent(t *testing.T) {
+	content := "hello world\n"
+	encoded := base64.StdEncoding.EncodeToString([]byte(content))
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v4/projects/mygroup%2Fmyrepo/repository/files/path%2Fto%2Ffile.yaml", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"file_name": "file.yaml",
+			"file_path": "path/to/file.yaml",
+			"content":   encoded,
+			"encoding":  "base64",
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p, _ := NewGitLabProvider(GitProviderConfig{Token: "test", URL: srv.URL})
+	data, err := p.GetFileContent(t.Context(), "mygroup", "myrepo", "path/to/file.yaml", "main")
+	if err != nil {
+		t.Fatalf("GetFileContent: %v", err)
+	}
+	if string(data) != content {
+		t.Errorf("content = %q, want %q", string(data), content)
+	}
+}
+
+func TestGitLabProvider_CommitFiles(t *testing.T) {
+	var receivedActions int
+	mux := http.NewServeMux()
+	// Tree listing to determine which files exist
+	mux.HandleFunc("/api/v4/projects/mygroup%2Fmyrepo/repository/tree", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"path": "existing.yaml", "type": "blob"},
+		})
+	})
+	// Commit creation
+	mux.HandleFunc("/api/v4/projects/mygroup%2Fmyrepo/repository/commits", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&body)
+		actions, _ := body["actions"].([]interface{})
+		receivedActions = len(actions)
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":      "sha256abc",
+			"web_url": "https://gitlab.example.com/mygroup/myrepo/-/commit/sha256abc",
+			"message": "test commit",
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	p, _ := NewGitLabProvider(GitProviderConfig{Token: "test", URL: srv.URL})
+	result, err := p.CommitFiles(t.Context(), "mygroup", "myrepo", "main", "test commit", []FileCommit{
+		{Path: "existing.yaml", Content: []byte("updated")},
+		{Path: "new-file.yaml", Content: []byte("created")},
+	})
+	if err != nil {
+		t.Fatalf("CommitFiles: %v", err)
+	}
+	if result.SHA != "sha256abc" {
+		t.Errorf("SHA = %q, want %q", result.SHA, "sha256abc")
+	}
+	if receivedActions != 2 {
+		t.Errorf("receivedActions = %d, want 2", receivedActions)
 	}
 }
 

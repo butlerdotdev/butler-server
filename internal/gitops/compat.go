@@ -40,7 +40,7 @@ func HostnameFromURL(rawURL string) string {
 		return ""
 	}
 	host := u.Hostname()
-	if host == "github.com" || host == "gitlab.com" {
+	if strings.EqualFold(host, "github.com") || strings.EqualFold(host, "gitlab.com") {
 		return ""
 	}
 	return host
@@ -150,7 +150,9 @@ func (f *FluxBootstrapper) Bootstrap(ctx context.Context, opts BootstrapOptions)
 	if opts.Private {
 		args = append(args, "--private")
 	}
-	if opts.ReadWriteKey {
+	if opts.GitProviderType == "gitlab" {
+		args = append(args, "--token-auth")
+	} else if opts.ReadWriteKey {
 		args = append(args, "--read-write-key")
 	}
 	if opts.AuthorName != "" {
@@ -158,9 +160,6 @@ func (f *FluxBootstrapper) Bootstrap(ctx context.Context, opts BootstrapOptions)
 	}
 	if opts.AuthorEmail != "" {
 		args = append(args, "--author-email", opts.AuthorEmail)
-	}
-	if opts.GitProviderType == "gitlab" {
-		args = append(args, "--token-auth")
 	}
 	if len(opts.ComponentsExtra) > 0 {
 		args = append(args, "--components-extra="+strings.Join(opts.ComponentsExtra, ","))

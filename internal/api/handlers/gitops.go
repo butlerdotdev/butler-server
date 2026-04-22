@@ -201,13 +201,17 @@ func (h *GitOpsHandler) ListRepositories(w http.ResponseWriter, r *http.Request)
 }
 
 // ListBranches lists branches for a repository.
+// Accepts ?repo=owner/repo (supports nested groups like group/subgroup/repo).
 func (h *GitOpsHandler) ListBranches(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	owner := chi.URLParam(r, "owner")
-	repo := chi.URLParam(r, "repo")
-
-	if owner == "" || repo == "" {
-		writeError(w, http.StatusBadRequest, "Owner and repo are required")
+	fullName := r.URL.Query().Get("repo")
+	if fullName == "" {
+		writeError(w, http.StatusBadRequest, "repo query parameter is required")
+		return
+	}
+	owner, repo, err := gitops.ParseRepoFullName(fullName)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid repository name")
 		return
 	}
 
@@ -2192,6 +2196,9 @@ func randomSuffix() string {
 // namespace was already declared by a previous release, and rebuilds the
 // kustomization.yaml to match.
 func stripDuplicateNamespace(manifests map[string][]byte) {
+	if _, ok := manifests["namespace.yaml"]; !ok {
+		return
+	}
 	delete(manifests, "namespace.yaml")
 	var resources []string
 	for name := range manifests {

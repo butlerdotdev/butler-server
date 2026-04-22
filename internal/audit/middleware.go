@@ -49,11 +49,11 @@ func Middleware(emitter *Emitter) func(http.Handler) http.Handler {
 			}
 
 			// Capture request body and restore for downstream handlers.
-			// Read the full body so downstream gets everything, but only
-			// log a truncated summary for audit purposes.
+			// Cap at 10 MB to prevent OOM from oversized payloads.
 			var bodySummary string
 			if r.Body != nil && method != http.MethodDelete {
-				bodyBytes, _ := io.ReadAll(r.Body)
+				const maxBodyRead = 10 << 20 // 10 MB
+				bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, maxBodyRead))
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				summary := bodyBytes
 				if len(summary) > 2048 {

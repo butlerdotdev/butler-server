@@ -331,7 +331,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Get("/config", gitopsHandler.GetConfig)
 				r.Post("/config", gitopsHandler.SaveConfig)
 				r.Get("/repos", gitopsHandler.ListRepositories)
-				r.Get("/repos/{owner}/{repo}/branches", gitopsHandler.ListBranches)
+				r.Get("/repos/branches", gitopsHandler.ListBranches)
 				r.Post("/preview", gitopsHandler.PreviewManifest)
 			})
 
