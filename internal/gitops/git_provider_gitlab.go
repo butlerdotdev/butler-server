@@ -209,14 +209,22 @@ func (p *GitLabProvider) ListBranches(ctx context.Context, owner, repo string) (
 
 func (p *GitLabProvider) GetBranchSHA(ctx context.Context, owner, repo, branch string) (string, error) {
 	pid := owner + "/" + repo
-	b, resp, err := p.client.Branches.GetBranch(pid, branch, gitlab.WithContext(ctx))
+
+	// Use the Commits API with ref_name as a query parameter instead of
+	// Branches.GetBranch which embeds the branch in the URL path. Self-hosted
+	// GitLab instances behind reverse proxies (nginx) often decode %2F in
+	// path segments, breaking branch names that contain slashes.
+	commits, resp, err := p.client.Commits.ListCommits(pid, &gitlab.ListCommitsOptions{
+		RefName:     gitlab.Ptr(branch),
+		ListOptions: gitlab.ListOptions{PerPage: 1},
+	}, gitlab.WithContext(ctx))
 	if err != nil {
 		return "", fmt.Errorf("GetBranchSHA(project=%q, branch=%q): %w", pid, branch, p.wrapError(err, resp))
 	}
-	if b.Commit == nil {
-		return "", fmt.Errorf("branch %q has no commit", branch)
+	if len(commits) == 0 {
+		return "", fmt.Errorf("branch %q has no commits", branch)
 	}
-	return b.Commit.ID, nil
+	return commits[0].ID, nil
 }
 
 func (p *GitLabProvider) GetFileContent(ctx context.Context, owner, repo, path, branch string) ([]byte, error) {

@@ -161,21 +161,40 @@ func TestGitLabProvider_ListRepositories(t *testing.T) {
 
 func TestGitLabProvider_GetBranchSHA(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v4/projects/mygroup%2Fmyrepo/repository/branches/main", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"name": "main",
-			"commit": map[string]interface{}{
-				"id": "abc123def456",
-			},
+	// GetBranchSHA uses the Commits API (query param ref_name) to avoid
+	// path encoding issues with branch names containing slashes.
+	mux.HandleFunc("/api/v4/projects/mygroup%2Fmyrepo/repository/commits", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		refName := r.URL.Query().Get("ref_name")
+		if refName == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"id": "abc123def456", "title": "Latest commit"},
 		})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
 	p, _ := NewGitLabProvider(GitProviderConfig{Token: "test", URL: srv.URL})
+
+	// Simple branch name
 	sha, err := p.GetBranchSHA(t.Context(), "mygroup", "myrepo", "main")
 	if err != nil {
-		t.Fatalf("GetBranchSHA: %v", err)
+		t.Fatalf("GetBranchSHA(main): %v", err)
+	}
+	if sha != "abc123def456" {
+		t.Errorf("SHA = %q, want %q", sha, "abc123def456")
+	}
+
+	// Branch name with slash (the original failure case)
+	sha, err = p.GetBranchSHA(t.Context(), "mygroup", "myrepo", "feat/single-init")
+	if err != nil {
+		t.Fatalf("GetBranchSHA(feat/single-init): %v", err)
 	}
 	if sha != "abc123def456" {
 		t.Errorf("SHA = %q, want %q", sha, "abc123def456")
