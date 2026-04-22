@@ -218,11 +218,12 @@ func (p *GitLabProvider) GetBranchSHA(ctx context.Context, owner, repo, branch s
 		RefName:     gitlab.Ptr(branch),
 		ListOptions: gitlab.ListOptions{PerPage: 1},
 	}, gitlab.WithContext(ctx))
+
 	if err != nil {
 		return "", fmt.Errorf("GetBranchSHA(project=%q, branch=%q): %w", pid, branch, p.wrapError(err, resp))
 	}
 	if len(commits) == 0 {
-		return "", fmt.Errorf("branch %q has no commits", branch)
+		return "", fmt.Errorf("GetBranchSHA(project=%q, branch=%q): branch not found or has no commits", pid, branch)
 	}
 	return commits[0].ID, nil
 }
