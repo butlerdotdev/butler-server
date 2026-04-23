@@ -17,11 +17,13 @@ limitations under the License.
 package websocket
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +33,13 @@ import (
 
 func newTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// captureLogger returns a text-handler logger writing into buf so tests can
+// assert that specific log keys (user, reason, team) appear in rejection
+// records. ADR-013 commits to logging user identity on every rejection.
+func captureLogger(buf *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
 func TestRequireSession_NilResolver_401(t *testing.T) {
@@ -157,5 +166,62 @@ func TestRequireTeamAccess_EmptyTeams_403(t *testing.T) {
 	}
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
+	}
+}
+
+// F1 guard: ADR-013 commits to logging user identity on every rejection.
+// Anonymous rejections log "<unauthenticated>"; authenticated-but-denied
+// rejections log the session email. These tests fail if a future change
+// drops either log key.
+
+func TestRequireSession_NilResolver_LogsAnonymous(t *testing.T) {
+	var buf bytes.Buffer
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ws/clusters", nil)
+	requireSession(rec, req, nil, captureLogger(&buf))
+	if !strings.Contains(buf.String(), `user=<unauthenticated>`) {
+		t.Errorf("expected anonymous user marker in log, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `reason=unauthorized`) {
+		t.Errorf("expected reason=unauthorized in log, got: %s", buf.String())
+	}
+}
+
+func TestRequireSession_ResolverError_LogsAnonymous(t *testing.T) {
+	var buf bytes.Buffer
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/management", nil)
+	resolver := func(_ *http.Request) (*SessionInfo, error) { return nil, errors.New("bad token") }
+	requireSession(rec, req, resolver, captureLogger(&buf))
+	if !strings.Contains(buf.String(), `user=<unauthenticated>`) {
+		t.Errorf("expected anonymous user marker in log, got: %s", buf.String())
+	}
+}
+
+func TestRequirePlatformAdmin_NonAdmin_LogsEmail(t *testing.T) {
+	var buf bytes.Buffer
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/management", nil)
+	session := &SessionInfo{Email: "bob@example.com", IsPlatformAdmin: false}
+	requirePlatformAdmin(rec, req, session, captureLogger(&buf))
+	if !strings.Contains(buf.String(), `user=bob@example.com`) {
+		t.Errorf("expected user=bob@example.com in log, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `reason=forbidden`) {
+		t.Errorf("expected reason=forbidden in log, got: %s", buf.String())
+	}
+}
+
+func TestRequireTeamAccess_NonMember_LogsEmailAndTeam(t *testing.T) {
+	var buf bytes.Buffer
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/tenant/acme/c1", nil)
+	session := &SessionInfo{Email: "carol@example.com", Teams: []TeamInfo{{Name: "other"}}}
+	requireTeamAccess(rec, req, session, "acme", captureLogger(&buf))
+	if !strings.Contains(buf.String(), `user=carol@example.com`) {
+		t.Errorf("expected user=carol@example.com in log, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), `team=acme`) {
+		t.Errorf("expected team=acme in log, got: %s", buf.String())
 	}
 }

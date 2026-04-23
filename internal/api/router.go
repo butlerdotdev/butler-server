@@ -150,6 +150,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			return nil, err
 		}
 		info := &websocket.SessionInfo{
+			Email:           session.Email,
 			IsPlatformAdmin: session.IsPlatformAdmin,
 		}
 		for _, tm := range session.Teams {

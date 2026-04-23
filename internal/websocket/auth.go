@@ -21,22 +21,34 @@ import (
 	"net/http"
 )
 
+// anonymousUser is the user log-key value for rejections where no session
+// has been resolved yet (401 paths). Distinguishes anonymous probes from
+// authenticated-but-unauthorized attempts in incident-response triage.
+const anonymousUser = "<unauthenticated>"
+
 // requireSession extracts and validates the session from the WebSocket
 // upgrade request using the configured sessionResolver. On failure it
 // writes HTTP 401 to w and returns nil; the caller must return without
 // upgrading. See ADR-013.
 func requireSession(w http.ResponseWriter, r *http.Request, resolver SessionResolverFunc, log *slog.Logger) *SessionInfo {
 	if resolver == nil {
-		log.Warn("WebSocket upgrade rejected: sessionResolver not configured", "path", r.URL.Path, "remote", r.RemoteAddr)
+		log.Warn("WebSocket upgrade rejected",
+			"path", r.URL.Path,
+			"remote", r.RemoteAddr,
+			"reason", "unauthorized",
+			"user", anonymousUser,
+			"detail", "sessionResolver not configured",
+		)
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return nil
 	}
 	session, err := resolver(r)
 	if err != nil || session == nil {
-		log.Warn("WebSocket upgrade rejected: invalid session",
+		log.Warn("WebSocket upgrade rejected",
 			"path", r.URL.Path,
 			"remote", r.RemoteAddr,
 			"reason", "unauthorized",
+			"user", anonymousUser,
 			"error", err,
 		)
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -52,10 +64,12 @@ func requirePlatformAdmin(w http.ResponseWriter, r *http.Request, session *Sessi
 	if session.IsPlatformAdmin {
 		return true
 	}
-	log.Warn("WebSocket upgrade rejected: not a platform admin",
+	log.Warn("WebSocket upgrade rejected",
 		"path", r.URL.Path,
 		"remote", r.RemoteAddr,
 		"reason", "forbidden",
+		"user", session.Email,
+		"detail", "platform admin required",
 	)
 	http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 	return false
@@ -76,11 +90,13 @@ func requireTeamAccess(w http.ResponseWriter, r *http.Request, session *SessionI
 			return true
 		}
 	}
-	log.Warn("WebSocket upgrade rejected: team access required",
+	log.Warn("WebSocket upgrade rejected",
 		"path", r.URL.Path,
 		"remote", r.RemoteAddr,
 		"reason", "forbidden",
+		"user", session.Email,
 		"team", team,
+		"detail", "team access required",
 	)
 	http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 	return false

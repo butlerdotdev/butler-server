@@ -93,7 +93,10 @@ type ResourceRef struct {
 }
 
 // SessionInfo contains the user identity resolved from a WebSocket connection.
+// Email is the canonical user identifier surfaced in rejection audit logs
+// (ADR-013); empty for anonymous / unresolved paths.
 type SessionInfo struct {
+	Email           string
 	IsPlatformAdmin bool
 	Teams           []TeamInfo
 }

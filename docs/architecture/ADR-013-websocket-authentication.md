@@ -87,16 +87,12 @@ The `user` field distinguishes anonymous probes from authenticated-but-unauthori
 
 ### Testing
 
-Unit tests in `internal/websocket/hub_test.go` cover:
+Coverage is split across two layers:
 
-- No cookie → 401 without upgrade side effects.
-- Expired/invalid JWT → 401.
-- Valid session, non-admin, management endpoint → 403.
-- Valid session, non-team-member, tenant endpoint → 403.
-- Valid session, platform admin, management endpoint → upgrade succeeds.
-- Valid session, team member, tenant endpoint for their team → upgrade succeeds.
+- **Helper unit tests** in `internal/websocket/auth_test.go` exercise each primitive (`requireSession`, `requirePlatformAdmin`, `requireTeamAccess`) against the rejection matrix: nil resolver → 401, resolver error → 401, nil session → 401, non-admin on management → 403, non-team-member on tenant → 403, platform-admin bypass, valid team membership. Separate cases pin the structured log output (user identity, reason, team) so a future change that drops an audit-log key fails at test time.
+- **Handler entrypoint behavior** (session gate runs before `upgrader.Upgrade()` on `HandleTerminal` / `HandleManagementTerminal` / `HandleClusterWatch`) is covered by integration harness: butler-server built from the feature branch, run locally, curl-based WS upgrade probes against each endpoint with and without session material. This layer verifies the composition of helpers in the real router chain. Documented in the release's Phase 4 harness record.
 
-Testing framework mirrors the existing `internal/auth/` test style (httptest server + table-driven cases).
+The helper-vs-handler split is intentional: helpers are reusable primitives; handlers compose them. Unit-testing the composition at the handler level would require heavyweight httptest scaffolding of the full router without adding coverage the integration harness doesn't already provide.
 
 ## Consequences
 
