@@ -202,17 +202,19 @@ func (c *Client) GetManagementKubeconfig() ([]byte, error) {
 			return data, nil
 		}
 	}
-	return synthesizeInClusterKubeconfig()
-}
-
-// synthesizeInClusterKubeconfig builds kubeconfig bytes from the in-cluster
-// rest.Config. The output is a minimal single-context kubeconfig suitable for
-// tools like `flux bootstrap` that expect a kubeconfig file path.
-func synthesizeInClusterKubeconfig() ([]byte, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, fmt.Errorf("file kubeconfig and in-cluster config both unavailable: %w", err)
 	}
+	return kubeconfigFromRESTConfig(cfg)
+}
+
+// kubeconfigFromRESTConfig builds minimal single-context kubeconfig bytes
+// from a rest.Config. Used by GetManagementKubeconfig's in-cluster fallback
+// so tools like `flux bootstrap` that expect a kubeconfig file path can
+// work from the pod's mounted ServiceAccount identity. Extracted from the
+// rest.InClusterConfig caller so tests can inject a synthetic config.
+func kubeconfigFromRESTConfig(cfg *rest.Config) ([]byte, error) {
 	kc := clientcmdapi.Config{
 		APIVersion:     "v1",
 		Kind:           "Config",
