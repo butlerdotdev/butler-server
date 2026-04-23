@@ -43,6 +43,3 @@ dist/
 *.local
 .env
 .env.*
-
-# Local dev reference (not committed per butler-repo convention)
-/CLAUDE.md
