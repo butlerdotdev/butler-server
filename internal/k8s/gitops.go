@@ -26,6 +26,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 // ButlerConfigGVR is the GroupVersionResource for ButlerConfig.
@@ -183,20 +186,56 @@ func (c *Client) GetTenantKubeconfigAsString(ctx context.Context, namespace, nam
 }
 
 // GetManagementKubeconfig returns the kubeconfig for the management cluster.
+// Fallback chain: KUBECONFIG env, ~/.kube/config, in-cluster config synthesized
+// into kubeconfig bytes. The in-cluster synthesis path is the production case:
+// when butler-server runs as a pod in butler-system, no kubeconfig file exists
+// but the pod's ServiceAccount token is mounted and is what flux bootstrap needs.
 func (c *Client) GetManagementKubeconfig() ([]byte, error) {
 	kubeconfigPath := os.Getenv("KUBECONFIG")
 	if kubeconfigPath == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get home directory: %w", err)
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			kubeconfigPath = homeDir + "/.kube/config"
 		}
-		kubeconfigPath = homeDir + "/.kube/config"
 	}
-
-	data, err := os.ReadFile(kubeconfigPath)
+	if kubeconfigPath != "" {
+		if data, err := os.ReadFile(kubeconfigPath); err == nil {
+			return data, nil
+		}
+	}
+	cfg, err := rest.InClusterConfig()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read kubeconfig from %s: %w", kubeconfigPath, err)
+		return nil, fmt.Errorf("file kubeconfig and in-cluster config both unavailable: %w", err)
 	}
+	return kubeconfigFromRESTConfig(cfg)
+}
 
-	return data, nil
+// kubeconfigFromRESTConfig builds minimal single-context kubeconfig bytes
+// from a rest.Config. Used by GetManagementKubeconfig's in-cluster fallback
+// so tools like `flux bootstrap` that expect a kubeconfig file path can
+// work from the pod's mounted ServiceAccount identity. Extracted from the
+// rest.InClusterConfig caller so tests can inject a synthetic config.
+func kubeconfigFromRESTConfig(cfg *rest.Config) ([]byte, error) {
+	kc := clientcmdapi.Config{
+		APIVersion:     "v1",
+		Kind:           "Config",
+		CurrentContext: "in-cluster",
+		Clusters: map[string]*clientcmdapi.Cluster{
+			"in-cluster": {
+				Server:                   cfg.Host,
+				CertificateAuthorityData: cfg.CAData,
+			},
+		},
+		Contexts: map[string]*clientcmdapi.Context{
+			"in-cluster": {
+				Cluster:  "in-cluster",
+				AuthInfo: "in-cluster",
+			},
+		},
+		AuthInfos: map[string]*clientcmdapi.AuthInfo{
+			"in-cluster": {
+				Token: cfg.BearerToken,
+			},
+		},
+	}
+	return clientcmd.Write(kc)
 }

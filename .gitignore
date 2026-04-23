@@ -8,6 +8,10 @@ bin/
 *.so
 *.dylib
 
+# Local build outputs (go build -o, default binary name)
+/server
+/butler-server
+
 # Test binary
 *.test
 

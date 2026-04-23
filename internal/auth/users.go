@@ -621,6 +621,10 @@ func (s *UserService) AuthenticateInternal(ctx context.Context, identifier, pass
 		return nil, ErrInvalidCredentials
 	}
 
+	// bcrypt.CompareHashAndPassword is constant-time by construction: the
+	// cost is dominated by the fixed-cost key derivation, and the final
+	// byte compare uses subtle.ConstantTimeCompare internally. F-SRV-002
+	// is verified mitigated here; do not replace with a string compare.
 	if err := bcrypt.CompareHashAndPassword(storedHash, []byte(password)); err != nil {
 		// TODO: Increment failed login counter
 		return nil, ErrInvalidCredentials
