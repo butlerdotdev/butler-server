@@ -386,23 +386,23 @@ func (h *Hub) clusterPhaseNotification(obj *unstructured.Unstructured, oldPhase,
 }
 
 // HandleClusterWatch handles WebSocket connections for cluster updates.
+// Gates the upgrade on a valid session (ADR-013). Unauthenticated upgrades
+// are rejected with HTTP 401 before any broadcast starts.
 func (h *Hub) HandleClusterWatch(w http.ResponseWriter, r *http.Request) {
+	session := requireSession(w, r, h.sessionResolver, h.log)
+	if session == nil {
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.log.Error("Failed to upgrade WebSocket connection", "error", err)
 		return
 	}
 
-	// Extract team memberships for per-client notification filtering
 	var teams []string
-	var isPlatformAdmin bool
-	if h.sessionResolver != nil {
-		if session, err := h.sessionResolver(r); err == nil && session != nil {
-			isPlatformAdmin = session.IsPlatformAdmin
-			for _, tm := range session.Teams {
-				teams = append(teams, tm.Name)
-			}
-		}
+	for _, tm := range session.Teams {
+		teams = append(teams, tm.Name)
 	}
 
 	client := &Client{
@@ -410,7 +410,7 @@ func (h *Hub) HandleClusterWatch(w http.ResponseWriter, r *http.Request) {
 		conn:            conn,
 		send:            make(chan Message, 256),
 		teams:           teams,
-		isPlatformAdmin: isPlatformAdmin,
+		isPlatformAdmin: session.IsPlatformAdmin,
 	}
 
 	h.register <- client
@@ -487,7 +487,9 @@ func (c *Client) readPump() {
 	}
 }
 
-// HandleTerminal handles WebSocket connections for terminal sessions.
+// HandleTerminal handles WebSocket connections for terminal sessions into
+// tenant clusters. Gates the upgrade on a valid session and team access to
+// the cluster's namespace (ADR-013). Platform admins bypass the team check.
 func (h *Hub) HandleTerminal(w http.ResponseWriter, r *http.Request) {
 	termType := chi.URLParam(r, "type")
 	namespace := chi.URLParam(r, "namespace")
@@ -495,13 +497,21 @@ func (h *Hub) HandleTerminal(w http.ResponseWriter, r *http.Request) {
 	pod := chi.URLParam(r, "pod")
 	container := chi.URLParam(r, "container")
 
+	userSession := requireSession(w, r, h.sessionResolver, h.log)
+	if userSession == nil {
+		return
+	}
+	if !requireTeamAccess(w, r, userSession, namespace, h.log) {
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.log.Error("Failed to upgrade terminal WebSocket", "error", err)
 		return
 	}
 
-	session := NewTerminalSession(h.k8sClient, h.log, TerminalConfig{
+	termSession := NewTerminalSession(h.k8sClient, h.log, TerminalConfig{
 		Type:      termType,
 		Namespace: namespace,
 		Cluster:   cluster,
@@ -509,11 +519,21 @@ func (h *Hub) HandleTerminal(w http.ResponseWriter, r *http.Request) {
 		Container: container,
 	})
 
-	session.Run(conn)
+	termSession.Run(conn)
 }
 
-// HandleManagementTerminal handles WebSocket connections for management cluster terminal.
+// HandleManagementTerminal handles WebSocket connections for management
+// cluster terminal. Gates the upgrade on platform-admin status (ADR-013).
+// Non-admins are rejected with HTTP 403 before upgrade.
 func (h *Hub) HandleManagementTerminal(w http.ResponseWriter, r *http.Request) {
+	userSession := requireSession(w, r, h.sessionResolver, h.log)
+	if userSession == nil {
+		return
+	}
+	if !requirePlatformAdmin(w, r, userSession, h.log) {
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		h.log.Error("Failed to upgrade management terminal WebSocket", "error", err)
@@ -522,11 +542,11 @@ func (h *Hub) HandleManagementTerminal(w http.ResponseWriter, r *http.Request) {
 
 	h.log.Info("Starting management terminal session")
 
-	session := NewTerminalSession(h.k8sClient, h.log, TerminalConfig{
+	termSession := NewTerminalSession(h.k8sClient, h.log, TerminalConfig{
 		Type:      "management",
 		Namespace: "",
 		Cluster:   "management",
 	})
 
-	session.Run(conn)
+	termSession.Run(conn)
 }

@@ -20,6 +20,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/butlerdotdev/butler-server/internal/api/handlers"
@@ -127,13 +128,24 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	auditEmitter := audit.NewEmitter(10000, "", cfg.Logger.With("component", "audit"))
 	auditEmitter.SetHub(wsHub)
 
-	// Wire session resolver for per-client notification filtering
+	// Wire session resolver for WebSocket upgrade auth (ADR-013) and
+	// per-client notification filtering. Cookie first, bearer header
+	// fallback so CLI/API clients can authenticate the same way
+	// browser clients do.
 	wsHub.SetSessionResolver(func(r *http.Request) (*websocket.SessionInfo, error) {
-		cookie, err := r.Cookie("butler_session")
-		if err != nil {
-			return nil, err
+		var token string
+		if cookie, err := r.Cookie("butler_session"); err == nil {
+			token = cookie.Value
 		}
-		session, err := sessionService.ValidateSession(cookie.Value)
+		if token == "" {
+			if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+				token = strings.TrimPrefix(h, "Bearer ")
+			}
+		}
+		if token == "" {
+			return nil, http.ErrNoCookie
+		}
+		session, err := sessionService.ValidateSession(token)
 		if err != nil {
 			return nil, err
 		}
