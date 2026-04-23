@@ -215,6 +215,19 @@ func (c *Client) GetManagementKubeconfig() ([]byte, error) {
 // work from the pod's mounted ServiceAccount identity. Extracted from the
 // rest.InClusterConfig caller so tests can inject a synthetic config.
 func kubeconfigFromRESTConfig(cfg *rest.Config) ([]byte, error) {
+	// rest.InClusterConfig() returns a *rest.Config where TLSClientConfig.CAFile
+	// points at /var/run/secrets/kubernetes.io/serviceaccount/ca.crt and CAData
+	// is empty — the file's bytes are read lazily by the HTTP transport. Clients
+	// that parse this kubeconfig build their own transport and need the CA
+	// inline, so the synthesis must promote CAFile to CAData bytes here.
+	caData := cfg.CAData
+	if len(caData) == 0 && cfg.CAFile != "" {
+		data, err := os.ReadFile(cfg.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read CA file %s: %w", cfg.CAFile, err)
+		}
+		caData = data
+	}
 	kc := clientcmdapi.Config{
 		APIVersion:     "v1",
 		Kind:           "Config",
@@ -222,7 +235,7 @@ func kubeconfigFromRESTConfig(cfg *rest.Config) ([]byte, error) {
 		Clusters: map[string]*clientcmdapi.Cluster{
 			"in-cluster": {
 				Server:                   cfg.Host,
-				CertificateAuthorityData: cfg.CAData,
+				CertificateAuthorityData: caData,
 			},
 		},
 		Contexts: map[string]*clientcmdapi.Context{
