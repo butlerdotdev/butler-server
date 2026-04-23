@@ -17,6 +17,8 @@ limitations under the License.
 package k8s
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -72,6 +74,66 @@ func TestKubeconfigFromRESTConfig_RoundTrip(t *testing.T) {
 	}
 	if authInfo.Token != cfg.BearerToken {
 		t.Errorf("token did not round-trip")
+	}
+}
+
+func TestKubeconfigFromRESTConfig_LoadsCAFromFile(t *testing.T) {
+	// rest.InClusterConfig() returns CAFile set + CAData empty. The synthesis
+	// must promote the file bytes into CertificateAuthorityData so downstream
+	// consumers that build their own transport can verify the apiserver cert.
+	// Regression guard for the v0.7.1 hotfix.
+	caBytes := []byte("-----BEGIN CERTIFICATE-----\nMIIBfiletest\n-----END CERTIFICATE-----\n")
+	tmpDir := t.TempDir()
+	caPath := filepath.Join(tmpDir, "ca.crt")
+	if err := os.WriteFile(caPath, caBytes, 0o600); err != nil {
+		t.Fatalf("write test CA file: %v", err)
+	}
+
+	cfg := &rest.Config{
+		Host:        "https://10.96.0.1:443",
+		BearerToken: "sa-token",
+		TLSClientConfig: rest.TLSClientConfig{
+			CAFile: caPath,
+		},
+	}
+
+	data, err := kubeconfigFromRESTConfig(cfg)
+	if err != nil {
+		t.Fatalf("kubeconfigFromRESTConfig: %v", err)
+	}
+
+	apiCfg, err := clientcmd.Load(data)
+	if err != nil {
+		t.Fatalf("emitted bytes do not parse as kubeconfig: %v", err)
+	}
+	cluster := apiCfg.Clusters["in-cluster"]
+	if cluster == nil {
+		t.Fatal("in-cluster cluster missing")
+	}
+	if string(cluster.CertificateAuthorityData) != string(caBytes) {
+		t.Errorf("CertificateAuthorityData = %q, want the CAFile contents %q", cluster.CertificateAuthorityData, caBytes)
+	}
+	if cluster.CertificateAuthority != "" {
+		t.Error("expected CAData only, not a file path reference")
+	}
+}
+
+func TestKubeconfigFromRESTConfig_CAFileMissing(t *testing.T) {
+	// If CAFile is set but unreadable, return an error rather than emitting a
+	// kubeconfig with no CA (which silently reproduces the bug we are fixing).
+	cfg := &rest.Config{
+		Host:        "https://10.96.0.1:443",
+		BearerToken: "sa-token",
+		TLSClientConfig: rest.TLSClientConfig{
+			CAFile: "/tmp/definitely-does-not-exist/ca.crt",
+		},
+	}
+	data, err := kubeconfigFromRESTConfig(cfg)
+	if err == nil {
+		t.Fatalf("expected error when CAFile is missing, got data: %q", data)
+	}
+	if !strings.Contains(err.Error(), "read CA file") {
+		t.Errorf("error = %q, want it to mention CA file", err.Error())
 	}
 }
 
