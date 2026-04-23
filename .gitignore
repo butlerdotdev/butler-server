@@ -8,6 +8,10 @@ bin/
 *.so
 *.dylib
 
+# Local build outputs (go build -o, default binary name)
+/server
+/butler-server
+
 # Test binary
 *.test
 
@@ -39,3 +43,6 @@ dist/
 *.local
 .env
 .env.*
+
+# Local dev reference (not committed per butler-repo convention)
+/CLAUDE.md
