@@ -24,10 +24,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 
 	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -83,6 +86,11 @@ func DiscoverHelmReleases(ctx context.Context, kubeconfig []byte, addonDefs []bu
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create clientset: %w", err)
+	}
+
+	dynClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
 	}
 
 	addonLookup := buildAddonLookup(addonDefs)
@@ -142,13 +150,13 @@ func DiscoverHelmReleases(ctx context.Context, kubeconfig []byte, addonDefs []bu
 		}
 	}
 
-	result.GitOpsEngine = detectGitOpsEngine(ctx, clientset)
+	result.GitOpsEngine = detectGitOpsEngine(ctx, clientset, dynClient)
 
 	return result, nil
 }
 
-func detectGitOpsEngine(ctx context.Context, clientset *kubernetes.Clientset) *GitOpsEngineStatus {
-	if fluxStatus := detectFlux(ctx, clientset); fluxStatus != nil {
+func detectGitOpsEngine(ctx context.Context, clientset kubernetes.Interface, dynClient dynamic.Interface) *GitOpsEngineStatus {
+	if fluxStatus := detectFlux(ctx, clientset, dynClient); fluxStatus != nil {
 		return fluxStatus
 	}
 
@@ -159,7 +167,7 @@ func detectGitOpsEngine(ctx context.Context, clientset *kubernetes.Clientset) *G
 	return nil
 }
 
-func detectFlux(ctx context.Context, clientset *kubernetes.Clientset) *GitOpsEngineStatus {
+func detectFlux(ctx context.Context, clientset kubernetes.Interface, dynClient dynamic.Interface) *GitOpsEngineStatus {
 	deployments, err := clientset.AppsV1().Deployments("flux-system").List(ctx, metav1.ListOptions{})
 	if err != nil || len(deployments.Items) == 0 {
 		return nil
@@ -181,20 +189,103 @@ func detectFlux(ctx context.Context, clientset *kubernetes.Clientset) *GitOpsEng
 		}
 	}
 
-	if len(readyComponents) >= 2 {
-		return &GitOpsEngineStatus{
-			Provider:   "flux",
-			Installed:  true,
-			Ready:      len(readyComponents) >= 3,
-			Version:    version,
-			Components: readyComponents,
+	if len(readyComponents) < 2 {
+		return nil
+	}
+
+	status := &GitOpsEngineStatus{
+		Provider:   "flux",
+		Installed:  true,
+		Ready:      len(readyComponents) >= 3,
+		Version:    version,
+		Components: readyComponents,
+	}
+
+	// Populate Repository/Branch/Path from the Flux bootstrap CRs when
+	// readable. Failures here must not regress Flux detection itself:
+	// logged at debug level and the engine status still returns with
+	// Installed=true so the UI shows GitOps is enabled even if the
+	// bootstrap-config lookup partial-fails.
+	enrichFluxFromBootstrapCRs(ctx, dynClient, status)
+
+	return status
+}
+
+// enrichFluxFromBootstrapCRs reads the Flux-created GitRepository and
+// Kustomization in flux-system to populate Repository/Branch/Path on
+// status. `flux bootstrap` names both "flux-system" so the lookup is
+// deterministic; falls back to the first GitRepository in the namespace
+// for out-of-band installs that chose a different name.
+func enrichFluxFromBootstrapCRs(ctx context.Context, dynClient dynamic.Interface, status *GitOpsEngineStatus) {
+	if dynClient == nil {
+		return
+	}
+
+	gitRepoGVR := schema.GroupVersionResource{
+		Group:    "source.toolkit.fluxcd.io",
+		Version:  "v1",
+		Resource: "gitrepositories",
+	}
+	list, err := dynClient.Resource(gitRepoGVR).Namespace("flux-system").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		slog.Debug("flux: list GitRepositories failed", "namespace", "flux-system", "error", err)
+		return
+	}
+	if len(list.Items) == 0 {
+		slog.Debug("flux: no GitRepository in flux-system")
+		return
+	}
+
+	gitRepo := list.Items[0]
+	for i := range list.Items {
+		if list.Items[i].GetName() == "flux-system" {
+			gitRepo = list.Items[i]
+			break
 		}
 	}
 
-	return nil
+	spec, ok := gitRepo.Object["spec"].(map[string]interface{})
+	if !ok {
+		slog.Debug("flux: GitRepository spec missing or malformed", "name", gitRepo.GetName())
+		return
+	}
+	if rawURL, ok := spec["url"].(string); ok && rawURL != "" {
+		if owner, repo, err := ParseRepoURL(rawURL); err == nil {
+			status.Repository = fmt.Sprintf("%s/%s", owner, repo)
+		} else {
+			status.Repository = rawURL
+		}
+	}
+	// Branch is the primary ref; fall back to tag then commit so the UI
+	// surfaces whatever pin is actually driving reconciliation.
+	if ref, ok := spec["ref"].(map[string]interface{}); ok {
+		if b, ok := ref["branch"].(string); ok && b != "" {
+			status.Branch = b
+		} else if t, ok := ref["tag"].(string); ok && t != "" {
+			status.Branch = t
+		} else if c, ok := ref["commit"].(string); ok && c != "" {
+			status.Branch = c
+		}
+	}
+
+	kustomizationGVR := schema.GroupVersionResource{
+		Group:    "kustomize.toolkit.fluxcd.io",
+		Version:  "v1",
+		Resource: "kustomizations",
+	}
+	ks, err := dynClient.Resource(kustomizationGVR).Namespace("flux-system").Get(ctx, "flux-system", metav1.GetOptions{})
+	if err != nil {
+		slog.Debug("flux: get Kustomization/flux-system failed", "error", err)
+		return
+	}
+	if ksSpec, ok := ks.Object["spec"].(map[string]interface{}); ok {
+		if p, ok := ksSpec["path"].(string); ok {
+			status.Path = p
+		}
+	}
 }
 
-func detectArgoCD(ctx context.Context, clientset *kubernetes.Clientset) *GitOpsEngineStatus {
+func detectArgoCD(ctx context.Context, clientset kubernetes.Interface) *GitOpsEngineStatus {
 	argoComponents := []string{
 		"argocd-server",
 		"argocd-repo-server",
