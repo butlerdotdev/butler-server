@@ -218,6 +218,10 @@ type CreateClusterRequest struct {
 	// Workspaces
 	WorkspacesEnabled bool `json:"workspacesEnabled,omitempty"`
 
+	// NTP time servers for Talos worker nodes (optional).
+	// Overrides provider and platform defaults.
+	TimeServers []string `json:"timeServers,omitempty"`
+
 	// Control plane resource overrides (optional)
 	ControlPlaneResources *ControlPlaneResourcesRequest `json:"controlPlaneResources,omitempty"`
 }
@@ -385,6 +389,11 @@ func (h *ClusterHandler) Create(w http.ResponseWriter, r *http.Request) {
 		spec["infrastructureOverride"] = map[string]interface{}{
 			"proxmox": infraOverride,
 		}
+	}
+
+	// Add time servers if provided
+	if len(req.TimeServers) > 0 {
+		spec["timeServers"] = req.TimeServers
 	}
 
 	// Add control plane resources if provided
