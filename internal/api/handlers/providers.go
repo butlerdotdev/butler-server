@@ -1764,3 +1764,251 @@ func (h *ProvidersHandler) listNutanixNetworks(ctx context.Context, endpoint str
 
 	return networks, nil
 }
+
+// ClusterInfo represents a Nutanix Prism Element cluster.
+type ClusterInfo struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+}
+
+// ListClusters returns available Nutanix clusters from Prism Central.
+func (h *ProvidersHandler) ListClusters(w http.ResponseWriter, r *http.Request) {
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+	ctx := r.Context()
+
+	provider, err := h.k8sClient.GetProviderConfig(ctx, namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("provider not found: %v", err))
+		return
+	}
+
+	providerType, _, _ := unstructured.NestedString(provider.Object, "spec", "provider")
+	if providerType != "nutanix" {
+		writeError(w, http.StatusBadRequest, "cluster listing is only supported for Nutanix providers")
+		return
+	}
+
+	credentialsRef, _, _ := unstructured.NestedMap(provider.Object, "spec", "credentialsRef")
+	secretName, _ := credentialsRef["name"].(string)
+	secretNamespace, _ := credentialsRef["namespace"].(string)
+	if secretNamespace == "" {
+		secretNamespace = namespace
+	}
+
+	secret, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get credentials: %v", err))
+		return
+	}
+
+	endpoint, _, _ := unstructured.NestedString(provider.Object, "spec", "nutanix", "endpoint")
+	port, _, _ := unstructured.NestedInt64(provider.Object, "spec", "nutanix", "port")
+	insecure, _, _ := unstructured.NestedBool(provider.Object, "spec", "nutanix", "insecure")
+	username := string(secret.Data["username"])
+	password := string(secret.Data["password"])
+
+	clusters, err := h.listNutanixClusters(ctx, endpoint, int32(port), username, password, insecure)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list clusters: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"clusters": clusters})
+}
+
+func (h *ProvidersHandler) listNutanixClusters(ctx context.Context, endpoint string, port int32, username, password string, insecure bool) ([]ClusterInfo, error) {
+	if port == 0 {
+		port = 9440
+	}
+
+	apiURL := fmt.Sprintf("%s:%d/api/nutanix/v3/clusters/list", endpoint, port)
+
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: insecure,
+			},
+		},
+	}
+
+	reqBody := strings.NewReader(`{"kind":"cluster","length":500}`)
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.SetBasicAuth(username, password)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Entities []struct {
+			Metadata struct {
+				UUID string `json:"uuid"`
+			} `json:"metadata"`
+			Spec struct {
+				Name      string `json:"name"`
+				Resources struct {
+					Config struct {
+						Build struct {
+							Version string `json:"version"`
+						} `json:"build"`
+					} `json:"config"`
+				} `json:"resources"`
+			} `json:"spec"`
+			Status struct {
+				Resources struct {
+					Config struct {
+						ServiceList []string `json:"service_list"`
+					} `json:"config"`
+				} `json:"resources"`
+			} `json:"status"`
+		} `json:"entities"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	clusters := make([]ClusterInfo, 0, len(result.Entities))
+	for _, entity := range result.Entities {
+		// Skip Prism Central itself, only return Prism Element clusters
+		isPrismCentral := false
+		for _, svc := range entity.Status.Resources.Config.ServiceList {
+			if svc == "PRISM_CENTRAL" {
+				isPrismCentral = true
+				break
+			}
+		}
+		if isPrismCentral {
+			continue
+		}
+
+		clusters = append(clusters, ClusterInfo{
+			Name: entity.Spec.Name,
+			ID:   entity.Metadata.UUID,
+		})
+	}
+
+	return clusters, nil
+}
+
+// StorageContainerInfo represents a Nutanix storage container.
+type StorageContainerInfo struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+}
+
+// ListStorageContainers returns available Nutanix storage containers.
+func (h *ProvidersHandler) ListStorageContainers(w http.ResponseWriter, r *http.Request) {
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+	ctx := r.Context()
+
+	provider, err := h.k8sClient.GetProviderConfig(ctx, namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("provider not found: %v", err))
+		return
+	}
+
+	providerType, _, _ := unstructured.NestedString(provider.Object, "spec", "provider")
+	if providerType != "nutanix" {
+		writeError(w, http.StatusBadRequest, "storage container listing is only supported for Nutanix providers")
+		return
+	}
+
+	credentialsRef, _, _ := unstructured.NestedMap(provider.Object, "spec", "credentialsRef")
+	secretName, _ := credentialsRef["name"].(string)
+	secretNamespace, _ := credentialsRef["namespace"].(string)
+	if secretNamespace == "" {
+		secretNamespace = namespace
+	}
+
+	secret, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get credentials: %v", err))
+		return
+	}
+
+	endpoint, _, _ := unstructured.NestedString(provider.Object, "spec", "nutanix", "endpoint")
+	port, _, _ := unstructured.NestedInt64(provider.Object, "spec", "nutanix", "port")
+	insecure, _, _ := unstructured.NestedBool(provider.Object, "spec", "nutanix", "insecure")
+	username := string(secret.Data["username"])
+	password := string(secret.Data["password"])
+
+	containers, err := h.listNutanixStorageContainers(ctx, endpoint, int32(port), username, password, insecure)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list storage containers: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"storageContainers": containers})
+}
+
+func (h *ProvidersHandler) listNutanixStorageContainers(ctx context.Context, endpoint string, port int32, username, password string, insecure bool) ([]StorageContainerInfo, error) {
+	if port == 0 {
+		port = 9440
+	}
+
+	// Storage containers use the v2.0 API (not available in v3)
+	apiURL := fmt.Sprintf("%s:%d/PrismGateway/services/rest/v2.0/storage_containers/", endpoint, port)
+
+	client := &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: insecure,
+			},
+		},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.SetBasicAuth(username, password)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Entities []struct {
+			StorageContainerUUID string `json:"storage_container_uuid"`
+			Name                 string `json:"name"`
+		} `json:"entities"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	containers := make([]StorageContainerInfo, 0, len(result.Entities))
+	for _, entity := range result.Entities {
+		containers = append(containers, StorageContainerInfo{
+			Name: entity.Name,
+			ID:   entity.StorageContainerUUID,
+		})
+	}
+
+	return containers, nil
+}
