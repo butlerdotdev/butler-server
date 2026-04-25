@@ -412,6 +412,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Put("/providers/{namespace}/{name}", providerHandler.Update)
 			r.Delete("/providers/{namespace}/{name}", providerHandler.Delete)
 			r.Post("/providers/{namespace}/{name}/validate", providerHandler.Validate)
+			r.Get("/providers/{namespace}/{name}/ca-info", providerHandler.GetCAInfo)
 
 			// Teams
 			r.Get("/teams", teamHandler.List)
