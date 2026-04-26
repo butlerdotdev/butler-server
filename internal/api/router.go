@@ -406,10 +406,13 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Post("/providers/test", providerHandler.TestConnection)
 			r.Get("/providers/{namespace}/{name}/images", providerHandler.ListImages)
 			r.Get("/providers/{namespace}/{name}/networks", providerHandler.ListNetworks)
+			r.Get("/providers/{namespace}/{name}/clusters", providerHandler.ListClusters)
+			r.Get("/providers/{namespace}/{name}/storage-containers", providerHandler.ListStorageContainers)
 			r.Get("/providers/{namespace}/{name}", providerHandler.Get)
 			r.Put("/providers/{namespace}/{name}", providerHandler.Update)
 			r.Delete("/providers/{namespace}/{name}", providerHandler.Delete)
 			r.Post("/providers/{namespace}/{name}/validate", providerHandler.Validate)
+			r.Get("/providers/{namespace}/{name}/ca-info", providerHandler.GetCAInfo)
 
 			// Teams
 			r.Get("/teams", teamHandler.List)

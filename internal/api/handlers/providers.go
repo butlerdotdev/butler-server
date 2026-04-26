@@ -19,13 +19,16 @@ package handlers
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/butlerdotdev/butler-server/internal/certificates"
 	"github.com/butlerdotdev/butler-server/internal/config"
 	"github.com/butlerdotdev/butler-server/internal/k8s"
 
@@ -71,6 +74,11 @@ type CreateProviderRequest struct {
 	NutanixUsername string `json:"nutanixUsername,omitempty"`
 	NutanixPassword string `json:"nutanixPassword,omitempty"`
 	NutanixInsecure bool   `json:"nutanixInsecure,omitempty"`
+	NutanixCABundle string `json:"nutanixCABundle,omitempty"` // PEM-encoded CA chain
+
+	// RemoveCABundle explicitly clears the CA bundle from the credentials Secret.
+	// An empty NutanixCABundle field means "no change"; this flag means "delete it."
+	RemoveCABundle bool `json:"removeCABundle,omitempty"`
 
 	// Proxmox
 	ProxmoxEndpoint    string `json:"proxmoxEndpoint,omitempty"`
@@ -137,8 +145,10 @@ type CreateProviderRequest struct {
 
 // ValidateResponse represents the validation response.
 type ValidateResponse struct {
-	Valid   bool   `json:"valid"`
-	Message string `json:"message"`
+	Valid    bool        `json:"valid"`
+	Category string     `json:"category,omitempty"` // tls, network, auth, parse
+	Message  string     `json:"message"`
+	Detail   interface{} `json:"detail,omitempty"`
 }
 
 // List returns all provider configs.
@@ -241,6 +251,13 @@ func (h *ProvidersHandler) createProvider(w http.ResponseWriter, r *http.Request
 		secretData = map[string][]byte{
 			"username": []byte(req.NutanixUsername),
 			"password": []byte(req.NutanixPassword),
+		}
+		if req.NutanixCABundle != "" {
+			if _, err := validateCABundle(req.NutanixCABundle); err != nil {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid CA bundle: %v", err))
+				return
+			}
+			secretData["ca.pem"] = []byte(req.NutanixCABundle)
 		}
 
 	case "proxmox":
@@ -627,7 +644,7 @@ func (h *ProvidersHandler) Update(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	case "nutanix":
-		if req.NutanixUsername != "" || req.NutanixPassword != "" {
+		if req.NutanixUsername != "" || req.NutanixPassword != "" || req.NutanixCABundle != "" || req.RemoveCABundle {
 			// Fetch existing secret to preserve unchanged fields
 			existingSecret, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
 			if err != nil {
@@ -640,6 +657,15 @@ func (h *ProvidersHandler) Update(w http.ResponseWriter, r *http.Request) {
 			}
 			if req.NutanixPassword != "" {
 				secretData["password"] = []byte(req.NutanixPassword)
+			}
+			if req.RemoveCABundle {
+				delete(secretData, "ca.pem")
+			} else if req.NutanixCABundle != "" {
+				if _, err := validateCABundle(req.NutanixCABundle); err != nil {
+					writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid CA bundle: %v", err))
+					return
+				}
+				secretData["ca.pem"] = []byte(req.NutanixCABundle)
 			}
 		}
 	case "proxmox":
@@ -1076,7 +1102,8 @@ func (h *ProvidersHandler) Validate(w http.ResponseWriter, r *http.Request) {
 		insecure, _, _ := unstructured.NestedBool(provider.Object, "spec", "nutanix", "insecure")
 		username := string(secret.Data["username"])
 		password := string(secret.Data["password"])
-		result = testNutanixConnection(endpoint, int32(port), username, password, insecure)
+		caPEM := secret.Data["ca.pem"]
+		result = testNutanixConnection(endpoint, int32(port), username, password, insecure, caPEM)
 
 	case "proxmox":
 		endpoint, _, _ := unstructured.NestedString(provider.Object, "spec", "proxmox", "endpoint")
@@ -1118,7 +1145,7 @@ func testProviderConnection(req CreateProviderRequest) ValidateResponse {
 	case "harvester":
 		return testHarvesterConnection(req.HarvesterKubeconfig)
 	case "nutanix":
-		return testNutanixConnection(req.NutanixEndpoint, req.NutanixPort, req.NutanixUsername, req.NutanixPassword, req.NutanixInsecure)
+		return testNutanixConnection(req.NutanixEndpoint, req.NutanixPort, req.NutanixUsername, req.NutanixPassword, req.NutanixInsecure, []byte(req.NutanixCABundle))
 	case "proxmox":
 		return testProxmoxConnection(req.ProxmoxEndpoint, req.ProxmoxUsername, req.ProxmoxPassword, req.ProxmoxTokenId, req.ProxmoxTokenSecret, req.ProxmoxInsecure)
 	case "aws":
@@ -1160,12 +1187,18 @@ func testHarvesterConnection(kubeconfig string) ValidateResponse {
 	}
 }
 
-func testNutanixConnection(endpoint string, port int32, username, password string, insecure bool) ValidateResponse {
+func testNutanixConnection(endpoint string, port int32, username, password string, insecure bool, caPEM []byte) ValidateResponse {
 	if endpoint == "" {
-		return ValidateResponse{Valid: false, Message: "endpoint is required"}
+		return ValidateResponse{Valid: false, Category: "parse", Message: "endpoint is required"}
 	}
 	if username == "" || password == "" {
-		return ValidateResponse{Valid: false, Message: "username and password are required"}
+		return ValidateResponse{Valid: false, Category: "parse", Message: "username and password are required"}
+	}
+
+	if len(caPEM) > 0 {
+		if _, err := validateCABundle(string(caPEM)); err != nil {
+			return ValidateResponse{Valid: false, Category: "parse", Message: fmt.Sprintf("invalid CA bundle: %v", err)}
+		}
 	}
 
 	if port == 0 {
@@ -1173,19 +1206,11 @@ func testNutanixConnection(endpoint string, port int32, username, password strin
 	}
 
 	apiURL := fmt.Sprintf("%s:%d/api/nutanix/v3/clusters/list", endpoint, port)
+	client := nutanixHTTPClient(insecure, caPEM, 10*time.Second)
 
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: insecure,
-			},
-		},
-	}
-
-	req, err := http.NewRequest("POST", apiURL, nil)
+	req, err := http.NewRequest("POST", apiURL, strings.NewReader(`{"kind":"cluster"}`))
 	if err != nil {
-		return ValidateResponse{Valid: false, Message: fmt.Sprintf("failed to create request: %v", err)}
+		return ValidateResponse{Valid: false, Category: "network", Message: fmt.Sprintf("failed to create request: %v", err)}
 	}
 
 	req.SetBasicAuth(username, password)
@@ -1193,15 +1218,19 @@ func testNutanixConnection(endpoint string, port int32, username, password strin
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return ValidateResponse{Valid: false, Message: fmt.Sprintf("connection failed: %v", err)}
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "certificate") || strings.Contains(errMsg, "x509") || strings.Contains(errMsg, "tls") {
+			return ValidateResponse{Valid: false, Category: "tls", Message: fmt.Sprintf("TLS verification failed: %v", err)}
+		}
+		return ValidateResponse{Valid: false, Category: "network", Message: fmt.Sprintf("connection failed: %v", err)}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 401 {
-		return ValidateResponse{Valid: false, Message: "authentication failed: invalid credentials"}
+		return ValidateResponse{Valid: false, Category: "auth", Message: "authentication failed: invalid credentials"}
 	}
 	if resp.StatusCode >= 400 {
-		return ValidateResponse{Valid: false, Message: fmt.Sprintf("API error: HTTP %d", resp.StatusCode)}
+		return ValidateResponse{Valid: false, Category: "auth", Message: fmt.Sprintf("API error: HTTP %d", resp.StatusCode)}
 	}
 
 	return ValidateResponse{
@@ -1418,7 +1447,8 @@ func (h *ProvidersHandler) ListImages(w http.ResponseWriter, r *http.Request) {
 		insecure, _, _ := unstructured.NestedBool(provider.Object, "spec", "nutanix", "insecure")
 		username := string(secret.Data["username"])
 		password := string(secret.Data["password"])
-		images, err = h.listNutanixImages(ctx, endpoint, int32(port), username, password, insecure)
+		caPEM := secret.Data["ca.pem"]
+		images, err = h.listNutanixImages(ctx, endpoint, int32(port), username, password, insecure, caPEM)
 	default:
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("image listing not supported for provider: %s", providerType))
 		return
@@ -1488,21 +1518,13 @@ func (h *ProvidersHandler) listHarvesterImages(ctx context.Context, kubeconfig [
 }
 
 // listNutanixImages fetches images from Nutanix Prism Central.
-func (h *ProvidersHandler) listNutanixImages(ctx context.Context, endpoint string, port int32, username, password string, insecure bool) ([]ImageInfo, error) {
+func (h *ProvidersHandler) listNutanixImages(ctx context.Context, endpoint string, port int32, username, password string, insecure bool, caPEM []byte) ([]ImageInfo, error) {
 	if port == 0 {
 		port = 9440
 	}
 
 	apiURL := fmt.Sprintf("%s:%d/api/nutanix/v3/images/list", endpoint, port)
-
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: insecure,
-			},
-		},
-	}
+	client := nutanixHTTPClient(insecure, caPEM, 15*time.Second)
 
 	reqBody := strings.NewReader(`{"kind":"image","length":500}`)
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, reqBody)
@@ -1623,7 +1645,8 @@ func (h *ProvidersHandler) ListNetworks(w http.ResponseWriter, r *http.Request) 
 		insecure, _, _ := unstructured.NestedBool(provider.Object, "spec", "nutanix", "insecure")
 		username := string(secret.Data["username"])
 		password := string(secret.Data["password"])
-		networks, err = h.listNutanixNetworks(ctx, endpoint, int32(port), username, password, insecure)
+		caPEM := secret.Data["ca.pem"]
+		networks, err = h.listNutanixNetworks(ctx, endpoint, int32(port), username, password, insecure, caPEM)
 	default:
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("network listing not supported for provider: %s", providerType))
 		return
@@ -1699,21 +1722,13 @@ func (h *ProvidersHandler) listHarvesterNetworks(ctx context.Context, kubeconfig
 }
 
 // listNutanixNetworks fetches subnets from Nutanix Prism Central.
-func (h *ProvidersHandler) listNutanixNetworks(ctx context.Context, endpoint string, port int32, username, password string, insecure bool) ([]NetworkInfo, error) {
+func (h *ProvidersHandler) listNutanixNetworks(ctx context.Context, endpoint string, port int32, username, password string, insecure bool, caPEM []byte) ([]NetworkInfo, error) {
 	if port == 0 {
 		port = 9440
 	}
 
 	apiURL := fmt.Sprintf("%s:%d/api/nutanix/v3/subnets/list", endpoint, port)
-
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: insecure,
-			},
-		},
-	}
+	client := nutanixHTTPClient(insecure, caPEM, 15*time.Second)
 
 	reqBody := strings.NewReader(`{"kind":"subnet","length":500}`)
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, reqBody)
@@ -1763,4 +1778,388 @@ func (h *ProvidersHandler) listNutanixNetworks(ctx context.Context, endpoint str
 	}
 
 	return networks, nil
+}
+
+// nutanixHTTPClient builds an HTTP client for Nutanix Prism Central API calls.
+// When caPEM is non-empty, the client trusts the provided CA chain instead of
+// relying on InsecureSkipVerify or the system trust store.
+func nutanixHTTPClient(insecure bool, caPEM []byte, timeout time.Duration) *http.Client {
+	tlsConfig := &tls.Config{}
+
+	if insecure {
+		tlsConfig.InsecureSkipVerify = true
+	} else if len(caPEM) > 0 {
+		pool := x509.NewCertPool()
+		if pool.AppendCertsFromPEM(caPEM) {
+			tlsConfig.RootCAs = pool
+		}
+	}
+
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
+		},
+	}
+}
+
+// validateCABundle checks that the input is valid PEM containing at least one
+// X.509 certificate and returns parsed metadata for each cert in the chain.
+func validateCABundle(pemData string) ([]CABundleCertInfo, error) {
+	if pemData == "" {
+		return nil, fmt.Errorf("CA bundle is empty")
+	}
+
+	data := []byte(pemData)
+	remaining := data
+	var found bool
+	for {
+		block, rest := pem.Decode(remaining)
+		if block == nil {
+			break
+		}
+		remaining = rest
+		if block.Type == "CERTIFICATE" {
+			found = true
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("no PEM-encoded certificates found in input")
+	}
+
+	certs, err := certificates.ParseAllCertificatesFromPEM(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse certificates: %w", err)
+	}
+
+	result := make([]CABundleCertInfo, 0, len(certs))
+	for _, c := range certs {
+		info := CABundleCertInfo{
+			Subject:      c.Subject,
+			Issuer:       c.Issuer,
+			NotAfter:     c.NotAfter,
+			IsCA:         c.IsCA,
+			HealthStatus: string(c.HealthStatus),
+			SelfSigned:   c.Subject == c.Issuer,
+		}
+		result = append(result, info)
+	}
+	return result, nil
+}
+
+// CABundleCertInfo holds parsed metadata for a single certificate in a CA bundle.
+type CABundleCertInfo struct {
+	Subject      string    `json:"subject"`
+	Issuer       string    `json:"issuer"`
+	NotAfter     time.Time `json:"notAfter"`
+	IsCA         bool      `json:"isCA"`
+	HealthStatus string    `json:"healthStatus"`
+	SelfSigned   bool      `json:"selfSigned"`
+}
+
+// CAInfoResponse is returned by the ca-info endpoint.
+type CAInfoResponse struct {
+	Configured    bool               `json:"configured"`
+	Certificates  []CABundleCertInfo `json:"certificates,omitempty"`
+	Health        string             `json:"health,omitempty"`
+	NearestExpiry *time.Time         `json:"nearestExpiry,omitempty"`
+}
+
+// GetCAInfo returns parsed CA bundle metadata for a provider's credentials Secret.
+func (h *ProvidersHandler) GetCAInfo(w http.ResponseWriter, r *http.Request) {
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+	ctx := r.Context()
+
+	provider, err := h.k8sClient.GetProviderConfig(ctx, namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("provider not found: %v", err))
+		return
+	}
+
+	credentialsRef, _, _ := unstructured.NestedMap(provider.Object, "spec", "credentialsRef")
+	secretName, _ := credentialsRef["name"].(string)
+	secretNamespace, _ := credentialsRef["namespace"].(string)
+	if secretNamespace == "" {
+		secretNamespace = namespace
+	}
+
+	secret, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get credentials: %v", err))
+		return
+	}
+
+	caPEM := secret.Data["ca.pem"]
+	if len(caPEM) == 0 {
+		writeJSON(w, http.StatusOK, CAInfoResponse{Configured: false})
+		return
+	}
+
+	certs, err := validateCABundle(string(caPEM))
+	if err != nil {
+		writeJSON(w, http.StatusOK, CAInfoResponse{
+			Configured: true,
+			Health:     "invalid",
+		})
+		return
+	}
+
+	var nearestExpiry time.Time
+	worstHealth := "Healthy"
+	healthOrder := map[string]int{"Healthy": 0, "Warning": 1, "Critical": 2, "Expired": 3}
+
+	for _, c := range certs {
+		if nearestExpiry.IsZero() || c.NotAfter.Before(nearestExpiry) {
+			nearestExpiry = c.NotAfter
+		}
+		if healthOrder[c.HealthStatus] > healthOrder[worstHealth] {
+			worstHealth = c.HealthStatus
+		}
+	}
+
+	resp := CAInfoResponse{
+		Configured:   true,
+		Certificates: certs,
+		Health:       worstHealth,
+	}
+	if !nearestExpiry.IsZero() {
+		resp.NearestExpiry = &nearestExpiry
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ClusterInfo represents a Nutanix Prism Element cluster.
+type ClusterInfo struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+}
+
+// ListClusters returns available Nutanix clusters from Prism Central.
+func (h *ProvidersHandler) ListClusters(w http.ResponseWriter, r *http.Request) {
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+	ctx := r.Context()
+
+	provider, err := h.k8sClient.GetProviderConfig(ctx, namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("provider not found: %v", err))
+		return
+	}
+
+	providerType, _, _ := unstructured.NestedString(provider.Object, "spec", "provider")
+	if providerType != "nutanix" {
+		writeError(w, http.StatusBadRequest, "cluster listing is only supported for Nutanix providers")
+		return
+	}
+
+	credentialsRef, _, _ := unstructured.NestedMap(provider.Object, "spec", "credentialsRef")
+	secretName, _ := credentialsRef["name"].(string)
+	secretNamespace, _ := credentialsRef["namespace"].(string)
+	if secretNamespace == "" {
+		secretNamespace = namespace
+	}
+
+	secret, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get credentials: %v", err))
+		return
+	}
+
+	endpoint, _, _ := unstructured.NestedString(provider.Object, "spec", "nutanix", "endpoint")
+	port, _, _ := unstructured.NestedInt64(provider.Object, "spec", "nutanix", "port")
+	insecure, _, _ := unstructured.NestedBool(provider.Object, "spec", "nutanix", "insecure")
+	username := string(secret.Data["username"])
+	password := string(secret.Data["password"])
+	caPEM := secret.Data["ca.pem"]
+
+	clusters, err := h.listNutanixClusters(ctx, endpoint, int32(port), username, password, insecure, caPEM)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list clusters: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"clusters": clusters})
+}
+
+func (h *ProvidersHandler) listNutanixClusters(ctx context.Context, endpoint string, port int32, username, password string, insecure bool, caPEM []byte) ([]ClusterInfo, error) {
+	if port == 0 {
+		port = 9440
+	}
+
+	apiURL := fmt.Sprintf("%s:%d/api/nutanix/v3/clusters/list", endpoint, port)
+	client := nutanixHTTPClient(insecure, caPEM, 15*time.Second)
+
+	reqBody := strings.NewReader(`{"kind":"cluster","length":500}`)
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.SetBasicAuth(username, password)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Entities []struct {
+			Metadata struct {
+				UUID string `json:"uuid"`
+			} `json:"metadata"`
+			Spec struct {
+				Name      string `json:"name"`
+				Resources struct {
+					Config struct {
+						Build struct {
+							Version string `json:"version"`
+						} `json:"build"`
+					} `json:"config"`
+				} `json:"resources"`
+			} `json:"spec"`
+			Status struct {
+				Resources struct {
+					Config struct {
+						ServiceList []string `json:"service_list"`
+					} `json:"config"`
+				} `json:"resources"`
+			} `json:"status"`
+		} `json:"entities"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	clusters := make([]ClusterInfo, 0, len(result.Entities))
+	for _, entity := range result.Entities {
+		// Skip Prism Central itself, only return Prism Element clusters
+		isPrismCentral := false
+		for _, svc := range entity.Status.Resources.Config.ServiceList {
+			if svc == "PRISM_CENTRAL" {
+				isPrismCentral = true
+				break
+			}
+		}
+		if isPrismCentral {
+			continue
+		}
+
+		clusters = append(clusters, ClusterInfo{
+			Name: entity.Spec.Name,
+			ID:   entity.Metadata.UUID,
+		})
+	}
+
+	return clusters, nil
+}
+
+// StorageContainerInfo represents a Nutanix storage container.
+type StorageContainerInfo struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+}
+
+// ListStorageContainers returns available Nutanix storage containers.
+func (h *ProvidersHandler) ListStorageContainers(w http.ResponseWriter, r *http.Request) {
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+	ctx := r.Context()
+
+	provider, err := h.k8sClient.GetProviderConfig(ctx, namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("provider not found: %v", err))
+		return
+	}
+
+	providerType, _, _ := unstructured.NestedString(provider.Object, "spec", "provider")
+	if providerType != "nutanix" {
+		writeError(w, http.StatusBadRequest, "storage container listing is only supported for Nutanix providers")
+		return
+	}
+
+	credentialsRef, _, _ := unstructured.NestedMap(provider.Object, "spec", "credentialsRef")
+	secretName, _ := credentialsRef["name"].(string)
+	secretNamespace, _ := credentialsRef["namespace"].(string)
+	if secretNamespace == "" {
+		secretNamespace = namespace
+	}
+
+	secret, err := h.k8sClient.Clientset().CoreV1().Secrets(secretNamespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to get credentials: %v", err))
+		return
+	}
+
+	endpoint, _, _ := unstructured.NestedString(provider.Object, "spec", "nutanix", "endpoint")
+	port, _, _ := unstructured.NestedInt64(provider.Object, "spec", "nutanix", "port")
+	insecure, _, _ := unstructured.NestedBool(provider.Object, "spec", "nutanix", "insecure")
+	username := string(secret.Data["username"])
+	password := string(secret.Data["password"])
+	caPEM := secret.Data["ca.pem"]
+
+	containers, err := h.listNutanixStorageContainers(ctx, endpoint, int32(port), username, password, insecure, caPEM)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list storage containers: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"storageContainers": containers})
+}
+
+func (h *ProvidersHandler) listNutanixStorageContainers(ctx context.Context, endpoint string, port int32, username, password string, insecure bool, caPEM []byte) ([]StorageContainerInfo, error) {
+	if port == 0 {
+		port = 9440
+	}
+
+	// Storage containers use the v2.0 API (not available in v3)
+	apiURL := fmt.Sprintf("%s:%d/PrismGateway/services/rest/v2.0/storage_containers/", endpoint, port)
+	client := nutanixHTTPClient(insecure, caPEM, 15*time.Second)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.SetBasicAuth(username, password)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API error: HTTP %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Entities []struct {
+			StorageContainerUUID string `json:"storage_container_uuid"`
+			Name                 string `json:"name"`
+		} `json:"entities"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	containers := make([]StorageContainerInfo, 0, len(result.Entities))
+	for _, entity := range result.Entities {
+		containers = append(containers, StorageContainerInfo{
+			Name: entity.Name,
+			ID:   entity.StorageContainerUUID,
+		})
+	}
+
+	return containers, nil
 }
