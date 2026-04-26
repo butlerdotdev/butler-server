@@ -1208,7 +1208,7 @@ func testNutanixConnection(endpoint string, port int32, username, password strin
 	apiURL := fmt.Sprintf("%s:%d/api/nutanix/v3/clusters/list", endpoint, port)
 	client := nutanixHTTPClient(insecure, caPEM, 10*time.Second)
 
-	req, err := http.NewRequest("POST", apiURL, nil)
+	req, err := http.NewRequest("POST", apiURL, strings.NewReader(`{"kind":"cluster"}`))
 	if err != nil {
 		return ValidateResponse{Valid: false, Category: "network", Message: fmt.Sprintf("failed to create request: %v", err)}
 	}
