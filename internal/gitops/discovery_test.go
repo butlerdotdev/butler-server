@@ -21,6 +21,7 @@ import (
 	"errors"
 	"testing"
 
+	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -254,3 +255,78 @@ func TestDetectFlux_FallsBackToFirstGitRepositoryWhenNoneNamedFluxSystem(t *test
 }
 
 var _ kubernetes.Interface = (*fake.Clientset)(nil) // compile-time assertion
+
+func TestAddonTierToReleasePath(t *testing.T) {
+	layout := DefaultDirectoryLayout("test-cluster")
+
+	tests := []struct {
+		name     string
+		addon    butlerv1alpha1.AddonDefinition
+		wantTier string
+		wantPath string
+	}{
+		{
+			name: "explicit infrastructure tier",
+			addon: butlerv1alpha1.AddonDefinition{
+				Spec: butlerv1alpha1.AddonDefinitionSpec{
+					Tier: butlerv1alpha1.AddonTierInfrastructure,
+				},
+			},
+			wantTier: "infrastructure",
+			wantPath: "infrastructure/sealed-secrets",
+		},
+		{
+			name: "explicit apps tier",
+			addon: butlerv1alpha1.AddonDefinition{
+				Spec: butlerv1alpha1.AddonDefinitionSpec{
+					Tier: butlerv1alpha1.AddonTierApps,
+				},
+			},
+			wantTier: "apps",
+			wantPath: "apps/sealed-secrets",
+		},
+		{
+			name: "explicit tier overrides platform",
+			addon: butlerv1alpha1.AddonDefinition{
+				Spec: butlerv1alpha1.AddonDefinitionSpec{
+					Tier:     butlerv1alpha1.AddonTierApps,
+					Platform: true,
+				},
+			},
+			wantTier: "apps",
+			wantPath: "apps/sealed-secrets",
+		},
+		{
+			name: "platform true infers infrastructure",
+			addon: butlerv1alpha1.AddonDefinition{
+				Spec: butlerv1alpha1.AddonDefinitionSpec{
+					Platform: true,
+				},
+			},
+			wantTier: "infrastructure",
+			wantPath: "infrastructure/sealed-secrets",
+		},
+		{
+			name: "non-platform defaults to apps",
+			addon: butlerv1alpha1.AddonDefinition{
+				Spec: butlerv1alpha1.AddonDefinitionSpec{},
+			},
+			wantTier: "apps",
+			wantPath: "apps/sealed-secrets",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tier := tt.addon.GetEffectiveTier()
+			if tier != tt.wantTier {
+				t.Errorf("GetEffectiveTier() = %q, want %q", tier, tt.wantTier)
+			}
+
+			path := layout.GetReleasePath(tier, "sealed-secrets")
+			if path != tt.wantPath {
+				t.Errorf("GetReleasePath() = %q, want %q", path, tt.wantPath)
+			}
+		})
+	}
+}

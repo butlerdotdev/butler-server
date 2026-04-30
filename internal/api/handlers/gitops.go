@@ -597,18 +597,14 @@ func (h *GitOpsHandler) ExportAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var targetPath string
-	if addonDef.Spec.Platform {
-		targetPath = fmt.Sprintf("clusters/%s/infrastructure/%s", name, req.AddonName)
-	} else {
-		targetPath = fmt.Sprintf("clusters/%s/apps/%s", name, req.AddonName)
-	}
+	tier := addonDef.GetEffectiveTier()
+	targetPath := fmt.Sprintf("clusters/%s/%s/%s", name, tier, req.AddonName)
 
 	h.logger.Info("Exporting addon to GitOps",
 		"cluster", name,
 		"addon", req.AddonName,
 		"path", targetPath,
-		"platform", addonDef.Spec.Platform,
+		"tier", tier,
 	)
 
 	chartName := addonDef.Spec.Chart.Name
@@ -1723,11 +1719,8 @@ func (h *GitOpsHandler) ExportManagementCatalogAddon(w http.ResponseWriter, r *h
 
 	targetPath := req.TargetPath
 	if targetPath == "" {
-		if addonDef.Spec.Platform {
-			targetPath = fmt.Sprintf("clusters/management/infrastructure/%s", req.AddonName)
-		} else {
-			targetPath = fmt.Sprintf("clusters/management/apps/%s", req.AddonName)
-		}
+		tier := addonDef.GetEffectiveTier()
+		targetPath = fmt.Sprintf("clusters/management/%s/%s", tier, req.AddonName)
 	}
 
 	chartName := addonDef.Spec.Chart.Name

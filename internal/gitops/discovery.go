@@ -141,7 +141,7 @@ func DiscoverHelmReleases(ctx context.Context, kubeconfig []byte, addonDefs []bu
 			release.AddonDefinition = addonDef.Name
 			release.RepoURL = addonDef.Spec.Chart.Repository
 			release.Platform = addonDef.Spec.Platform
-			release.Category = categoryFromPlatform(addonDef.Spec.Platform)
+			release.Category = addonDef.GetEffectiveTier()
 			result.Matched = append(result.Matched, release)
 		} else {
 			release.Category = "apps"
@@ -471,12 +471,6 @@ func matchAddonDefinition(chartName string, lookup map[string]*butlerv1alpha1.Ad
 	return nil, false
 }
 
-func categoryFromPlatform(platform bool) string {
-	if platform {
-		return "infrastructure"
-	}
-	return "apps"
-}
 
 // Migration types
 
