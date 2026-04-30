@@ -202,6 +202,48 @@ func TestHasRole(t *testing.T) {
 	}
 }
 
+// --- HasRoleInTeam across roles ---
+
+func TestHasRoleInTeam(t *testing.T) {
+	tests := []struct {
+		name         string
+		platformRole string
+		teams        []TeamMembership
+		teamName     string
+		role         string
+		want         bool
+	}{
+		{"admin has any role asked for", RoleAdmin, nil, "acme", RoleOperator, true},
+		{"viewer asked for viewer", RoleViewer, nil, "acme", RoleViewer, true},
+		{"viewer asked for admin", RoleViewer, nil, "acme", RoleAdmin, false},
+		{
+			"viewer with explicit operator asked for operator",
+			RoleViewer,
+			[]TeamMembership{{Name: "acme", Role: RoleOperator}},
+			"acme",
+			RoleOperator,
+			true,
+		},
+		{
+			"viewer with explicit operator asked for admin",
+			RoleViewer,
+			[]TeamMembership{{Name: "acme", Role: RoleOperator}},
+			"acme",
+			RoleAdmin,
+			false,
+		},
+		{"no role, not member", "", nil, "acme", RoleViewer, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := &UserSession{PlatformRole: tt.platformRole, Teams: tt.teams}
+			if got := u.HasRoleInTeam(tt.teamName, tt.role); got != tt.want {
+				t.Errorf("HasRoleInTeam(%q, %q) = %v, want %v", tt.teamName, tt.role, got, tt.want)
+			}
+		})
+	}
+}
+
 // --- IsAdmin across roles ---
 
 func TestIsAdmin(t *testing.T) {
@@ -482,52 +524,21 @@ func TestCreateSession_IsPlatformAdminComputedFromPlatformRole(t *testing.T) {
 	}
 }
 
-// --- Backwards compat: old JWT with isPlatformAdmin but no platformRole ---
+// --- Backwards compat: migration conditional for pre-upgrade JWTs ---
+//
+// A true JWT round-trip test is not possible here because CreateSession
+// syncs IsPlatformAdmin from PlatformRole before signing. Pre-upgrade
+// tokens (isPlatformAdmin=true, platformRole absent) can only exist
+// from JWTs issued before this code landed. These tests exercise the
+// migration conditional from ValidateSession in isolation.
 
-func TestValidateSession_MigratesOldJWT(t *testing.T) {
-	svc := NewSessionService("test-secret-that-is-long-enough", time.Hour)
-
-	// Simulate an old JWT: set isPlatformAdmin=true, platformRole=""
-	// by creating the session directly without the CreateSession sync
-	user := &UserSession{
-		Email:           "admin@example.com",
-		IsPlatformAdmin: true,
-		PlatformRole:    "",
-		Teams:           []TeamMembership{},
-	}
-	// Bypass CreateSession (which would sync) by building the token manually
-	user.Email = NormalizeEmail(user.Email)
-	// Don't sync IsPlatformAdmin -- this simulates pre-upgrade behavior
-
-	token, err := svc.CreateSession(&UserSession{
-		Email:           user.Email,
-		IsPlatformAdmin: true,
-		PlatformRole:    "", // old JWT has no platformRole
-		Teams:           []TeamMembership{},
-	})
-	// CreateSession will set IsPlatformAdmin = (PlatformRole == "admin") = false.
-	// So we need to manually build the old-style token. Let me use a workaround:
-	// set PlatformRole to admin so CreateSession produces a valid token,
-	// then that tests the round-trip. Instead, test the migration directly.
-	_ = token
-	_ = err
-
-	// Better approach: build a UserSession with IsPlatformAdmin=true,
-	// PlatformRole="" and pass it through ValidateSession migration.
-	// The ValidateSession migration check is:
-	//   if claims.IsPlatformAdmin && claims.PlatformRole == "" { set PlatformRole = "admin" }
-	// We can test this by creating a token where PlatformRole is empty
-	// but IsPlatformAdmin is true. Since CreateSession syncs these,
-	// we need to verify the migration path handles the case where
-	// the token was issued before the sync logic existed.
-	//
-	// The simplest test: call the migration logic directly.
+func TestMigration_IsPlatformAdminToPlatformRole(t *testing.T) {
 	session := &UserSession{
 		Email:           "admin@example.com",
 		IsPlatformAdmin: true,
 		PlatformRole:    "",
 	}
-	// Simulate what ValidateSession does
+	// Apply the same conditional as ValidateSession
 	if session.IsPlatformAdmin && session.PlatformRole == "" {
 		session.PlatformRole = RoleAdmin
 	}
@@ -536,17 +547,15 @@ func TestValidateSession_MigratesOldJWT(t *testing.T) {
 	}
 }
 
-func TestValidateSession_NoMigrationWhenPlatformRoleSet(t *testing.T) {
+func TestMigration_NoOverwriteWhenPlatformRoleSet(t *testing.T) {
 	session := &UserSession{
 		Email:           "viewer@example.com",
 		IsPlatformAdmin: false,
 		PlatformRole:    RoleViewer,
 	}
-	// Simulate migration path
 	if session.IsPlatformAdmin && session.PlatformRole == "" {
 		session.PlatformRole = RoleAdmin
 	}
-	// PlatformRole should stay viewer
 	if session.PlatformRole != RoleViewer {
 		t.Errorf("should not overwrite existing PlatformRole, got %q", session.PlatformRole)
 	}
