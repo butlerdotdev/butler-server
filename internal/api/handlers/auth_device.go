@@ -225,14 +225,14 @@ func (h *DeviceFlowHandler) DeviceApprove(w http.ResponseWriter, r *http.Request
 	}
 
 	session := &auth.UserSession{
-		Subject:         user.Subject,
-		Email:           user.Email,
-		Name:            user.Name,
-		Picture:         user.Picture,
-		Provider:        user.Provider,
-		Groups:          user.Groups,
-		Teams:           teams,
-		IsPlatformAdmin: user.IsPlatformAdmin,
+		Subject:      user.Subject,
+		Email:        user.Email,
+		Name:         user.Name,
+		Picture:      user.Picture,
+		Provider:     user.Provider,
+		Groups:       user.Groups,
+		Teams:        teams,
+		PlatformRole: user.PlatformRole,
 	}
 
 	h.deviceStore.Approve(req.DeviceCode, session)
@@ -288,10 +288,10 @@ func (h *DeviceFlowHandler) DeviceRefresh(w http.ResponseWriter, r *http.Request
 	}
 
 	session := &auth.UserSession{
-		Email:           email,
-		Name:            userCRD.DisplayName,
-		Teams:           teams,
-		IsPlatformAdmin: userCRD.IsPlatformAdmin,
+		Email:        email,
+		Name:         userCRD.DisplayName,
+		Teams:        teams,
+		PlatformRole: auth.EffectivePlatformRole(userCRD.PlatformRole, userCRD.IsPlatformAdmin, ""),
 	}
 
 	result, err := h.provisionCLIAccess(r, session)
@@ -319,6 +319,7 @@ type cliUserResponse struct {
 	Name            string                `json:"name"`
 	Teams           []auth.TeamMembership `json:"teams"`
 	IsPlatformAdmin bool                  `json:"isPlatformAdmin,omitempty"`
+	PlatformRole    string                `json:"platformRole,omitempty"`
 }
 
 // provisionCLIAccess creates (or updates) the SA, RoleBindings, token, and
@@ -333,7 +334,7 @@ func (h *DeviceFlowHandler) provisionCLIAccess(r *http.Request, session *auth.Us
 	}
 
 	// Ensure RoleBindings
-	if err := h.saManager.EnsureRoleBindings(ctx, sa.Name, session.Email, session.Teams, session.IsPlatformAdmin); err != nil {
+	if err := h.saManager.EnsureRoleBindings(ctx, sa.Name, session.Email, session.Teams, session.PlatformRole == auth.RoleAdmin); err != nil {
 		return nil, fmt.Errorf("ensure role bindings: %w", err)
 	}
 
@@ -363,7 +364,8 @@ func (h *DeviceFlowHandler) provisionCLIAccess(r *http.Request, session *auth.Us
 			Email:           session.Email,
 			Name:            session.Name,
 			Teams:           session.Teams,
-			IsPlatformAdmin: session.IsPlatformAdmin,
+			IsPlatformAdmin: session.PlatformRole == auth.RoleAdmin,
+			PlatformRole:    session.PlatformRole,
 		},
 		Kubeconfig:       base64.StdEncoding.EncodeToString(kubeconfigBytes),
 		ExpiresAt:        expiresAt.Format(time.RFC3339),

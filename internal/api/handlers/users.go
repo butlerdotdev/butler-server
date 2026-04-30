@@ -89,6 +89,7 @@ type UserListResponse struct {
 	SSOProvider     string   `json:"ssoProvider,omitempty"`
 	Teams           []string `json:"teams,omitempty"`
 	IsPlatformAdmin bool     `json:"isPlatformAdmin,omitempty"`
+	PlatformRole    string   `json:"platformRole,omitempty"`
 }
 
 // CreateUserResponseBody is the response for user creation.
@@ -140,6 +141,7 @@ func (h *UserHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 			AuthType:        u.AuthType,
 			SSOProvider:     u.SSOProvider,
 			IsPlatformAdmin: u.IsPlatformAdmin,
+			PlatformRole:    u.PlatformRole,
 		}
 
 		// Add team membership info
@@ -202,6 +204,7 @@ func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
 			Disabled:        result.User.Disabled,
 			AuthType:        result.User.AuthType,
 			IsPlatformAdmin: result.User.IsPlatformAdmin,
+			PlatformRole:    result.User.PlatformRole,
 		},
 		InviteURL: result.InviteURL,
 	})
@@ -242,6 +245,7 @@ func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 		SSOProvider:     user.SSOProvider,
 		Teams:           teams,
 		IsPlatformAdmin: user.IsPlatformAdmin,
+		PlatformRole:    user.PlatformRole,
 	})
 }
 
@@ -403,14 +407,16 @@ func (h *UserHandler) SetPassword(w http.ResponseWriter, r *http.Request) {
 		teams = []auth.TeamMembership{}
 	}
 
+	platformRole := auth.EffectivePlatformRole(user.PlatformRole, user.IsPlatformAdmin, "")
+
 	session := &auth.UserSession{
-		Subject:         "internal:" + user.Name,
-		Email:           user.Email,
-		Name:            user.DisplayName,
-		Picture:         user.Avatar,
-		Provider:        "internal",
-		Teams:           teams,
-		IsPlatformAdmin: user.IsPlatformAdmin,
+		Subject:      "internal:" + user.Name,
+		Email:        user.Email,
+		Name:         user.DisplayName,
+		Picture:      user.Avatar,
+		Provider:     "internal",
+		Teams:        teams,
+		PlatformRole: platformRole,
 	}
 
 	if session.Name == "" {
@@ -448,6 +454,7 @@ func (h *UserHandler) SetPassword(w http.ResponseWriter, r *http.Request) {
 			Phase:           user.Phase,
 			AuthType:        user.AuthType,
 			IsPlatformAdmin: user.IsPlatformAdmin,
+			PlatformRole:    user.PlatformRole,
 		},
 	})
 }

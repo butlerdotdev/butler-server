@@ -98,6 +98,7 @@ type ResourceRef struct {
 type SessionInfo struct {
 	Email           string
 	IsPlatformAdmin bool
+	PlatformRole    string
 	Teams           []TeamInfo
 }
 
@@ -413,7 +414,7 @@ func (h *Hub) HandleClusterWatch(w http.ResponseWriter, r *http.Request) {
 		conn:            conn,
 		send:            make(chan Message, 256),
 		teams:           teams,
-		isPlatformAdmin: session.IsPlatformAdmin,
+		isPlatformAdmin: session.PlatformRole == "admin",
 	}
 
 	h.register <- client
