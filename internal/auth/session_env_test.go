@@ -77,8 +77,8 @@ func TestCanOperateInSelectedEnvironment_ViewerNotElevated(t *testing.T) {
 
 func TestCanOperateInSelectedEnvironment_PlatformAdminBypass(t *testing.T) {
 	u := &UserSession{
-		Email:           "admin@example.com",
-		IsPlatformAdmin: true,
+		Email:        "admin@example.com",
+		PlatformRole: RoleAdmin,
 	}
 	if !u.CanOperateInSelectedEnvironment() {
 		t.Fatal("platform admin must always be able to operate")
