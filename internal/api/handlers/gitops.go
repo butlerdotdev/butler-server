@@ -857,11 +857,7 @@ func (h *GitOpsHandler) ExportRelease(w http.ResponseWriter, r *http.Request) {
 
 	targetPath := req.Path
 	if targetPath == "" {
-		if release.Category == "infrastructure" {
-			targetPath = fmt.Sprintf("clusters/%s/infrastructure/%s", name, release.Name)
-		} else {
-			targetPath = fmt.Sprintf("clusters/%s/apps/%s", name, release.Name)
-		}
+		targetPath = fmt.Sprintf("clusters/%s/%s/%s", name, release.Category, release.Name)
 	} else {
 		if !strings.HasSuffix(targetPath, "/"+release.Name) {
 			targetPath = fmt.Sprintf("%s/%s", targetPath, release.Name)
@@ -1069,13 +1065,7 @@ func (h *GitOpsHandler) ExportAllAddons(w http.ResponseWriter, r *http.Request) 
 			seenNamespaces[release.Namespace] = true
 		}
 
-		var basePath string
-		if release.Category == "infrastructure" {
-			basePath = fmt.Sprintf("clusters/%s/infrastructure", name)
-		} else {
-			basePath = fmt.Sprintf("clusters/%s/apps", name)
-		}
-		targetPath := fmt.Sprintf("%s/%s", basePath, release.Name)
+		targetPath := fmt.Sprintf("clusters/%s/%s/%s", name, release.Category, release.Name)
 
 		for filename, content := range manifests {
 			path := fmt.Sprintf("%s/%s", targetPath, filename)
@@ -1562,11 +1552,7 @@ func (h *GitOpsHandler) ExportManagementAddon(w http.ResponseWriter, r *http.Req
 
 	targetPath := req.Path
 	if targetPath == "" {
-		if release.Category == "infrastructure" {
-			targetPath = fmt.Sprintf("clusters/management/infrastructure/%s", release.Name)
-		} else {
-			targetPath = fmt.Sprintf("clusters/management/apps/%s", release.Name)
-		}
+		targetPath = fmt.Sprintf("clusters/management/%s/%s", release.Category, release.Name)
 	} else {
 		targetPath = fmt.Sprintf("%s/%s", targetPath, release.Name)
 	}
@@ -1940,13 +1926,7 @@ func (h *GitOpsHandler) ExportAllManagementAddons(w http.ResponseWriter, r *http
 			seenNamespaces[release.Namespace] = true
 		}
 
-		var categoryPath string
-		if release.Category == "infrastructure" {
-			categoryPath = fmt.Sprintf("%s/infrastructure", basePath)
-		} else {
-			categoryPath = fmt.Sprintf("%s/apps", basePath)
-		}
-		targetPath := fmt.Sprintf("%s/%s", categoryPath, release.Name)
+		targetPath := fmt.Sprintf("%s/%s/%s", basePath, release.Category, release.Name)
 
 		for filename, content := range manifests {
 			path := fmt.Sprintf("%s/%s", targetPath, filename)

@@ -471,7 +471,6 @@ func matchAddonDefinition(chartName string, lookup map[string]*butlerv1alpha1.Ad
 	return nil, false
 }
 
-
 // Migration types
 
 // MigrationRequest defines a request to migrate releases to GitOps.
