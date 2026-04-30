@@ -45,6 +45,10 @@ func LoadPlatformRoleGroups(ctx context.Context, client dynamic.Interface, idpNa
 // the platformRoleGroups from whichever one is configured. For single-IdP
 // deployments this returns the one IdP's groups. For multi-IdP setups,
 // callers should use LoadPlatformRoleGroups with a specific name.
+//
+// Today butler-server supports a single OIDC provider, so merging across
+// all CRDs is safe. If multi-IdP support is added, this function should
+// be replaced with per-provider loading to preserve IdP isolation.
 func LoadAllPlatformRoleGroups(ctx context.Context, client dynamic.Interface) []PlatformRoleGroupEntry {
 	if client == nil {
 		return nil

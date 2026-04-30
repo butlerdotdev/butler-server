@@ -282,11 +282,13 @@ func TestEffectivePlatformRole_LoginScenarios(t *testing.T) {
 	}
 }
 
-// TestMultiIdP_Isolation verifies that groups from one IdP are not matched
-// against another IdP's platformRoleGroups configuration. Each IdP has its
-// own list, and ResolvePlatformRole is called per-IdP. A user in the Entra
-// "butler-platform-admin" group should not get admin from the Google config.
-func TestMultiIdP_Isolation(t *testing.T) {
+// TestResolvePlatformRole_PerIdPSeparation verifies that ResolvePlatformRole
+// produces correct results when called with separate per-IdP group lists.
+// Each IdP has its own platformRoleGroups config; a user in Entra's
+// "butler-platform-admin" group does not match Google's config and vice versa.
+// Note: this tests function-level behavior. System-level multi-IdP isolation
+// requires per-provider loading when butler-server gains multi-IdP support.
+func TestResolvePlatformRole_PerIdPSeparation(t *testing.T) {
 	entraGroups := []PlatformRoleGroupEntry{
 		{Name: "butler-platform-admin", Role: RoleAdmin},
 	}

@@ -85,7 +85,7 @@ func TestRequireSession_ResolverNilSession_401(t *testing.T) {
 }
 
 func TestRequireSession_Valid_ReturnsSession(t *testing.T) {
-	want := &SessionInfo{IsPlatformAdmin: true}
+	want := &SessionInfo{PlatformRole: "admin", IsPlatformAdmin: true}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ws/clusters", nil)
 	resolver := func(_ *http.Request) (*SessionInfo, error) {

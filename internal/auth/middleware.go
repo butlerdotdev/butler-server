@@ -183,10 +183,10 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 			}
 
 			// Check if user has any team membership (required for access).
-			// Platform admins bypass above. Platform viewers have synthetic
-			// membership in all teams, so they pass here on team count alone
-			// (re-resolution above populates their teams list). Regular users
-			// with no teams are rejected.
+			// Platform admins bypass above. Platform viewers may have zero
+			// explicit team memberships but still need access (session helpers
+			// provide synthetic membership at the application level). Regular
+			// users with no teams are rejected.
 			if len(user.Teams) == 0 && user.PlatformRole != RoleViewer {
 				http.Error(w, `{"error":"no team access - contact your administrator"}`, http.StatusForbidden)
 				return
