@@ -73,6 +73,7 @@ type UserResponse struct {
 	Picture         string                `json:"picture,omitempty"`
 	Teams           []auth.TeamMembership `json:"teams"`
 	IsPlatformAdmin bool                  `json:"isPlatformAdmin,omitempty"`
+	PlatformRole    string                `json:"platformRole,omitempty"`
 }
 
 // Login initiates the OIDC login flow.
@@ -151,7 +152,8 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	// IMPORTANT: Ensure User CRD exists for this SSO user
 	// This is called on EVERY SSO login to create/update the user record
-	var isPlatformAdmin bool
+	var crdPlatformRole string
+	var crdIsPlatformAdmin bool
 	user, err := h.userService.EnsureSSOUser(r.Context(), auth.EnsureSSOUserRequest{
 		Email:       claims.Email,
 		DisplayName: claims.Name,
@@ -177,9 +179,14 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Check if user has platform admin privileges from User CRD
-		isPlatformAdmin = user.IsPlatformAdmin
+		crdPlatformRole = user.PlatformRole
+		crdIsPlatformAdmin = user.IsPlatformAdmin
 	}
+
+	// Compute effective platform role: max of CRD role, deprecated
+	// isPlatformAdmin bool, and IdP group-derived role.
+	groupRole := auth.ResolvePlatformRole(claims.Groups, h.oidcProvider.GetPlatformRoleGroups())
+	effectivePlatformRole := auth.EffectivePlatformRole(crdPlatformRole, crdIsPlatformAdmin, groupRole)
 
 	// Resolve team memberships
 	teams, err := h.teamResolver.ResolveTeams(r.Context(), claims.Email, claims.Groups)
@@ -190,14 +197,14 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	// Create user session
 	session := &auth.UserSession{
-		Subject:         claims.Subject,
-		Email:           claims.Email,
-		Name:            claims.Name,
-		Picture:         claims.Picture,
-		Provider:        h.oidcProvider.GetDisplayName(),
-		Groups:          claims.Groups,
-		Teams:           teams,
-		IsPlatformAdmin: isPlatformAdmin,
+		Subject:      claims.Subject,
+		Email:        claims.Email,
+		Name:         claims.Name,
+		Picture:      claims.Picture,
+		Provider:     h.oidcProvider.GetDisplayName(),
+		Groups:       claims.Groups,
+		Teams:        teams,
+		PlatformRole: effectivePlatformRole,
 	}
 
 	// Generate session token
@@ -226,7 +233,7 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("User logged in via SSO",
 		"email", claims.Email,
 		"teams", len(teams),
-		"isPlatformAdmin", isPlatformAdmin,
+		"platformRole", effectivePlatformRole,
 	)
 	audit.RecordLogin(h.auditEmitter, claims.Email, "sso", r.RemoteAddr)
 
@@ -305,15 +312,19 @@ func (h *AuthHandler) InternalUserLogin(w http.ResponseWriter, r *http.Request) 
 		teams = []auth.TeamMembership{}
 	}
 
+	// Compute effective platform role from CRD fields. Internal users
+	// have no IdP groups, so only CRD-driven sources apply.
+	platformRole := auth.EffectivePlatformRole(user.PlatformRole, user.IsPlatformAdmin, "")
+
 	// Create session
 	session := &auth.UserSession{
-		Subject:         "internal:" + user.Name,
-		Email:           user.Email,
-		Name:            user.DisplayName,
-		Picture:         user.Avatar,
-		Provider:        "internal",
-		Teams:           teams,
-		IsPlatformAdmin: user.IsPlatformAdmin, // Propagate from User CRD
+		Subject:      "internal:" + user.Name,
+		Email:        user.Email,
+		Name:         user.DisplayName,
+		Picture:      user.Avatar,
+		Provider:     "internal",
+		Teams:        teams,
+		PlatformRole: platformRole,
 	}
 
 	if session.Name == "" {
@@ -340,7 +351,7 @@ func (h *AuthHandler) InternalUserLogin(w http.ResponseWriter, r *http.Request) 
 	h.logger.Info("User logged in via password",
 		"email", user.Email,
 		"teams", len(teams),
-		"isPlatformAdmin", user.IsPlatformAdmin,
+		"platformRole", platformRole,
 	)
 	audit.RecordLogin(h.auditEmitter, user.Email, "internal", r.RemoteAddr)
 
@@ -350,7 +361,8 @@ func (h *AuthHandler) InternalUserLogin(w http.ResponseWriter, r *http.Request) 
 			Name:            session.Name,
 			Picture:         user.Avatar,
 			Teams:           teams,
-			IsPlatformAdmin: user.IsPlatformAdmin,
+			IsPlatformAdmin: platformRole == auth.RoleAdmin,
+			PlatformRole:    platformRole,
 		},
 	})
 }
@@ -468,8 +480,10 @@ func (h *AuthHandler) RefreshPermissions(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusForbidden, "Account is disabled")
 			return
 		}
-		// Update platform admin status from User CRD
-		user.IsPlatformAdmin = userCRD.IsPlatformAdmin
+		// Re-evaluate platform role from current CRD state and session groups.
+		// The session carries the user's IdP groups from their last login.
+		groupRole := auth.ResolvePlatformRole(user.Groups, h.oidcProvider.GetPlatformRoleGroups())
+		user.PlatformRole = auth.EffectivePlatformRole(userCRD.PlatformRole, userCRD.IsPlatformAdmin, groupRole)
 	}
 
 	// Update user's team memberships
@@ -497,7 +511,7 @@ func (h *AuthHandler) RefreshPermissions(w http.ResponseWriter, r *http.Request)
 	h.logger.Info("Permissions refreshed",
 		"email", user.Email,
 		"teams", len(teams),
-		"isPlatformAdmin", user.IsPlatformAdmin,
+		"platformRole", user.PlatformRole,
 	)
 
 	// Return updated user info (same format as /api/auth/me)
@@ -506,7 +520,8 @@ func (h *AuthHandler) RefreshPermissions(w http.ResponseWriter, r *http.Request)
 		Name:            user.Name,
 		Picture:         user.Picture,
 		Teams:           teams,
-		IsPlatformAdmin: user.IsPlatformAdmin,
+		IsPlatformAdmin: user.PlatformRole == auth.RoleAdmin,
+		PlatformRole:    user.PlatformRole,
 	})
 }
 
@@ -525,6 +540,7 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 		Picture:         user.Picture,
 		Teams:           user.Teams,
 		IsPlatformAdmin: user.IsPlatformAdmin,
+		PlatformRole:    user.PlatformRole,
 	})
 }
 
@@ -540,6 +556,7 @@ func (h *AuthHandler) Teams(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"teams":           user.Teams,
 		"isPlatformAdmin": user.IsPlatformAdmin,
+		"platformRole":    user.PlatformRole,
 	})
 }
 
@@ -575,15 +592,15 @@ func (h *AuthHandler) GetProviders(w http.ResponseWriter, r *http.Request) {
 // createLegacyAdminSession creates a session for the legacy admin user (bootstrap/dev mode).
 // The legacy admin is a PLATFORM ADMIN with full access to everything.
 func (h *AuthHandler) createLegacyAdminSession(w http.ResponseWriter, r *http.Request) {
-	// Create session for the admin user with PLATFORM ADMIN privileges
-	// Platform admins bypass team checks entirely
+	// Create session for the admin user with PLATFORM ADMIN privileges.
+	// Platform admins bypass team checks entirely.
 	session := &auth.UserSession{
-		Subject:         "legacy:admin",
-		Email:           "admin@butler.local",
-		Name:            "Platform Administrator",
-		Provider:        "legacy",
-		IsPlatformAdmin: true,                    // THIS IS THE KEY FIX
-		Teams:           []auth.TeamMembership{}, // No teams needed for platform admin
+		Subject:      "legacy:admin",
+		Email:        "admin@butler.local",
+		Name:         "Platform Administrator",
+		Provider:     "legacy",
+		PlatformRole: auth.RoleAdmin,
+		Teams:        []auth.TeamMembership{},
 	}
 
 	token, err := h.sessionService.CreateSession(session)
@@ -611,6 +628,7 @@ func (h *AuthHandler) createLegacyAdminSession(w http.ResponseWriter, r *http.Re
 			Name:            session.Name,
 			Teams:           session.Teams,
 			IsPlatformAdmin: true,
+			PlatformRole:    auth.RoleAdmin,
 		},
 	})
 }

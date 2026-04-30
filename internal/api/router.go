@@ -79,16 +79,26 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	var oidcProvider *auth.OIDCProvider
 	if cfg.Config.IsOIDCConfigured() {
 		var err error
+		// Load platformRoleGroups from IdentityProvider CRDs. These map IdP
+		// groups to platform-wide roles (admin, viewer) at session creation.
+		platformRoleGroups := auth.LoadAllPlatformRoleGroups(context.Background(), cfg.K8sClient.Dynamic())
+		if len(platformRoleGroups) > 0 {
+			cfg.Logger.Info("Loaded platform role groups from IdentityProvider CRDs",
+				"count", len(platformRoleGroups),
+			)
+		}
+
 		oidcProvider, err = auth.NewOIDCProvider(context.Background(), &auth.OIDCConfig{
-			IssuerURL:       cfg.Config.OIDC.IssuerURL,
-			ClientID:        cfg.Config.OIDC.ClientID,
-			ClientSecret:    cfg.Config.OIDC.ClientSecret,
-			RedirectURL:     cfg.Config.OIDC.RedirectURL,
-			Scopes:          cfg.Config.OIDC.Scopes,
-			HostedDomain:    cfg.Config.OIDC.HostedDomain,
-			GroupsClaim:     cfg.Config.OIDC.GroupsClaim,
-			EmailClaim:      cfg.Config.OIDC.EmailClaim,
-			GoogleWorkspace: loadGoogleWorkspaceConfig(&cfg.Config.OIDC),
+			IssuerURL:          cfg.Config.OIDC.IssuerURL,
+			ClientID:           cfg.Config.OIDC.ClientID,
+			ClientSecret:       cfg.Config.OIDC.ClientSecret,
+			RedirectURL:        cfg.Config.OIDC.RedirectURL,
+			Scopes:             cfg.Config.OIDC.Scopes,
+			HostedDomain:       cfg.Config.OIDC.HostedDomain,
+			GroupsClaim:        cfg.Config.OIDC.GroupsClaim,
+			EmailClaim:         cfg.Config.OIDC.EmailClaim,
+			GoogleWorkspace:    loadGoogleWorkspaceConfig(&cfg.Config.OIDC),
+			PlatformRoleGroups: platformRoleGroups,
 		}, cfg.Logger)
 		if err != nil {
 			cfg.Logger.Error("Failed to initialize OIDC provider", "error", err)
@@ -152,6 +162,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 		info := &websocket.SessionInfo{
 			Email:           session.Email,
 			IsPlatformAdmin: session.IsPlatformAdmin,
+			PlatformRole:    session.PlatformRole,
 		}
 		for _, tm := range session.Teams {
 			info.Teams = append(info.Teams, websocket.TeamInfo{Name: tm.Name})

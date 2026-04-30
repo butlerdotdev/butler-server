@@ -429,6 +429,7 @@ The `/api/auth/refresh-permissions` endpoint already re-queries the User CRD. Ex
 - The two auth paths (butler-server and kubectl-direct) remain separate.
 - Session helper changes touch ~12 methods, increasing the risk surface of this change. Thorough unit tests are required.
 - `isPlatformAdmin` deprecation creates a transitional period where both fields coexist.
+- CLI device flow refresh cannot re-evaluate IdP group membership. The refresh path exchanges a stored refresh token for a new SA token and kubeconfig, but has no OIDC token to extract groups from. Users who hold platform admin solely through IdP group membership (no `platformRole` set on their User CRD) will lose admin status on first CLI refresh. Their `ClusterRoleBinding` is removed accordingly and CLI operations requiring platform admin will fail. This is consistent with the "next login" revocation model: the refresh is a re-evaluation point that can only use CRD-level sources. Operators relying on CLI access for platform admins should set `platformRole: admin` on the User CRD as a manual override rather than depending solely on group membership for CLI use cases.
 
 ## Related ADRs
 

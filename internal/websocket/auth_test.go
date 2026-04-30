@@ -85,7 +85,7 @@ func TestRequireSession_ResolverNilSession_401(t *testing.T) {
 }
 
 func TestRequireSession_Valid_ReturnsSession(t *testing.T) {
-	want := &SessionInfo{IsPlatformAdmin: true}
+	want := &SessionInfo{PlatformRole: "admin", IsPlatformAdmin: true}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ws/clusters", nil)
 	resolver := func(_ *http.Request) (*SessionInfo, error) {
@@ -115,7 +115,7 @@ func TestRequirePlatformAdmin_NonAdmin_403(t *testing.T) {
 func TestRequirePlatformAdmin_Admin_Pass(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/management", nil)
-	ok := requirePlatformAdmin(rec, req, &SessionInfo{IsPlatformAdmin: true}, newTestLogger())
+	ok := requirePlatformAdmin(rec, req, &SessionInfo{PlatformRole: "admin"}, newTestLogger())
 	if !ok {
 		t.Fatal("expected true for platform admin")
 	}
@@ -127,7 +127,7 @@ func TestRequirePlatformAdmin_Admin_Pass(t *testing.T) {
 func TestRequireTeamAccess_PlatformAdminBypasses(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/tenant/acme/c1", nil)
-	ok := requireTeamAccess(rec, req, &SessionInfo{IsPlatformAdmin: true}, "acme", newTestLogger())
+	ok := requireTeamAccess(rec, req, &SessionInfo{PlatformRole: "admin"}, "acme", newTestLogger())
 	if !ok {
 		t.Fatal("platform admin should bypass team check")
 	}
@@ -166,6 +166,40 @@ func TestRequireTeamAccess_EmptyTeams_403(t *testing.T) {
 	}
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", rec.Code)
+	}
+}
+
+// Platform viewer tests for WebSocket auth gates.
+
+func TestRequirePlatformAdmin_Viewer_403(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/management", nil)
+	ok := requirePlatformAdmin(rec, req, &SessionInfo{PlatformRole: "viewer", Email: "viewer@co.com"}, newTestLogger())
+	if ok {
+		t.Fatal("platform viewer must NOT pass requirePlatformAdmin (management terminal)")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rec.Code)
+	}
+}
+
+func TestRequireTeamAccess_ViewerBypasses(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/tenant/acme/c1", nil)
+	session := &SessionInfo{PlatformRole: "viewer", Email: "viewer@co.com"}
+	ok := requireTeamAccess(rec, req, session, "acme", newTestLogger())
+	if !ok {
+		t.Fatal("platform viewer should bypass team access check")
+	}
+}
+
+func TestRequireTeamAccess_ViewerBypassesWithNoTeams(t *testing.T) {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/tenant/acme/c1", nil)
+	session := &SessionInfo{PlatformRole: "viewer", Email: "viewer@co.com", Teams: nil}
+	ok := requireTeamAccess(rec, req, session, "acme", newTestLogger())
+	if !ok {
+		t.Fatal("platform viewer with empty teams list should still bypass team access check")
 	}
 }
 

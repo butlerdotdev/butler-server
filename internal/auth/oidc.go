@@ -69,6 +69,10 @@ type OIDCConfig struct {
 	// GoogleWorkspace holds optional Google Admin SDK config for fetching groups.
 	// Required for Google Workspace because OIDC tokens don't include groups.
 	GoogleWorkspace *GoogleGroupsConfig
+
+	// PlatformRoleGroups maps IdP groups to platform-wide roles. Loaded
+	// from the IdentityProvider CRD's spec.platformRoleGroups field.
+	PlatformRoleGroups []PlatformRoleGroupEntry
 }
 
 // OIDCProvider handles OIDC authentication flows.
@@ -292,6 +296,12 @@ func (p *OIDCProvider) GetDisplayName() string {
 	default:
 		return "SSO"
 	}
+}
+
+// GetPlatformRoleGroups returns the platform role group entries configured
+// on this provider's IdentityProvider CRD.
+func (p *OIDCProvider) GetPlatformRoleGroups() []PlatformRoleGroupEntry {
+	return p.config.PlatformRoleGroups
 }
 
 // HasGroupSync returns true if Google Workspace group sync is configured.

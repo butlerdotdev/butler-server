@@ -61,7 +61,7 @@ func requireSession(w http.ResponseWriter, r *http.Request, resolver SessionReso
 // true when the session is a platform admin; otherwise writes HTTP 403 and
 // returns false.
 func requirePlatformAdmin(w http.ResponseWriter, r *http.Request, session *SessionInfo, log *slog.Logger) bool {
-	if session.IsPlatformAdmin {
+	if session.PlatformRole == "admin" {
 		return true
 	}
 	log.Warn("WebSocket upgrade rejected",
@@ -82,7 +82,7 @@ func requirePlatformAdmin(w http.ResponseWriter, r *http.Request, session *Sessi
 // path param on tenant-terminal endpoints), which in butler-server's
 // model equals the team namespace that the controller reconciles.
 func requireTeamAccess(w http.ResponseWriter, r *http.Request, session *SessionInfo, team string, log *slog.Logger) bool {
-	if session.IsPlatformAdmin {
+	if session.PlatformRole == "admin" || session.PlatformRole == "viewer" {
 		return true
 	}
 	for _, tm := range session.Teams {

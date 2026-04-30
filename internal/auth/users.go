@@ -67,6 +67,7 @@ type UserInfo struct {
 	AuthType        string
 	SSOProvider     string
 	IsPlatformAdmin bool
+	PlatformRole    string
 }
 
 // UserService handles user management operations using User CRDs.
@@ -670,6 +671,7 @@ func (s *UserService) userFromUnstructured(u *unstructured.Unstructured) *UserIn
 	authType, _, _ := unstructured.NestedString(u.Object, "spec", "authType")
 	ssoProvider, _, _ := unstructured.NestedString(u.Object, "spec", "ssoProvider")
 	isPlatformAdmin, _, _ := unstructured.NestedBool(u.Object, "spec", "isPlatformAdmin")
+	platformRole, _, _ := unstructured.NestedString(u.Object, "spec", "platformRole")
 	phase, _, _ := unstructured.NestedString(u.Object, "status", "phase")
 
 	if authType == "" {
@@ -689,6 +691,7 @@ func (s *UserService) userFromUnstructured(u *unstructured.Unstructured) *UserIn
 		AuthType:        authType,
 		SSOProvider:     ssoProvider,
 		IsPlatformAdmin: isPlatformAdmin,
+		PlatformRole:    platformRole,
 	}
 }
 

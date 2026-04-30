@@ -83,8 +83,10 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 			// the header is absent, which falls back to team-level scoping.
 			selectedEnv := r.Header.Get("X-Butler-Environment")
 
-			// Platform admins path
-			if user.IsPlatformAdmin {
+			// Platform admins path: only full admins get the fast path
+			// with impersonation and team-scoping. Platform viewers go
+			// through the normal team re-resolution path below.
+			if user.PlatformRole == RoleAdmin {
 				// When requests come through the Backstage portal proxy, all
 				// requests authenticate as the admin service account. The proxy
 				// forwards the real user's email via X-Butler-User-Email so the
@@ -180,9 +182,12 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 				user.Teams = freshTeams
 			}
 
-			// Check if user has any team membership (required for access)
-			// Platform admins already bypassed above, so this only affects regular users
-			if len(user.Teams) == 0 {
+			// Check if user has any team membership (required for access).
+			// Platform admins bypass above. Platform viewers may have zero
+			// explicit team memberships but still need access (session helpers
+			// provide synthetic membership at the application level). Regular
+			// users with no teams are rejected.
+			if len(user.Teams) == 0 && user.PlatformRole != RoleViewer {
 				http.Error(w, `{"error":"no team access - contact your administrator"}`, http.StatusForbidden)
 				return
 			}
@@ -246,8 +251,8 @@ func RequireTeam(teamName string) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Platform admins have access to all teams
-			if user.IsPlatformAdmin {
+			// Platform admins and viewers have access to all teams
+			if user.PlatformRole == RoleAdmin || user.PlatformRole == RoleViewer {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -293,7 +298,7 @@ func RequireAdmin() func(http.Handler) http.Handler {
 
 // RequirePlatformAdmin creates middleware that requires platform admin privileges.
 // Use this for operations that should only be available to platform-level admins,
-// not team-level admins.
+// not team-level admins. Platform viewers do NOT pass this check.
 func RequirePlatformAdmin() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -303,8 +308,31 @@ func RequirePlatformAdmin() func(http.Handler) http.Handler {
 				return
 			}
 
-			if !user.IsPlatformAdmin {
+			if user.PlatformRole != RoleAdmin {
 				http.Error(w, `{"error":"forbidden: platform admin required"}`, http.StatusForbidden)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// RequirePlatformViewer creates middleware that requires platform viewer or
+// higher privileges. Both platform admin and platform viewer pass this check.
+// Use this for read-only platform-wide endpoints (list all clusters, view
+// audit logs, etc.).
+func RequirePlatformViewer() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			user := UserFromContext(r.Context())
+			if user == nil {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+
+			if !user.IsPlatformViewerOrAbove() {
+				http.Error(w, `{"error":"forbidden: platform viewer or admin required"}`, http.StatusForbidden)
 				return
 			}
 
@@ -340,8 +368,8 @@ func (c *ClusterTeamAuthz) RequireAccess() func(http.Handler) http.Handler {
 				return
 			}
 
-			// Platform admins have access to all clusters
-			if user.IsPlatformAdmin {
+			// Platform admins and viewers have access to all clusters
+			if user.PlatformRole == RoleAdmin || user.PlatformRole == RoleViewer {
 				next.ServeHTTP(w, r)
 				return
 			}
