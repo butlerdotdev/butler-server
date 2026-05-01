@@ -53,6 +53,8 @@ type AddonDefinitionResponse struct {
 	Description       string            `json:"description"`
 	Category          string            `json:"category"`
 	Icon              string            `json:"icon,omitempty"`
+	IconData          string            `json:"iconData,omitempty"`
+	Tier              string            `json:"tier,omitempty"`
 	ChartRepository   string            `json:"chartRepository"`
 	ChartName         string            `json:"chartName"`
 	DefaultVersion    string            `json:"defaultVersion"`
@@ -695,6 +697,8 @@ func (h *AddonsHandler) addonDefinitionToResponse(ad *unstructured.Unstructured)
 	description, _ := spec["description"].(string)
 	category, _ := spec["category"].(string)
 	icon, _ := spec["icon"].(string)
+	iconData, _ := spec["iconData"].(string)
+	tier, _ := spec["tier"].(string)
 	platform, _ := spec["platform"].(bool)
 
 	chartSpec, _ := spec["chart"].(map[string]interface{})
@@ -744,6 +748,8 @@ func (h *AddonsHandler) addonDefinitionToResponse(ad *unstructured.Unstructured)
 		Description:       description,
 		Category:          category,
 		Icon:              icon,
+		IconData:          iconData,
+		Tier:              tier,
 		ChartRepository:   chartRepo,
 		ChartName:         chartName,
 		DefaultVersion:    defaultVersion,
@@ -857,6 +863,8 @@ type CreateAddonDefinitionRequest struct {
 	Description      string            `json:"description"`
 	Category         string            `json:"category"`
 	Icon             string            `json:"icon,omitempty"`
+	IconData         string            `json:"iconData,omitempty"`
+	Tier             string            `json:"tier,omitempty"`
 	ChartRepository  string            `json:"chartRepository"`
 	ChartName        string            `json:"chartName"`
 	DefaultVersion   string            `json:"defaultVersion"`
@@ -914,6 +922,12 @@ func (h *AddonsHandler) CreateAddonDefinition(w http.ResponseWriter, r *http.Req
 	}
 	if req.Icon != "" {
 		spec["icon"] = req.Icon
+	}
+	if req.IconData != "" {
+		spec["iconData"] = req.IconData
+	}
+	if req.Tier != "" {
+		spec["tier"] = req.Tier
 	}
 	if req.DefaultNamespace != "" {
 		spec["defaults"] = map[string]interface{}{
@@ -989,6 +1003,12 @@ func (h *AddonsHandler) UpdateAddonDefinition(w http.ResponseWriter, r *http.Req
 	}
 	if req.Icon != "" {
 		spec["icon"] = req.Icon
+	}
+	if req.IconData != "" {
+		spec["iconData"] = req.IconData
+	}
+	if req.Tier != "" {
+		spec["tier"] = req.Tier
 	}
 	spec["platform"] = req.Platform
 
