@@ -296,21 +296,31 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Get("/management/nodes", clusterHandler.GetManagementNodes)
 			r.Get("/management/pods/{namespace}", clusterHandler.GetManagementPods)
 
-			// Management addons
+			// Management addons (reads)
 			r.Get("/management/addons", addonsHandler.ListManagementAddons)
-			r.Post("/management/addons", addonsHandler.InstallManagementAddon)
 			r.Get("/management/addons/{name}", addonsHandler.GetManagementAddon)
-			r.Put("/management/addons/{name}", addonsHandler.UpdateManagementAddon)
-			r.Delete("/management/addons/{name}", addonsHandler.UninstallManagementAddon)
 
-			// Management GitOps
+			// Management addons (mutations - admin only)
+			r.Group(func(r chi.Router) {
+				r.Use(adminMiddleware)
+				r.Post("/management/addons", addonsHandler.InstallManagementAddon)
+				r.Put("/management/addons/{name}", addonsHandler.UpdateManagementAddon)
+				r.Delete("/management/addons/{name}", addonsHandler.UninstallManagementAddon)
+			})
+
+			// Management GitOps (reads)
 			r.Get("/management/gitops/status", gitopsHandler.GetManagementStatus)
-			r.Post("/management/gitops/enable", gitopsHandler.EnableManagementGitOps)
-			r.Delete("/management/gitops", gitopsHandler.DisableManagementGitOps)
 			r.Get("/management/gitops/discover", gitopsHandler.DiscoverManagementReleases)
-			r.Post("/management/gitops/export", gitopsHandler.ExportManagementAddon)
-			r.Post("/management/gitops/export-catalog", gitopsHandler.ExportManagementCatalogAddon)
-			r.Post("/management/gitops/migrate", gitopsHandler.ExportAllManagementAddons)
+
+			// Management GitOps (mutations - admin only)
+			r.Group(func(r chi.Router) {
+				r.Use(adminMiddleware)
+				r.Post("/management/gitops/enable", gitopsHandler.EnableManagementGitOps)
+				r.Delete("/management/gitops", gitopsHandler.DisableManagementGitOps)
+				r.Post("/management/gitops/export", gitopsHandler.ExportManagementAddon)
+				r.Post("/management/gitops/export-catalog", gitopsHandler.ExportManagementCatalogAddon)
+				r.Post("/management/gitops/migrate", gitopsHandler.ExportAllManagementAddons)
+			})
 
 			// Steward: TenantControlPlane and DataStore visibility
 			r.Get("/management/tenantcontrolplanes", stewardHandler.ListTenantControlPlanes)
@@ -349,10 +359,15 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			// GitOps global configuration (Git provider setup)
 			r.Route("/gitops", func(r chi.Router) {
 				r.Get("/config", gitopsHandler.GetConfig)
-				r.Post("/config", gitopsHandler.SaveConfig)
 				r.Get("/repos", gitopsHandler.ListRepositories)
 				r.Get("/repos/branches", gitopsHandler.ListBranches)
-				r.Post("/preview", gitopsHandler.PreviewManifest)
+
+				// Mutations require admin (credentials and manifest generation)
+				r.Group(func(r chi.Router) {
+					r.Use(adminMiddleware)
+					r.Post("/config", gitopsHandler.SaveConfig)
+					r.Post("/preview", gitopsHandler.PreviewManifest)
+				})
 			})
 
 			// Cluster GitOps
@@ -411,19 +426,24 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Get("/image-factory/catalog", imagesHandler.GetFactoryCatalog)
 			r.Get("/image-factory/schematics/{id}", imagesHandler.GetFactorySchematic)
 
-			// Providers
+			// Providers (reads)
 			r.Get("/providers", providerHandler.List)
-			r.Post("/providers", providerHandler.Create)
-			r.Post("/providers/test", providerHandler.TestConnection)
 			r.Get("/providers/{namespace}/{name}/images", providerHandler.ListImages)
 			r.Get("/providers/{namespace}/{name}/networks", providerHandler.ListNetworks)
 			r.Get("/providers/{namespace}/{name}/clusters", providerHandler.ListClusters)
 			r.Get("/providers/{namespace}/{name}/storage-containers", providerHandler.ListStorageContainers)
 			r.Get("/providers/{namespace}/{name}", providerHandler.Get)
-			r.Put("/providers/{namespace}/{name}", providerHandler.Update)
-			r.Delete("/providers/{namespace}/{name}", providerHandler.Delete)
-			r.Post("/providers/{namespace}/{name}/validate", providerHandler.Validate)
 			r.Get("/providers/{namespace}/{name}/ca-info", providerHandler.GetCAInfo)
+
+			// Provider mutations (admin only - credentials are sensitive)
+			r.Group(func(r chi.Router) {
+				r.Use(adminMiddleware)
+				r.Post("/providers", providerHandler.Create)
+				r.Post("/providers/test", providerHandler.TestConnection)
+				r.Put("/providers/{namespace}/{name}", providerHandler.Update)
+				r.Delete("/providers/{namespace}/{name}", providerHandler.Delete)
+				r.Post("/providers/{namespace}/{name}/validate", providerHandler.Validate)
+			})
 
 			// Teams
 			r.Get("/teams", teamHandler.List)

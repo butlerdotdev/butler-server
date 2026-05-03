@@ -771,6 +771,16 @@ func (h *WorkspaceHandler) UpdateTemplate(w http.ResponseWriter, r *http.Request
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
 
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if err := checkTemplatePermission(user, namespace); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	var body map[string]interface{}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -819,12 +829,49 @@ func (h *WorkspaceHandler) DeleteTemplate(w http.ResponseWriter, r *http.Request
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
 
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if err := checkTemplatePermission(user, namespace); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	if err := h.k8sClient.Dynamic().Resource(WorkspaceTemplateGVR).Namespace(namespace).Delete(r.Context(), name, metav1.DeleteOptions{}); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to delete template: %v", err))
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// checkTemplatePermission verifies the user can mutate workspace templates
+// in the given namespace. Cluster-scoped templates (butler-system) require
+// platform admin. Team-scoped templates require team operator.
+func checkTemplatePermission(user *auth.UserSession, namespace string) error {
+	if namespace == "butler-system" {
+		if !user.IsAdmin() {
+			return fmt.Errorf("only platform admins can modify cluster-scoped templates")
+		}
+		return nil
+	}
+
+	// Team-scoped: namespace is "team-{name}"
+	if strings.HasPrefix(namespace, "team-") {
+		teamName := strings.TrimPrefix(namespace, "team-")
+		if !user.CanOperateTeam(teamName) {
+			return fmt.Errorf("you don't have permission to modify templates for team '%s'", teamName)
+		}
+		return nil
+	}
+
+	// Unknown namespace pattern — require admin as a safe default
+	if !user.IsAdmin() {
+		return fmt.Errorf("insufficient permissions to modify templates in namespace '%s'", namespace)
+	}
+	return nil
 }
 
 // ---- Metrics ----

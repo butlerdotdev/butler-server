@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"sort"
 
+	"github.com/butlerdotdev/butler-server/internal/auth"
 	"github.com/butlerdotdev/butler-server/internal/config"
 	"github.com/butlerdotdev/butler-server/internal/k8s"
 
@@ -287,6 +288,12 @@ func (h *AddonsHandler) InstallAddon(w http.ResponseWriter, r *http.Request) {
 	clusterName := chi.URLParam(r, "name")
 	ctx := r.Context()
 
+	user := auth.UserFromContext(ctx)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
 	var req InstallAddonRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -298,9 +305,14 @@ func (h *AddonsHandler) InstallAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := h.k8sClient.GetTenantCluster(ctx, namespace, clusterName)
+	cluster, err := h.k8sClient.GetTenantCluster(ctx, namespace, clusterName)
 	if err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+
+	if err := h.checkOperatePermission(user, cluster, "install addons on"); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 
@@ -432,15 +444,26 @@ func (h *AddonsHandler) UpdateAddonValues(w http.ResponseWriter, r *http.Request
 	addonName := chi.URLParam(r, "addon")
 	ctx := r.Context()
 
+	user := auth.UserFromContext(ctx)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
 	var req UpdateAddonRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	_, err := h.k8sClient.GetTenantCluster(ctx, namespace, clusterName)
+	cluster, err := h.k8sClient.GetTenantCluster(ctx, namespace, clusterName)
 	if err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+
+	if err := h.checkOperatePermission(user, cluster, "update addons on"); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 
@@ -484,9 +507,20 @@ func (h *AddonsHandler) UninstallAddon(w http.ResponseWriter, r *http.Request) {
 	addonName := chi.URLParam(r, "addon")
 	ctx := r.Context()
 
-	_, err := h.k8sClient.GetTenantCluster(ctx, namespace, clusterName)
+	user := auth.UserFromContext(ctx)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	cluster, err := h.k8sClient.GetTenantCluster(ctx, namespace, clusterName)
 	if err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+
+	if err := h.checkOperatePermission(user, cluster, "uninstall addons from"); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 
@@ -1089,4 +1123,31 @@ func (h *AddonsHandler) DeleteAddonDefinition(w http.ResponseWriter, r *http.Req
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "addon definition deleted"})
+}
+
+// checkOperatePermission verifies the user can perform mutations on a cluster's addons.
+func (h *AddonsHandler) checkOperatePermission(user *auth.UserSession, cluster *unstructured.Unstructured, operation string) error {
+	teamRef, _, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+
+	if user.SelectedTeam != "" {
+		if user.SelectedTeamRole == auth.RoleViewer {
+			return fmt.Errorf("viewer role cannot %s clusters", operation)
+		}
+		if teamRef != "" && teamRef != user.SelectedTeam {
+			return fmt.Errorf("cannot %s cluster for team '%s' while scoped to team '%s'", operation, teamRef, user.SelectedTeam)
+		}
+		return nil
+	}
+
+	if user.IsAdmin() {
+		return nil
+	}
+
+	if teamRef == "" {
+		return fmt.Errorf("cluster has no team reference")
+	}
+	if !user.CanOperateTeam(teamRef) {
+		return fmt.Errorf("you don't have permission to %s clusters for team '%s'", operation, teamRef)
+	}
+	return nil
 }
