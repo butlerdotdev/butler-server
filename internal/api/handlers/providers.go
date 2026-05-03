@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/butlerdotdev/butler-server/internal/auth"
 	"github.com/butlerdotdev/butler-server/internal/certificates"
 	"github.com/butlerdotdev/butler-server/internal/config"
 	"github.com/butlerdotdev/butler-server/internal/k8s"
@@ -1014,6 +1015,16 @@ func (h *ProvidersHandler) ListTeamProviders(w http.ResponseWriter, r *http.Requ
 func (h *ProvidersHandler) CreateTeamProvider(w http.ResponseWriter, r *http.Request) {
 	teamName := chi.URLParam(r, "name")
 
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !user.CanOperateTeam(teamName) {
+		writeError(w, http.StatusForbidden, fmt.Sprintf("you don't have permission to manage providers for team '%s'", teamName))
+		return
+	}
+
 	var req CreateProviderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -1034,6 +1045,16 @@ func (h *ProvidersHandler) DeleteTeamProvider(w http.ResponseWriter, r *http.Req
 	namespace := chi.URLParam(r, "namespace")
 	providerName := chi.URLParam(r, "providerName")
 	ctx := r.Context()
+
+	user := auth.UserFromContext(ctx)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !user.CanOperateTeam(teamName) {
+		writeError(w, http.StatusForbidden, fmt.Sprintf("you don't have permission to manage providers for team '%s'", teamName))
+		return
+	}
 
 	// Get provider and verify it is team-scoped to this team
 	provider, err := h.k8sClient.GetProviderConfig(ctx, namespace, providerName)

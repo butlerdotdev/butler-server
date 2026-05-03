@@ -28,10 +28,12 @@ import (
 	"strings"
 
 	butlerv1alpha1 "github.com/butlerdotdev/butler-api/api/v1alpha1"
+	"github.com/butlerdotdev/butler-server/internal/auth"
 	"github.com/butlerdotdev/butler-server/internal/config"
 	"github.com/butlerdotdev/butler-server/internal/gitops"
 	"github.com/butlerdotdev/butler-server/internal/k8s"
 	"github.com/go-chi/chi/v5"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 // GitOpsHandler handles GitOps-related API requests.
@@ -236,6 +238,22 @@ func (h *GitOpsHandler) EnableGitOps(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
+
+	user := auth.UserFromContext(ctx)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	cluster, err := h.k8sClient.GetTenantCluster(ctx, namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+	if err := h.checkOperatePermission(user, cluster, "enable GitOps on"); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 
 	var req gitops.EnableGitOpsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -483,6 +501,22 @@ func (h *GitOpsHandler) DisableGitOps(w http.ResponseWriter, r *http.Request) {
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
 
+	user := auth.UserFromContext(ctx)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	cluster, err := h.k8sClient.GetTenantCluster(ctx, namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+	if err := h.checkOperatePermission(user, cluster, "disable GitOps on"); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+
 	h.logger.Info("Disabling GitOps on cluster",
 		"namespace", namespace,
 		"name", name,
@@ -532,6 +566,22 @@ func (h *GitOpsHandler) ExportAddon(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
+
+	user := auth.UserFromContext(ctx)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	cluster, err := h.k8sClient.GetTenantCluster(ctx, namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+	if err := h.checkOperatePermission(user, cluster, "export addons from"); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 
 	var req gitops.ExportAddonRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -739,6 +789,22 @@ func (h *GitOpsHandler) ExportRelease(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
+
+	user := auth.UserFromContext(ctx)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	cluster, err := h.k8sClient.GetTenantCluster(ctx, namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+	if err := h.checkOperatePermission(user, cluster, "export releases from"); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 
 	var req struct {
 		ReleaseName      string `json:"releaseName"`
@@ -955,6 +1021,22 @@ func (h *GitOpsHandler) ExportAllAddons(w http.ResponseWriter, r *http.Request) 
 	ctx := r.Context()
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
+
+	user := auth.UserFromContext(ctx)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	cluster, err := h.k8sClient.GetTenantCluster(ctx, namespace, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster not found: %v", err))
+		return
+	}
+	if err := h.checkOperatePermission(user, cluster, "migrate addons on"); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
 
 	var req gitops.MigrateToGitOpsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2187,4 +2269,31 @@ func stripDuplicateNamespace(manifests map[string][]byte) {
 		b.WriteByte('\n')
 	}
 	manifests["kustomization.yaml"] = []byte(b.String())
+}
+
+// checkOperatePermission verifies the user can perform mutations on a cluster's GitOps config.
+func (h *GitOpsHandler) checkOperatePermission(user *auth.UserSession, cluster *unstructured.Unstructured, operation string) error {
+	teamRef, _, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+
+	if user.SelectedTeam != "" {
+		if user.SelectedTeamRole == auth.RoleViewer {
+			return fmt.Errorf("viewer role cannot %s clusters", operation)
+		}
+		if teamRef != "" && teamRef != user.SelectedTeam {
+			return fmt.Errorf("cannot %s cluster for team '%s' while scoped to team '%s'", operation, teamRef, user.SelectedTeam)
+		}
+		return nil
+	}
+
+	if user.IsAdmin() {
+		return nil
+	}
+
+	if teamRef == "" {
+		return fmt.Errorf("cluster has no team reference")
+	}
+	if !user.CanOperateTeam(teamRef) {
+		return fmt.Errorf("you don't have permission to %s clusters for team '%s'", operation, teamRef)
+	}
+	return nil
 }
