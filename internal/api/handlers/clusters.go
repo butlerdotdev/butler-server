@@ -218,6 +218,10 @@ type CreateClusterRequest struct {
 	// Workspaces
 	WorkspacesEnabled bool `json:"workspacesEnabled,omitempty"`
 
+	// Ingress controller - defaults to enabled when omitted.
+	// Set to false to skip Traefik installation (saves 1 LB IP).
+	IngressEnabled *bool `json:"ingressEnabled,omitempty"`
+
 	// NTP time servers for Talos worker nodes (optional).
 	// Overrides provider and platform defaults.
 	TimeServers []string `json:"timeServers,omitempty"`
@@ -339,6 +343,17 @@ func (h *ClusterHandler) Create(w http.ResponseWriter, r *http.Request) {
 			"enabled":      true,
 			"defaultImage": "ghcr.io/butlerdotdev/workspace-base:latest",
 		}
+	}
+
+	if req.IngressEnabled != nil && !*req.IngressEnabled {
+		addonsMap, _ := spec["addons"].(map[string]interface{})
+		if addonsMap == nil {
+			addonsMap = map[string]interface{}{}
+		}
+		addonsMap["ingress"] = map[string]interface{}{
+			"enabled": false,
+		}
+		spec["addons"] = addonsMap
 	}
 
 	if req.HarvesterNetworkName != "" {
