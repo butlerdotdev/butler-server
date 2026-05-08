@@ -82,8 +82,18 @@ type CategoryInfo struct {
 }
 
 // InstalledAddonResponse represents an installed addon's status.
+//
+// Name is the K8s metadata name (used for CRUD operations like uninstall).
+// Addon is the AddonDefinition name (the canonical addon identifier for
+// matching, display, and policy decisions).
+//
+// For auto-enrolled TenantAddons, Name follows the pattern <cluster>-<addon>
+// (e.g., "obs-perf-dev-vector-agent") and Addon is the AddonDefinition name
+// (e.g., "vector-agent"). For manually-named TenantAddons, Name and Addon
+// may differ arbitrarily.
 type InstalledAddonResponse struct {
 	Name             string                 `json:"name"`
+	Addon            string                 `json:"addon,omitempty"`
 	DisplayName      string                 `json:"displayName,omitempty"`
 	Status           string                 `json:"status"`
 	Phase            string                 `json:"phase,omitempty"`
@@ -263,6 +273,7 @@ func (h *AddonsHandler) ListClusterAddons(w http.ResponseWriter, r *http.Request
 
 			addons = append(addons, InstalledAddonResponse{
 				Name:        addonName,
+				Addon:       addonName,
 				DisplayName: displayName,
 				Status:      MapAddonStatus(status),
 				Version:     version,
@@ -845,6 +856,7 @@ func (h *AddonsHandler) tenantAddonToResponse(ctx context.Context, ta *unstructu
 
 	return InstalledAddonResponse{
 		Name:             name,
+		Addon:            addonName,
 		DisplayName:      displayName,
 		Status:           MapAddonStatus(phase),
 		Phase:            phase,
