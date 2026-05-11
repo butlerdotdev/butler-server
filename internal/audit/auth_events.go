@@ -49,6 +49,23 @@ func RecordLogout(emitter *Emitter, email, sourceIP string) {
 	})
 }
 
+// RecordGroupSync records that a user's IdP groups were written to
+// the User CRD status.lastSeenGroups field.
+func RecordGroupSync(emitter *Emitter, email string, groupCount int, sourceIP string) {
+	if emitter == nil {
+		return
+	}
+	emitter.Emit(Event{
+		Timestamp:    time.Now().UTC(),
+		User:         email,
+		Action:       "group_sync",
+		ResourceType: "user",
+		Success:      true,
+		StatusCode:   200,
+		SourceIP:     sourceIP,
+	})
+}
+
 // RecordLoginFailed records a failed login attempt.
 func RecordLoginFailed(emitter *Emitter, email, provider, sourceIP, reason string) {
 	if emitter == nil {

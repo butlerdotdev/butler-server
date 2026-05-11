@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/butlerdotdev/butler-server/internal/audit"
@@ -167,6 +168,24 @@ func (h *AuthHandler) Callback(w http.ResponseWriter, r *http.Request) {
 		// This is a graceful degradation
 	} else {
 		h.logger.Info("SSO user ensured", "username", user.Name, "email", user.Email)
+
+		// Persist IdP groups to User CRD status so the butler-controller
+		// User reconciler can resolve group-based Team membership without
+		// requiring the user to be actively logged in.
+		if !groupsEqual(claims.Groups, user.LastSeenGroups) {
+			if err := h.userService.PatchLastSeenGroups(r.Context(), user.Name, claims.Groups); err != nil {
+				h.logger.Warn("Failed to patch lastSeenGroups",
+					"username", user.Name,
+					"error", err,
+				)
+			} else {
+				h.logger.Info("Updated lastSeenGroups",
+					"username", user.Name,
+					"groupCount", len(claims.Groups),
+				)
+				audit.RecordGroupSync(h.auditEmitter, claims.Email, len(claims.Groups), r.RemoteAddr)
+			}
+		}
 
 		// SECURITY: Check if user is disabled BEFORE creating session
 		if user.Disabled {
@@ -631,4 +650,30 @@ func (h *AuthHandler) createLegacyAdminSession(w http.ResponseWriter, r *http.Re
 			PlatformRole:    auth.RoleAdmin,
 		},
 	})
+}
+
+// groupsEqual compares two group slices for set equality. Sorts copies
+// of both slices before comparing so that IdP ordering changes do not
+// cause unnecessary SSA writes.
+func groupsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	aSorted := make([]string, len(a))
+	copy(aSorted, a)
+	sort.Strings(aSorted)
+
+	bSorted := make([]string, len(b))
+	copy(bSorted, b)
+	sort.Strings(bSorted)
+
+	for i := range aSorted {
+		if aSorted[i] != bSorted[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -115,8 +115,13 @@ type SetPasswordRequest struct {
 
 // ListUsers returns all users from User CRDs.
 // GET /api/users (accessible to any authenticated user)
+//
+// The User Management page shows known users (User CRDs that exist).
+// SSO users appear after first login. Users who exist only in an IdP
+// group and have never authenticated through Butler are not represented.
+// The Team detail page surfaces configured IdP group membership directly
+// and is the correct surface for the "who could access this team" question.
 func (h *UserHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
-	// Get all users from User CRDs
 	users, err := h.userService.ListUsers(r.Context())
 	if err != nil {
 		h.logger.Error("Failed to list users", "error", err)
@@ -124,14 +129,9 @@ func (h *UserHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build response with team membership info
 	response := make([]UserListResponse, 0, len(users))
-
-	// Get team membership for all users (batch lookup)
-	teamMemberships := h.teamResolver.ListAllMembers(r.Context())
-
 	for _, u := range users {
-		userResp := UserListResponse{
+		response = append(response, UserListResponse{
 			Username:        u.Name,
 			Email:           u.Email,
 			DisplayName:     u.DisplayName,
@@ -140,17 +140,10 @@ func (h *UserHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 			Disabled:        u.Disabled,
 			AuthType:        u.AuthType,
 			SSOProvider:     u.SSOProvider,
+			Teams:           u.Teams,
 			IsPlatformAdmin: u.IsPlatformAdmin,
 			PlatformRole:    u.PlatformRole,
-		}
-
-		// Add team membership info
-		emailLower := strings.ToLower(u.Email)
-		if membership, ok := teamMemberships[emailLower]; ok {
-			userResp.Teams = membership.Teams
-		}
-
-		response = append(response, userResp)
+		})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
@@ -226,14 +219,6 @@ func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get team membership
-	var teams []string
-	if membership := h.teamResolver.ListAllMembers(r.Context()); membership != nil {
-		if m, ok := membership[strings.ToLower(user.Email)]; ok {
-			teams = m.Teams
-		}
-	}
-
 	writeJSON(w, http.StatusOK, UserListResponse{
 		Username:        user.Name,
 		Email:           user.Email,
@@ -243,7 +228,7 @@ func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
 		Disabled:        user.Disabled,
 		AuthType:        user.AuthType,
 		SSOProvider:     user.SSOProvider,
-		Teams:           teams,
+		Teams:           user.Teams,
 		IsPlatformAdmin: user.IsPlatformAdmin,
 		PlatformRole:    user.PlatformRole,
 	})
