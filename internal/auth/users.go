@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -33,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
@@ -68,6 +70,8 @@ type UserInfo struct {
 	SSOProvider     string
 	IsPlatformAdmin bool
 	PlatformRole    string
+	LastSeenGroups  []string
+	Teams           []string
 }
 
 // UserService handles user management operations using User CRDs.
@@ -279,6 +283,48 @@ func (s *UserService) EnsureSSOUser(ctx context.Context, req EnsureSSOUserReques
 	}
 
 	return s.userFromUnstructured(created), nil
+}
+
+// PatchLastSeenGroups SSA-patches status.lastSeenGroups on the User CRD.
+// Called at SSO login to persist the IdP group identifiers so the
+// butler-controller User reconciler can resolve group-based Team
+// membership without requiring the user to be actively logged in.
+//
+// Uses Server-Side Apply with field manager "butler-server/user-auth".
+// The controller's field manager ("butler-controller/user-teams") owns
+// status.teams and status.teamsResolvedAt. The two field managers do
+// not conflict because they own disjoint status fields.
+func (s *UserService) PatchLastSeenGroups(ctx context.Context, username string, groups []string) error {
+	// Normalize nil to empty slice for consistent JSON encoding.
+	// An empty lastSeenGroups means "user authenticated but IdP returned
+	// no groups" which is different from the field being absent.
+	if groups == nil {
+		groups = []string{}
+	}
+
+	patch := map[string]interface{}{
+		"apiVersion": "butler.butlerlabs.dev/v1alpha1",
+		"kind":       "User",
+		"metadata": map[string]interface{}{
+			"name": username,
+		},
+		"status": map[string]interface{}{
+			"lastSeenGroups": groups,
+		},
+	}
+
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("marshaling lastSeenGroups patch: %w", err)
+	}
+
+	_, err = s.dynamicClient.Resource(UserGVR).Patch(ctx, username, types.ApplyPatchType, patchBytes,
+		metav1.PatchOptions{
+			FieldManager: "butler-server/user-auth",
+		},
+		"status",
+	)
+	return err
 }
 
 // GetUser gets a user by username.
@@ -681,6 +727,25 @@ func (s *UserService) userFromUnstructured(u *unstructured.Unstructured) *UserIn
 		phase = "Active"
 	}
 
+	// Read status.lastSeenGroups (written by this server via SSA at login).
+	var lastSeenGroups []string
+	if rawGroups, found, _ := unstructured.NestedStringSlice(u.Object, "status", "lastSeenGroups"); found {
+		lastSeenGroups = rawGroups
+	}
+
+	// Read status.teams (written by butler-controller via SSA).
+	// Each entry is {name, role}; extract team names for the handler response.
+	var teams []string
+	if rawTeams, found, _ := unstructured.NestedSlice(u.Object, "status", "teams"); found {
+		for _, t := range rawTeams {
+			if m, ok := t.(map[string]interface{}); ok {
+				if name, _ := m["name"].(string); name != "" {
+					teams = append(teams, name)
+				}
+			}
+		}
+	}
+
 	return &UserInfo{
 		Name:            u.GetName(),
 		Email:           email,
@@ -692,6 +757,8 @@ func (s *UserService) userFromUnstructured(u *unstructured.Unstructured) *UserIn
 		SSOProvider:     ssoProvider,
 		IsPlatformAdmin: isPlatformAdmin,
 		PlatformRole:    platformRole,
+		LastSeenGroups:  lastSeenGroups,
+		Teams:           teams,
 	}
 }
 
