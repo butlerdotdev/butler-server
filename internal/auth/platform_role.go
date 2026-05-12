@@ -111,10 +111,10 @@ func ResolvePlatformRole(userGroups []string, platformRoleGroups []PlatformRoleG
 		return ""
 	}
 
-	groupSet := buildGroupLookupSet(userGroups)
+	groupSet := BuildGroupLookupSet(userGroups)
 	highest := ""
 	for _, entry := range platformRoleGroups {
-		if matchGroup(entry.Name, groupSet) {
+		if MatchGroup(entry.Name, groupSet) {
 			highest = HighestRole([]string{highest, entry.Role})
 		}
 	}
@@ -133,11 +133,11 @@ func EffectivePlatformRole(crdPlatformRole string, isPlatformAdmin bool, groupRo
 	return HighestRole(roles)
 }
 
-// matchGroup checks if a configured group name matches any entry in the
+// MatchGroup checks if a configured group name matches any entry in the
 // user's group lookup set. Uses the same normalization as
 // TeamResolver.groupMatches: normalized (domain-stripped, CN-extracted)
 // and exact (lowercased) comparisons.
-func matchGroup(configuredGroup string, groupSet map[string]bool) bool {
+func MatchGroup(configuredGroup string, groupSet map[string]bool) bool {
 	if groupSet[normalizeGroupName(configuredGroup)] {
 		return true
 	}

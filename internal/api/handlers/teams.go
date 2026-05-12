@@ -17,6 +17,7 @@ limitations under the License.
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -35,14 +36,16 @@ import (
 type TeamHandler struct {
 	k8sClient    *k8s.Client
 	teamResolver *auth.TeamResolver
+	userService  *auth.UserService
 	logger       *slog.Logger
 }
 
 // NewTeamHandler creates a new TeamHandler.
-func NewTeamHandler(k8sClient *k8s.Client, teamResolver *auth.TeamResolver, logger *slog.Logger) *TeamHandler {
+func NewTeamHandler(k8sClient *k8s.Client, teamResolver *auth.TeamResolver, userService *auth.UserService, logger *slog.Logger) *TeamHandler {
 	return &TeamHandler{
 		k8sClient:    k8sClient,
 		teamResolver: teamResolver,
+		userService:  userService,
 		logger:       logger,
 	}
 }
@@ -69,15 +72,16 @@ type TeamResponse struct {
 // Source indicates how the user has access: "direct", "group", or "elevated".
 // Elevated means the user has group access but was given a higher role directly.
 type TeamMemberResponse struct {
-	Email      string `json:"email"`
-	Name       string `json:"name,omitempty"`
-	Role       string `json:"role"`
-	Source     string `json:"source"`
-	GroupName  string `json:"groupName,omitempty"`
-	GroupRole  string `json:"groupRole,omitempty"`
-	DirectRole string `json:"directRole,omitempty"`
-	CanRemove  bool   `json:"canRemove"`
-	RemoveNote string `json:"removeNote,omitempty"`
+	Email           string `json:"email"`
+	Name            string `json:"name,omitempty"`
+	Role            string `json:"role"`
+	Source          string `json:"source"`
+	GroupName       string `json:"groupName,omitempty"`
+	GroupRole       string `json:"groupRole,omitempty"`
+	GroupIdentifier string `json:"groupIdentifier,omitempty"`
+	DirectRole      string `json:"directRole,omitempty"`
+	CanRemove       bool   `json:"canRemove"`
+	RemoveNote      string `json:"removeNote,omitempty"`
 }
 
 // TeamGroupAccessResponse represents a group access rule for a team.
@@ -180,21 +184,47 @@ func isHigherRole(role1, role2 string) bool {
 	return roleLevel(role1) > roleLevel(role2)
 }
 
-// groupMatchesEmail checks if an email's domain matches a group's domain.
-// This is a heuristic for potential group membership when we don't have IdP data.
-func groupMatchesEmail(groupName, email string) bool {
-	parts := strings.Split(email, "@")
-	if len(parts) != 2 {
-		return false
+// findGroupAccessByEmail checks if a user has group-based access to a team by
+// looking up their User CRD and matching status.lastSeenGroups against the
+// team's configured groups. Uses the same normalized matching that drives
+// auth-time resolution.
+func findGroupAccessByEmail(ctx context.Context, userService *auth.UserService, email string, groups []TeamGroupAccessResponse) (bool, string, string) {
+	if len(groups) == 0 {
+		return false, "", ""
 	}
-	emailDomain := strings.ToLower(parts[1])
+	userInfo, err := userService.GetUserByEmail(ctx, email)
+	if err != nil || userInfo == nil || len(userInfo.LastSeenGroups) == 0 {
+		return false, "", ""
+	}
+	return findGroupAccessFromGroups(userInfo.LastSeenGroups, groups)
+}
 
-	groupLower := strings.ToLower(groupName)
-	groupParts := strings.Split(groupLower, "@")
-	if len(groupParts) == 2 {
-		return emailDomain == groupParts[1]
+// findGroupAccessFromGroups checks if any of the given lastSeenGroups match the
+// team's configured groups. Returns the highest-role matching group.
+func findGroupAccessFromGroups(lastSeenGroups []string, groups []TeamGroupAccessResponse) (bool, string, string) {
+	if len(lastSeenGroups) == 0 || len(groups) == 0 {
+		return false, "", ""
 	}
-	return false
+	groupSet := auth.BuildGroupLookupSet(lastSeenGroups)
+
+	var bestGroup string
+	var bestRole string
+	found := false
+
+	for _, tg := range groups {
+		if auth.MatchGroup(tg.Name, groupSet) {
+			role := tg.Role
+			if role == "" {
+				role = auth.RoleViewer
+			}
+			if !found || isHigherRole(role, bestRole) {
+				found = true
+				bestGroup = tg.Name
+				bestRole = role
+			}
+		}
+	}
+	return found, bestGroup, bestRole
 }
 
 // getTeamGroups extracts group access rules from a Team CRD.
@@ -223,24 +253,6 @@ func getTeamGroups(team *unstructured.Unstructured) []TeamGroupAccessResponse {
 	return groups
 }
 
-// findPotentialGroupAccess checks if an email might have access via team groups.
-// Returns the highest-privilege matching group if found.
-func findPotentialGroupAccess(email string, groups []TeamGroupAccessResponse) (bool, string, string) {
-	var bestGroup string
-	var bestRole string
-	found := false
-
-	for _, group := range groups {
-		if groupMatchesEmail(group.Name, email) {
-			if !found || isHigherRole(group.Role, bestRole) {
-				found = true
-				bestGroup = group.Name
-				bestRole = group.Role
-			}
-		}
-	}
-	return found, bestGroup, bestRole
-}
 
 // List returns all teams.
 // GET /api/teams
@@ -555,39 +567,26 @@ func (h *TeamHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 
 	groups := getTeamGroups(team)
 
-	// findUserGroupAccess checks group access for an email.
-	// For the current user, we use actual IdP groups. For others, we use domain matching.
-	findUserGroupAccess := func(email string) (bool, string, string) {
-		if user == nil || !strings.EqualFold(user.Email, email) {
-			return findPotentialGroupAccess(email, groups)
-		}
+	// Load all User CRDs so we can match their lastSeenGroups against team groups.
+	allUsers, err := h.userService.ListUsers(r.Context())
+	if err != nil {
+		h.logger.Error("Failed to list users for group resolution", "team", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to resolve group members")
+		return
+	}
 
-		var hasAccess bool
-		var groupName, groupRole string
-		for _, userGroup := range user.Groups {
-			userGroupLower := strings.ToLower(userGroup)
-			for _, teamGroup := range groups {
-				teamGroupLower := strings.ToLower(teamGroup.Name)
-				if userGroupLower == teamGroupLower ||
-					strings.HasPrefix(userGroupLower, teamGroupLower+"@") ||
-					strings.HasPrefix(teamGroupLower, userGroupLower+"@") ||
-					strings.Contains(userGroupLower, teamGroupLower) ||
-					strings.Contains(teamGroupLower, userGroupLower) {
-					if !hasAccess || isHigherRole(teamGroup.Role, groupRole) {
-						hasAccess = true
-						groupName = teamGroup.Name
-						groupRole = teamGroup.Role
-					}
-				}
-			}
+	// Index users by lowercased email for cross-referencing with spec.access.users.
+	userByEmail := make(map[string]*auth.UserInfo, len(allUsers))
+	for _, u := range allUsers {
+		if u.Email != "" {
+			userByEmail[strings.ToLower(u.Email)] = u
 		}
-		return hasAccess, groupName, groupRole
 	}
 
 	seenEmails := make(map[string]bool)
 	members := make([]TeamMemberResponse, 0)
 
-	// Process explicit members from spec.access.users
+	// Process explicit members from spec.access.users.
 	usersSlice, _, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users")
 	for _, u := range usersSlice {
 		userMap, ok := u.(map[string]interface{})
@@ -609,7 +608,12 @@ func (h *TeamHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 		emailLower := strings.ToLower(email)
 		seenEmails[emailLower] = true
 
-		hasGroupAccess, groupName, groupRole := findUserGroupAccess(email)
+		// Check group access via User CRD lastSeenGroups.
+		var hasGroupAccess bool
+		var groupName, groupRole string
+		if userInfo, ok := userByEmail[emailLower]; ok {
+			hasGroupAccess, groupName, groupRole = findGroupAccessFromGroups(userInfo.LastSeenGroups, groups)
+		}
 
 		member := TeamMemberResponse{
 			Email: email,
@@ -617,25 +621,27 @@ func (h *TeamHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if hasGroupAccess && isHigherRole(directRole, groupRole) {
-			// Elevated: has group access but direct role is higher
+			// Elevated: has group access but direct role is higher.
 			member.Role = directRole
 			member.Source = "elevated"
 			member.GroupName = groupName
 			member.GroupRole = groupRole
+			member.GroupIdentifier = groupName
 			member.DirectRole = directRole
 			member.CanRemove = true
 			member.RemoveNote = "Will revert to " + groupRole + " via " + groupName
 		} else if hasGroupAccess {
-			// Group access at same or higher level (shouldn't happen with Option A enforcement)
+			// Group access at same or higher level than direct role.
 			member.Role = groupRole
 			member.Source = "group"
 			member.GroupName = groupName
 			member.GroupRole = groupRole
+			member.GroupIdentifier = groupName
 			member.DirectRole = directRole
 			member.CanRemove = true
 			member.RemoveNote = "Redundant direct membership"
 		} else {
-			// Direct only
+			// Direct only.
 			member.Role = directRole
 			member.Source = "direct"
 			member.CanRemove = email != user.Email
@@ -644,29 +650,51 @@ func (h *TeamHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 		members = append(members, member)
 	}
 
-	// Add current user if they have group access but no direct membership
-	if user.Email != "" {
-		emailLower := strings.ToLower(user.Email)
-		if !seenEmails[emailLower] && user.HasTeamMembership(name) {
-			hasGroupAccess, groupName, groupRole := findUserGroupAccess(user.Email)
-			if hasGroupAccess {
-				members = append(members, TeamMemberResponse{
-					Email:      user.Email,
-					Name:       user.Name,
-					Role:       groupRole,
-					Source:     "group",
-					GroupName:  groupName,
-					GroupRole:  groupRole,
-					CanRemove:  false,
-					RemoveNote: "Access via group membership",
-				})
-			}
+	// Discover group-only members from User CRDs. These are users whose
+	// lastSeenGroups match a team group but who are not in spec.access.users.
+	for _, u := range allUsers {
+		if u.Email == "" {
+			continue
+		}
+		emailLower := strings.ToLower(u.Email)
+		if seenEmails[emailLower] {
+			continue
+		}
+
+		hasGroupAccess, groupName, groupRole := findGroupAccessFromGroups(u.LastSeenGroups, groups)
+		if !hasGroupAccess {
+			continue
+		}
+
+		seenEmails[emailLower] = true
+		members = append(members, TeamMemberResponse{
+			Email:           u.Email,
+			Name:            u.DisplayName,
+			Role:            groupRole,
+			Source:          "group",
+			GroupName:       groupName,
+			GroupRole:       groupRole,
+			GroupIdentifier: groupName,
+			CanRemove:       false,
+			RemoveNote:      "Access via group membership",
+		})
+	}
+
+	// Compute per-group observed member counts for the Group Sync section.
+	groupMemberCounts := make(map[string]int, len(groups))
+	for _, g := range groups {
+		groupMemberCounts[g.Name] = 0
+	}
+	for _, m := range members {
+		if m.GroupName != "" {
+			groupMemberCounts[m.GroupName]++
 		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"members": members,
-		"groups":  groups,
+		"members":           members,
+		"groups":            groups,
+		"groupMemberCounts": groupMemberCounts,
 	})
 }
 
@@ -733,9 +761,9 @@ func (h *TeamHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check for potential group access (Option A: block redundant, allow elevation)
+	// Check for group access via User CRD lastSeenGroups (block redundant, allow elevation).
 	groups := getTeamGroups(team)
-	hasGroupAccess, groupName, groupRole := findPotentialGroupAccess(req.Email, groups)
+	hasGroupAccess, groupName, groupRole := findGroupAccessByEmail(r.Context(), h.userService, req.Email, groups)
 
 	if hasGroupAccess {
 		if !isHigherRole(req.Role, groupRole) {
@@ -902,9 +930,9 @@ func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for group access to inform response
+	// Check for group access via User CRD lastSeenGroups to inform response.
 	groups := getTeamGroups(team)
-	hasGroupAccess, groupName, groupRole := findPotentialGroupAccess(decodedEmail, groups)
+	hasGroupAccess, groupName, groupRole := findGroupAccessByEmail(r.Context(), h.userService, decodedEmail, groups)
 
 	users, found, _ := unstructured.NestedSlice(team.Object, "spec", "access", "users")
 	if !found || users == nil {
