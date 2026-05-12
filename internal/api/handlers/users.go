@@ -130,8 +130,14 @@ func (h *UserHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := make([]UserListResponse, 0, len(users))
+
+	// Server-side join: resolve team membership from Team CRDs for the
+	// Users page. This works regardless of whether the butler-controller
+	// User reconciler has populated status.teams on the User CRDs.
+	teamMemberships := h.teamResolver.ListAllMembers(r.Context())
+
 	for _, u := range users {
-		response = append(response, UserListResponse{
+		userResp := UserListResponse{
 			Username:        u.Name,
 			Email:           u.Email,
 			DisplayName:     u.DisplayName,
@@ -143,7 +149,18 @@ func (h *UserHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
 			Teams:           u.Teams,
 			IsPlatformAdmin: u.IsPlatformAdmin,
 			PlatformRole:    u.PlatformRole,
-		})
+		}
+
+		// Prefer controller-written status.teams when available, fall
+		// back to server-side join from Team CRDs.
+		if len(userResp.Teams) == 0 {
+			emailLower := strings.ToLower(u.Email)
+			if membership, ok := teamMemberships[emailLower]; ok {
+				userResp.Teams = membership.Teams
+			}
+		}
+
+		response = append(response, userResp)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
