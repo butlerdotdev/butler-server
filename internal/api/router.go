@@ -222,7 +222,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	clusterHandler := handlers.NewClusterHandler(cfg.K8sClient, cfg.Config)
 	providerHandler := handlers.NewProvidersHandler(cfg.K8sClient, cfg.Config)
 	addonsHandler := handlers.NewAddonsHandler(cfg.K8sClient, cfg.Config)
-	teamHandler := handlers.NewTeamHandler(cfg.K8sClient, teamResolver, cfg.Logger.With("component", "teams"))
+	teamHandler := handlers.NewTeamHandler(cfg.K8sClient, teamResolver, userService, cfg.Logger.With("component", "teams"))
 	certificateHandler := handlers.NewCertificateHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "certificates"))
 	gitopsHandler := handlers.NewGitOpsHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "gitops"))
 	identityProviderHandler := handlers.NewIdentityProvidersHandler(cfg.K8sClient, cfg.Config)

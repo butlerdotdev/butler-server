@@ -437,10 +437,10 @@ func TestMatchGroup(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			groupSet := buildGroupLookupSet(tt.userGroups)
-			got := matchGroup(tt.configuredGroup, groupSet)
+			groupSet := BuildGroupLookupSet(tt.userGroups)
+			got := MatchGroup(tt.configuredGroup, groupSet)
 			if got != tt.want {
-				t.Errorf("matchGroup(%q) = %v, want %v", tt.configuredGroup, got, tt.want)
+				t.Errorf("MatchGroup(%q) = %v, want %v", tt.configuredGroup, got, tt.want)
 			}
 		})
 	}

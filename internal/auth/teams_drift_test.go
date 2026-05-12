@@ -55,7 +55,7 @@ func TestResolutionDrift(t *testing.T) {
 
 			// Resolve group-based memberships: check spec.access.groups[]
 			if len(f.Input.LastSeenGroups) > 0 {
-				groupSet := buildGroupLookupSet(f.Input.LastSeenGroups)
+				groupSet := BuildGroupLookupSet(f.Input.LastSeenGroups)
 				for _, team := range f.Input.Teams {
 					for _, g := range team.Access.Groups {
 						if !groupMatchesForTest(g.Name, groupSet) {

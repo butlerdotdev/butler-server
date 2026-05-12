@@ -165,11 +165,11 @@ func normalizeGroupName(group string) string {
 	return strings.ToLower(group)
 }
 
-// buildGroupLookupSet creates a lookup set for user's IdP groups.
+// BuildGroupLookupSet creates a lookup set for user's IdP groups.
 // It stores multiple variations of each group for flexible matching:
 // - Original (lowercased)
 // - Normalized (without domain suffix)
-func buildGroupLookupSet(idpGroups []string) map[string]bool {
+func BuildGroupLookupSet(idpGroups []string) map[string]bool {
 	groupSet := make(map[string]bool)
 
 	for _, g := range idpGroups {
@@ -214,7 +214,7 @@ func (r *TeamResolver) groupMatches(configuredGroup string, groupSet map[string]
 // The idpName parameter is optional - if provided, only groups matching that IdP are considered.
 func (r *TeamResolver) resolveGroupMappings(ctx context.Context, idpGroups []string, idpName string, memberships map[string]TeamMembership) error {
 	// Build a flexible lookup set for the user's groups
-	groupSet := buildGroupLookupSet(idpGroups)
+	groupSet := BuildGroupLookupSet(idpGroups)
 
 	r.logger.Debug("Group matching lookup set",
 		"idpGroups", idpGroups,
@@ -570,7 +570,7 @@ func (r *TeamResolver) ResolveEnvironmentRole(ctx context.Context, teamName, env
 		// access per ADR-009 membership check, so this mirrors the
 		// existing matcher to avoid semantic drift.
 		if groups, _, _ := unstructured.NestedSlice(env, "access", "groups"); len(groups) > 0 {
-			groupSet := buildGroupLookupSet(idpGroups)
+			groupSet := BuildGroupLookupSet(idpGroups)
 			for _, g := range groups {
 				grp, ok := g.(map[string]interface{})
 				if !ok {
