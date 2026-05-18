@@ -97,6 +97,12 @@ var (
 		Resource: "loadbalancerrequests",
 	}
 
+	ClusterCreationPolicyGVR = schema.GroupVersionResource{
+		Group:    "butler.butlerlabs.dev",
+		Version:  "v1alpha1",
+		Resource: "clustercreationpolicies",
+	}
+
 	TenantControlPlaneGVR = schema.GroupVersionResource{
 		Group:    "steward.butlerlabs.dev",
 		Version:  "v1alpha1",
