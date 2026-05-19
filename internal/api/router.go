@@ -226,6 +226,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	certificateHandler := handlers.NewCertificateHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "certificates"))
 	gitopsHandler := handlers.NewGitOpsHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "gitops"))
 	identityProviderHandler := handlers.NewIdentityProvidersHandler(cfg.K8sClient, cfg.Config)
+	adminPoliciesHandler := handlers.NewAdminPoliciesHandler(cfg.K8sClient)
 	networksHandler := handlers.NewNetworksHandler(cfg.K8sClient, cfg.Config)
 	workspaceHandler := handlers.NewWorkspaceHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "workspaces"))
 	observabilityHandler := handlers.NewObservabilityHandler(cfg.K8sClient, cfg.Config, cfg.Logger.With("component", "observability"))
@@ -482,6 +483,10 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Get("/identity-providers", identityProviderHandler.List)
 				r.Get("/identity-providers/{name}", identityProviderHandler.Get)
 
+				// ClusterCreationPolicy (read-only for viewers, ADR-018)
+				r.Get("/policies", adminPoliciesHandler.List)
+				r.Get("/policies/{name}", adminPoliciesHandler.Get)
+
 				// Network pools (read-only for viewers)
 				r.Get("/networks", networksHandler.ListNetworkPools)
 				r.Get("/networks/{namespace}/{name}", networksHandler.GetNetworkPool)
@@ -518,6 +523,11 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 					r.Put("/identity-providers/{name}", identityProviderHandler.Update)
 					r.Delete("/identity-providers/{name}", identityProviderHandler.Delete)
 					r.Post("/identity-providers/{name}/validate", identityProviderHandler.Validate)
+
+					// ClusterCreationPolicy mutations (admin only, ADR-018)
+					r.Post("/policies", adminPoliciesHandler.Create)
+					r.Put("/policies/{name}", adminPoliciesHandler.Update)
+					r.Delete("/policies/{name}", adminPoliciesHandler.Delete)
 
 					// Addon catalog management (admin only)
 					r.Post("/addons/catalog", addonsHandler.CreateAddonDefinition)

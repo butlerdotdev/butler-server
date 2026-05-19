@@ -1480,7 +1480,12 @@ func (h *ProvidersHandler) ListImages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"images": images})
+	images, polMeta := h.applyImagePolicy(ctx, providerType, images)
+	resp := map[string]interface{}{"images": images}
+	if polMeta != nil {
+		resp["policy"] = polMeta
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // listHarvesterImages fetches VM images from Harvester.
@@ -1678,7 +1683,12 @@ func (h *ProvidersHandler) ListNetworks(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"networks": networks})
+	networks, polMeta := h.applyNetworkPolicy(ctx, providerType, networks)
+	resp := map[string]interface{}{"networks": networks}
+	if polMeta != nil {
+		resp["policy"] = polMeta
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // listHarvesterNetworks fetches VM networks from Harvester.
@@ -2001,7 +2011,12 @@ func (h *ProvidersHandler) ListClusters(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"clusters": clusters})
+	clusters, polMeta := h.applyClusterPolicy(ctx, "nutanix", clusters)
+	resp := map[string]interface{}{"clusters": clusters}
+	if polMeta != nil {
+		resp["policy"] = polMeta
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *ProvidersHandler) listNutanixClusters(ctx context.Context, endpoint string, port int32, username, password string, insecure bool, caPEM []byte) ([]ClusterInfo, error) {
@@ -2133,7 +2148,12 @@ func (h *ProvidersHandler) ListStorageContainers(w http.ResponseWriter, r *http.
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"storageContainers": containers})
+	containers, polMeta := h.applyStorageContainerPolicy(ctx, "nutanix", containers)
+	resp := map[string]interface{}{"storageContainers": containers}
+	if polMeta != nil {
+		resp["policy"] = polMeta
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *ProvidersHandler) listNutanixStorageContainers(ctx context.Context, endpoint string, port int32, username, password string, insecure bool, caPEM []byte) ([]StorageContainerInfo, error) {
