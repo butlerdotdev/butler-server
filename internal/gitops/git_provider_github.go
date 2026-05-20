@@ -102,7 +102,7 @@ func (p *GitHubProvider) ValidateToken(ctx context.Context) (*TokenValidation, e
 func (p *GitHubProvider) ListRepositories(ctx context.Context) ([]*Repository, error) {
 	const maxRepos = 200
 
-	var allRepos []*Repository
+	allRepos := make([]*Repository, 0)
 	opts := &github.RepositoryListOptions{
 		Sort:        "updated",
 		Direction:   "desc",
@@ -167,7 +167,7 @@ func (p *GitHubProvider) GetRepository(ctx context.Context, owner, repo string) 
 
 // ListBranches returns branches for a repository.
 func (p *GitHubProvider) ListBranches(ctx context.Context, owner, repo string) ([]*Branch, error) {
-	var allBranches []*Branch
+	allBranches := make([]*Branch, 0)
 	opts := &github.BranchListOptions{
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
