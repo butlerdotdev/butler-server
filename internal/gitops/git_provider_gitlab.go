@@ -96,7 +96,7 @@ func (p *GitLabProvider) ListRepositories(ctx context.Context) ([]*Repository, e
 
 // listGroupProjects uses the Groups API to list projects scoped to a group.
 func (p *GitLabProvider) listGroupProjects(ctx context.Context, maxRepos int) ([]*Repository, error) {
-	var allRepos []*Repository
+	allRepos := make([]*Repository, 0)
 	opts := &gitlab.ListGroupProjectsOptions{
 		IncludeSubGroups: gitlab.Ptr(true),
 		OrderBy:          gitlab.Ptr("updated_at"),
@@ -128,7 +128,7 @@ func (p *GitLabProvider) listGroupProjects(ctx context.Context, maxRepos int) ([
 
 // listAllProjects lists all projects the token has access to.
 func (p *GitLabProvider) listAllProjects(ctx context.Context, maxRepos int) ([]*Repository, error) {
-	var allRepos []*Repository
+	allRepos := make([]*Repository, 0)
 	opts := &gitlab.ListProjectsOptions{
 		Membership: gitlab.Ptr(true),
 		OrderBy:    gitlab.Ptr("updated_at"),
@@ -179,7 +179,7 @@ func (p *GitLabProvider) ListBranches(ctx context.Context, owner, repo string) (
 	}
 	defaultBranch := proj.DefaultBranch
 
-	var allBranches []*Branch
+	allBranches := make([]*Branch, 0)
 	opts := &gitlab.ListBranchesOptions{
 		ListOptions: gitlab.ListOptions{PerPage: 100},
 	}
