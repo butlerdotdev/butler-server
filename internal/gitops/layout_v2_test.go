@@ -322,7 +322,6 @@ func collectNativeKinds(n *NativeDiscoveryResult) [][]*DiscoveredNative {
 		n.IdentityProviders, n.NetworkPools, n.ProviderConfigs, n.Teams,
 		n.ClusterCreationPolicies, n.SealedSecrets,
 		n.MetalLBIPAddressPools, n.MetalLBL2Advertisements,
-		n.StewardControlPlanes, n.StewardControlPlaneTemplates,
 	}
 	if n.ButlerGitOpsConfig != nil {
 		all = append(all, []*DiscoveredNative{n.ButlerGitOpsConfig})

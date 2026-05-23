@@ -129,8 +129,6 @@ func run() error {
 		"sealedSecrets", len(nat.SealedSecrets),
 		"metallbIPPools", len(nat.MetalLBIPAddressPools),
 		"metallbL2", len(nat.MetalLBL2Advertisements),
-		"stewardCP", len(nat.StewardControlPlanes),
-		"stewardCPT", len(nat.StewardControlPlaneTemplates),
 		"butlerGitopsConfig", nat.ButlerGitOpsConfig != nil)
 
 	tree, err := gitops.GenerateLayoutV2(gitops.ExportInput{

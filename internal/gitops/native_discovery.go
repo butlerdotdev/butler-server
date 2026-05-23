@@ -46,18 +46,22 @@ type DiscoveredNative struct {
 // NativeDiscoveryResult buckets discovered native resources by kind so the
 // layout generator can iterate them with kind-specific placement rules. See
 // ADR-016 subsection 1 for the canonical list.
+//
+// Only kinds that are gitops-managed desired-state belong here. Controller-
+// owned runtime objects (e.g. StewardControlPlane, reconciled by butler-
+// controller from TenantCluster CRs) are deliberately excluded — exporting
+// them would put two controllers in conflict over the same objects. See
+// ADR-016 Deferred section for the explicit list of dropped kinds.
 type NativeDiscoveryResult struct {
-	IdentityProviders            []*DiscoveredNative
-	NetworkPools                 []*DiscoveredNative
-	ProviderConfigs              []*DiscoveredNative
-	Teams                        []*DiscoveredNative
-	ClusterCreationPolicies      []*DiscoveredNative
-	ButlerGitOpsConfig           *DiscoveredNative
-	SealedSecrets                []*DiscoveredNative
-	MetalLBIPAddressPools        []*DiscoveredNative
-	MetalLBL2Advertisements      []*DiscoveredNative
-	StewardControlPlanes         []*DiscoveredNative
-	StewardControlPlaneTemplates []*DiscoveredNative
+	IdentityProviders       []*DiscoveredNative
+	NetworkPools            []*DiscoveredNative
+	ProviderConfigs         []*DiscoveredNative
+	Teams                   []*DiscoveredNative
+	ClusterCreationPolicies []*DiscoveredNative
+	ButlerGitOpsConfig      *DiscoveredNative
+	SealedSecrets           []*DiscoveredNative
+	MetalLBIPAddressPools   []*DiscoveredNative
+	MetalLBL2Advertisements []*DiscoveredNative
 }
 
 // nativeKind binds a GVR to its discovery target on NativeDiscoveryResult.
@@ -107,14 +111,6 @@ func nativeKinds() []nativeKind {
 			gvr:       schema.GroupVersionResource{Group: "metallb.io", Version: "v1beta1", Resource: "l2advertisements"},
 			namespace: "metallb-system",
 			apply:     func(r *NativeDiscoveryResult, items []*DiscoveredNative) { r.MetalLBL2Advertisements = items },
-		},
-		{
-			gvr:   schema.GroupVersionResource{Group: "controlplane.cluster.x-k8s.io", Version: "v1alpha1", Resource: "stewardcontrolplanes"},
-			apply: func(r *NativeDiscoveryResult, items []*DiscoveredNative) { r.StewardControlPlanes = items },
-		},
-		{
-			gvr:   schema.GroupVersionResource{Group: "controlplane.cluster.x-k8s.io", Version: "v1alpha1", Resource: "stewardcontrolplanetemplates"},
-			apply: func(r *NativeDiscoveryResult, items []*DiscoveredNative) { r.StewardControlPlaneTemplates = items },
 		},
 	}
 }

@@ -91,8 +91,6 @@ func PathForNative(n *DiscoveredNative, env string) string {
 			return "infrastructure/configs/butler-gitops-config.yaml"
 		}
 		return ""
-	case "StewardControlPlane", "StewardControlPlaneTemplate":
-		return fmt.Sprintf("infrastructure/configs/steward/%s.yaml", n.Name)
 	case "Team":
 		return fmt.Sprintf("apps/%s/teams/%s.yaml", env, n.Name)
 	}

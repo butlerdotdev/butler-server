@@ -54,7 +54,7 @@ func TestPathForNative(t *testing.T) {
 		{"SealedSecret with namespace prefix", "SealedSecret", "entra-oidc", "butler-system", "prd", "infrastructure/configs/sealed-secrets/butler-system-entra-oidc.yaml"},
 		{"gitops ConfigMap", "ConfigMap", "butler-gitops-config", "butler-system", "prd", "infrastructure/configs/butler-gitops-config.yaml"},
 		{"other ConfigMap returns empty", "ConfigMap", "other-cm", "butler-system", "prd", ""},
-		{"StewardControlPlane", "StewardControlPlane", "main", "steward-system", "prd", "infrastructure/configs/steward/main.yaml"},
+		{"StewardControlPlane explicitly dropped (runtime, butler-controller owned)", "StewardControlPlane", "main", "steward-system", "prd", ""},
 		{"Team in apps env", "Team", "platform-engineering", "", "prd", "apps/prd/teams/platform-engineering.yaml"},
 		{"Team in apps env dev", "Team", "obs", "", "dev", "apps/dev/teams/obs.yaml"},
 		{"unknown kind returns empty", "Pod", "p", "default", "prd", ""},

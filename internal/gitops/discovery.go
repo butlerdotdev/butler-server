@@ -60,19 +60,33 @@ type GitOpsEngineStatus struct {
 }
 
 // DiscoveredRelease represents a Helm release discovered on a cluster.
+//
+// Name is the Helm release name (from the release secret's labels), which
+// is the chart's installation identity. HelmReleaseCRName and
+// HelmReleaseCRNamespace identify the Flux HelmRelease custom resource
+// that owns this release, when one exists — they are populated by an
+// enrichment pass that walks all HR CRs and matches by spec.releaseName
+// (or metadata.name when releaseName is unset). These differ for charts
+// where the Flux HR CR's metadata.name does not match its
+// spec.releaseName (e.g. butler-crop-live-infra's sealed-secrets HR has
+// releaseName: sealed-secrets-controller). Layout v2 uses the CR name
+// for the emitted HR's metadata.name so the export round-trips against
+// the existing tree without collision.
 type DiscoveredRelease struct {
-	Name            string                 `json:"name"`
-	Namespace       string                 `json:"namespace"`
-	Chart           string                 `json:"chart"`
-	ChartVersion    string                 `json:"chartVersion"`
-	AppVersion      string                 `json:"appVersion,omitempty"`
-	Status          string                 `json:"status"`
-	Revision        int                    `json:"revision"`
-	Values          map[string]interface{} `json:"values,omitempty"`
-	RepoURL         string                 `json:"repoUrl,omitempty"`
-	Category        string                 `json:"category,omitempty"`
-	AddonDefinition string                 `json:"addonDefinition,omitempty"`
-	Platform        bool                   `json:"platform,omitempty"`
+	Name                   string                 `json:"name"`
+	Namespace              string                 `json:"namespace"`
+	Chart                  string                 `json:"chart"`
+	ChartVersion           string                 `json:"chartVersion"`
+	AppVersion             string                 `json:"appVersion,omitempty"`
+	Status                 string                 `json:"status"`
+	Revision               int                    `json:"revision"`
+	Values                 map[string]interface{} `json:"values,omitempty"`
+	RepoURL                string                 `json:"repoUrl,omitempty"`
+	Category               string                 `json:"category,omitempty"`
+	AddonDefinition        string                 `json:"addonDefinition,omitempty"`
+	Platform               bool                   `json:"platform,omitempty"`
+	HelmReleaseCRName      string                 `json:"helmReleaseCRName,omitempty"`
+	HelmReleaseCRNamespace string                 `json:"helmReleaseCRNamespace,omitempty"`
 }
 
 // DiscoverHelmReleases discovers all Helm releases on a cluster via the
@@ -152,7 +166,65 @@ func DiscoverHelmReleases(ctx context.Context, kubeconfig []byte, addonDefs []bu
 
 	result.GitOpsEngine = detectGitOpsEngine(ctx, clientset, dynClient)
 
+	enrichWithHelmReleaseCRs(ctx, dynClient, result)
+
 	return result, nil
+}
+
+// enrichWithHelmReleaseCRs walks all Flux HelmRelease custom resources on
+// the cluster and back-fills HelmReleaseCRName / HelmReleaseCRNamespace
+// on every DiscoveredRelease whose Helm release name matches an HR CR's
+// spec.releaseName (or metadata.name when releaseName is unset).
+//
+// Required because Helm-release-secret-based discovery loses the Flux HR
+// CR's identity: a HR CR named X with spec.releaseName=Y produces a Helm
+// secret labeled name=Y. Without this enrichment, the export emits a new
+// HR CR named Y, colliding with the existing HR CR named X.
+//
+// Read-only: List only. Failures degrade gracefully — when the CRD is
+// not registered (no Flux) or the call fails, releases stay with empty
+// HR CR fields and layout v2 falls back to using the Helm release name.
+func enrichWithHelmReleaseCRs(ctx context.Context, dynClient dynamic.Interface, result *DiscoveryResult) {
+	hrGVR := schema.GroupVersionResource{
+		Group:    "helm.toolkit.fluxcd.io",
+		Version:  "v2",
+		Resource: "helmreleases",
+	}
+	list, err := dynClient.Resource(hrGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		slog.Debug("HR CR enrichment skipped", "error", err)
+		return
+	}
+
+	type hrCRRef struct {
+		name      string
+		namespace string
+	}
+	byReleaseName := map[string]hrCRRef{}
+	for _, item := range list.Items {
+		crName := item.GetName()
+		crNS := item.GetNamespace()
+		releaseName := crName
+		if spec, ok := item.Object["spec"].(map[string]interface{}); ok {
+			if rn, ok := spec["releaseName"].(string); ok && rn != "" {
+				releaseName = rn
+			}
+		}
+		byReleaseName[releaseName] = hrCRRef{name: crName, namespace: crNS}
+	}
+
+	for _, rel := range result.Matched {
+		if ref, ok := byReleaseName[rel.Name]; ok {
+			rel.HelmReleaseCRName = ref.name
+			rel.HelmReleaseCRNamespace = ref.namespace
+		}
+	}
+	for _, rel := range result.Unmatched {
+		if ref, ok := byReleaseName[rel.Name]; ok {
+			rel.HelmReleaseCRName = ref.name
+			rel.HelmReleaseCRNamespace = ref.namespace
+		}
+	}
 }
 
 func detectGitOpsEngine(ctx context.Context, clientset kubernetes.Interface, dynClient dynamic.Interface) *GitOpsEngineStatus {
