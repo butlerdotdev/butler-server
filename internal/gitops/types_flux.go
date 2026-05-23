@@ -173,10 +173,26 @@ type FluxHealthCheck struct {
 
 // KustomizeFile represents a kustomization.yaml file.
 type KustomizeFile struct {
-	APIVersion string   `json:"apiVersion" yaml:"apiVersion"`
-	Kind       string   `json:"kind" yaml:"kind"`
-	Resources  []string `json:"resources,omitempty" yaml:"resources,omitempty"`
-	Namespace  string   `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	APIVersion string           `json:"apiVersion" yaml:"apiVersion"`
+	Kind       string           `json:"kind" yaml:"kind"`
+	Resources  []string         `json:"resources,omitempty" yaml:"resources,omitempty"`
+	Namespace  string           `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	Patches    []KustomizePatch `json:"patches,omitempty" yaml:"patches,omitempty"`
+}
+
+// KustomizePatch is one entry in a kustomization.yaml `patches:` block.
+// Used by env overlays to strategic-merge patch base HelmReleases with
+// env-specific values.
+type KustomizePatch struct {
+	Path   string               `json:"path" yaml:"path"`
+	Target KustomizePatchTarget `json:"target" yaml:"target"`
+}
+
+// KustomizePatchTarget identifies the resource a patch applies to within
+// the base kustomize build.
+type KustomizePatchTarget struct {
+	Kind string `json:"kind" yaml:"kind"`
+	Name string `json:"name" yaml:"name"`
 }
 
 // K8sNamespace represents a Kubernetes Namespace.
