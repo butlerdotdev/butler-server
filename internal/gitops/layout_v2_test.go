@@ -271,41 +271,162 @@ func TestPruneSafetyPropertyAgainstSyntheticState(t *testing.T) {
 	}
 }
 
-// TestPruneSafetyAgainstLiveStateSurrogate is the stronger property test
-// per ADR-016 subsection 6.2: a live resource not in the discovery set is
-// flagged because its expected layout path has no covering kustomization
-// entry. This catches the "added a CRD to butler-api but forgot to extend
-// discovery" failure mode.
+// TestPruneSafetyAgainstLiveStateSurrogate verifies the prune-safety
+// behavior under the ratified ADR-017 D4 design: a discovered resource
+// with no specific PathForNative entry MUST route through the
+// scope-tiered default placement (PathForNativeWithDefault) rather than
+// either silently dropping (would prune) OR loudly failing the export
+// (would block legitimate operator work). The coverage report (D5)
+// separately surfaces unknown-kind placements so the operator sees them.
+//
+// This test was originally written to assert the OLD "fail loudly"
+// behavior. ADR-017 D4 ratified the differentiated default placement
+// as the replacement design — unknown kinds get a default bucket, not
+// an error, AND the coverage report makes the placement visible. The
+// coverage-report visibility is asserted separately in coverage_test.go.
 func TestPruneSafetyAgainstLiveStateSurrogate(t *testing.T) {
 	in := loadMinimalScenario(t)
+
+	// Surrogate "live state": real input + an extra resource of a kind
+	// not in PathForNative's explicit table (Workspace).
+	workspace := newUnstructured("butler.butlerlabs.dev/v1alpha1", "Workspace", "team-a", "")
+
+	// PathForNative explicit-table lookup returns empty — Workspace is
+	// not in the v1 table. That's the entry condition for the default
+	// placement.
+	if got := PathForNative(&DiscoveredNative{Kind: "Workspace", Name: "team-a"}, in.Env); got != "" {
+		t.Fatalf("Workspace should have empty PathForNative mapping (not in explicit table), got %q", got)
+	}
+
+	// PathForNativeWithDefault routes it via the scope-tiered default.
+	// Workspace is a butler.butlerlabs.dev/v1alpha1 CRD instance,
+	// namespaced (the surrogate has no namespace set, so it falls to the
+	// user-workload bucket per D4's rule).
+	defaultPath := PathForNativeWithDefault(
+		&DiscoveredNative{Kind: "Workspace", Name: "team-a", APIVersion: "butler.butlerlabs.dev/v1alpha1"},
+		in.Env,
+	)
+	if defaultPath == "" {
+		t.Fatalf("PathForNativeWithDefault should never return empty for default placement")
+	}
+	wantPrefix := "apps/prd/workloads/butler-butlerlabs-dev/Workspace/"
+	if !strings.HasPrefix(defaultPath, wantPrefix) {
+		t.Errorf("Workspace should route to user-workload default bucket; got %q, want prefix %q", defaultPath, wantPrefix)
+	}
+
+	// Add it to the layout input and confirm GenerateLayoutV2 accepts
+	// it (no longer errors on unknown kinds — placement is via default
+	// bucket; coverage report surfaces the placement).
+	in.Native.IdentityProviders = append(in.Native.IdentityProviders, &DiscoveredNative{
+		Kind:       "Workspace",
+		Name:       "team-a",
+		APIVersion: "butler.butlerlabs.dev/v1alpha1",
+		Object:     workspace,
+	})
 	tree, err := GenerateLayoutV2(in)
 	if err != nil {
-		t.Fatalf("GenerateLayoutV2: %v", err)
+		t.Fatalf("GenerateLayoutV2 should not reject unknown kinds under ADR-017 D4 default placement: %v", err)
 	}
-
-	// Surrogate "live state": real input + an extra resource that
-	// discovery did NOT find. Expected behavior: the test surfaces that
-	// this resource has no covering kustomization entry, simulating what
-	// would happen against a real cluster.
-	missing := newUnstructured("butler.butlerlabs.dev/v1alpha1", "Workspace", "team-a", "")
-	missingPath := PathForNative(&DiscoveredNative{Kind: "Workspace", Name: "team-a"}, in.Env)
-	if missingPath != "" {
-		t.Fatalf("Workspace should have empty path mapping in v1 (not in discovery table)")
+	if _, ok := tree[defaultPath]; !ok {
+		t.Errorf("Workspace should be emitted at default path %q, but tree does not contain it", defaultPath)
 	}
+}
 
-	// Confirm that adding a kind without a path entry is correctly
-	// surfaced — the layout generator returns an error when discovery
-	// produces an item with no PathForNative.
-	in.Native.IdentityProviders = append(in.Native.IdentityProviders, &DiscoveredNative{
-		Kind:   "Workspace",
-		Name:   "team-a",
-		Object: missing,
-	})
-	if _, err := GenerateLayoutV2(in); err == nil {
-		t.Errorf("layout should reject a discovered item with no v2 placement rule, but accepted it")
+// TestCapiStewardScopeTieredPlacement is the load-bearing test for the
+// scope-tiered default placement (ADR-017 D4 revision 2): capi-steward's
+// hand-rolled raw-YAML resources (CRDs + ClusterRoles + Deployment) MUST
+// land in infrastructure/configs/ (cluster-scoped infra path), NOT in
+// apps/<env>/workloads/ (the wrong-placement bug an earlier single-bucket
+// default would have shipped).
+func TestCapiStewardScopeTieredPlacement(t *testing.T) {
+	env := "prd"
+	cases := []struct {
+		name      string
+		apiVer    string
+		kind      string
+		objName   string
+		objNS     string
+		wantPath  string
+	}{
+		{
+			name: "CRD: stewardcontrolplanes",
+			apiVer:   "apiextensions.k8s.io/v1",
+			kind:     "CustomResourceDefinition",
+			objName:  "stewardcontrolplanes.controlplane.cluster.x-k8s.io",
+			wantPath: "infrastructure/configs/apiextensions-k8s-io/CustomResourceDefinition/stewardcontrolplanes.controlplane.cluster.x-k8s.io.yaml",
+		},
+		{
+			name: "CRD: stewardcontrolplanetemplates",
+			apiVer:   "apiextensions.k8s.io/v1",
+			kind:     "CustomResourceDefinition",
+			objName:  "stewardcontrolplanetemplates.controlplane.cluster.x-k8s.io",
+			wantPath: "infrastructure/configs/apiextensions-k8s-io/CustomResourceDefinition/stewardcontrolplanetemplates.controlplane.cluster.x-k8s.io.yaml",
+		},
+		{
+			name: "ClusterRole: capi-steward-manager-role (cluster-scoped infra)",
+			apiVer:   "rbac.authorization.k8s.io/v1",
+			kind:     "ClusterRole",
+			objName:  "capi-steward-manager-role",
+			wantPath: "infrastructure/configs/rbac-authorization-k8s-io/ClusterRole/capi-steward-manager-role.yaml",
+		},
+		{
+			name: "ClusterRoleBinding: capi-steward-manager-rolebinding",
+			apiVer:   "rbac.authorization.k8s.io/v1",
+			kind:     "ClusterRoleBinding",
+			objName:  "capi-steward-manager-rolebinding",
+			wantPath: "infrastructure/configs/rbac-authorization-k8s-io/ClusterRoleBinding/capi-steward-manager-rolebinding.yaml",
+		},
+		{
+			name: "Deployment in steward-system (namespaced infra in known infra ns)",
+			apiVer:   "apps/v1",
+			kind:     "Deployment",
+			objName:  "capi-steward-controller-manager",
+			objNS:    "steward-system",
+			wantPath: "infrastructure/configs/apps/Deployment/steward-system-capi-steward-controller-manager.yaml",
+		},
+		{
+			name: "ServiceAccount in steward-system",
+			apiVer:   "v1",
+			kind:     "ServiceAccount",
+			objName:  "capi-steward-controller-manager",
+			objNS:    "steward-system",
+			wantPath: "infrastructure/configs/core/ServiceAccount/steward-system-capi-steward-controller-manager.yaml",
+		},
+		{
+			name: "Role in steward-system",
+			apiVer:   "rbac.authorization.k8s.io/v1",
+			kind:     "Role",
+			objName:  "capi-steward-leader-election-role",
+			objNS:    "steward-system",
+			wantPath: "infrastructure/configs/rbac-authorization-k8s-io/Role/steward-system-capi-steward-leader-election-role.yaml",
+		},
+		// Negative control: a user workload-shaped object in a user
+		// namespace correctly lands in apps/<env>/workloads/, NOT in
+		// infrastructure/configs/.
+		{
+			name: "User CRD instance in user namespace (negative control)",
+			apiVer:   "example.com/v1",
+			kind:     "MyWorkload",
+			objName:  "my-app",
+			objNS:    "team-payments",
+			wantPath: "apps/prd/workloads/example-com/MyWorkload/team-payments-my-app.yaml",
+		},
 	}
-
-	_ = tree
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			n := &DiscoveredNative{
+				APIVersion: c.apiVer,
+				Kind:       c.kind,
+				Name:       c.objName,
+				Namespace:  c.objNS,
+			}
+			got := PathForNativeWithDefault(n, env)
+			if got != c.wantPath {
+				t.Errorf("PathForNativeWithDefault(%s/%s) = %q, want %q",
+					c.kind, c.objName, got, c.wantPath)
+			}
+		})
+	}
 }
 
 func loadMinimalScenario(t *testing.T) ExportInput {

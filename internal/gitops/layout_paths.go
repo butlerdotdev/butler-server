@@ -35,6 +35,49 @@ var infrastructureNamespaces = map[string]bool{
 	"traefik":         true,
 	"butler-system":   true,
 	"steward-system":  true,
+	// ADR-017 D4: tenant operator namespaces. Used by the scope-tiered
+	// default placement (PathForNativeWithDefault) to route namespaced
+	// infra-shaped resources (Deployment, ServiceAccount, RBAC) in these
+	// namespaces to infrastructure/configs/ rather than apps/<env>/workloads/.
+	"keda-system":    true,
+	"strimzi-system": true,
+	"reflector":      true,
+	"observability":  true,
+}
+
+// clusterScopedInfraKinds enumerates kinds that, when discovered via the
+// inventory walk and not matched by a specific entry in PathForNative,
+// default to infrastructure/configs/<sanitized-group>/<kind>/<name>.yaml.
+// ADR-017 D4 scope-tiered default placement — the capi-steward case is
+// the test: its CRDs + ClusterRoles + ClusterRoleBindings land here, not
+// in apps/<env>/workloads/.
+var clusterScopedInfraKinds = map[string]bool{
+	"CustomResourceDefinition":        true,
+	"ClusterRole":                     true,
+	"ClusterRoleBinding":              true,
+	"ValidatingWebhookConfiguration":  true,
+	"MutatingWebhookConfiguration":    true,
+	"APIService":                      true,
+	"PriorityClass":                   true,
+	"RuntimeClass":                    true,
+	"IngressClass":                    true,
+	"MutatingAdmissionPolicy":         true,
+	"ValidatingAdmissionPolicy":       true,
+	"StorageClass":                    true,
+}
+
+// namespacedInfraKinds enumerates kinds that, when in an
+// infrastructureNamespaces entry, default to infrastructure/configs/...
+// Mostly controller-machinery shapes (deployments, RBAC, configmaps
+// adjacent to a controller).
+var namespacedInfraKinds = map[string]bool{
+	"Deployment":     true,
+	"ServiceAccount": true,
+	"Role":           true,
+	"RoleBinding":    true,
+	"Service":        true,
+	"ConfigMap":      true,
+	"NetworkPolicy":  true,
 }
 
 // Tier names used by layout v2. Matched releases get their tier from
@@ -90,10 +133,9 @@ func classifyUnmatchedRelease(rel *DiscoveredRelease) string {
 // The env parameter is the apps overlay env (e.g. "prd"); it is only consumed
 // by kinds placed under apps/<env>/.
 //
-// Returns empty string for kinds that have no v2 placement rule — caller
-// must treat that as "skip this object" rather than fall through to a default,
-// otherwise the prune-safety guarantee weakens (subsection 6.2). Any new
-// discovery kind needs an explicit entry here.
+// Returns empty string for kinds that have no specific placement rule —
+// callers should consult PathForNativeWithDefault to route those through the
+// scope-tiered default placement (ADR-017 D4).
 func PathForNative(n *DiscoveredNative, env string) string {
 	switch n.Kind {
 	case "IdentityProvider":
@@ -115,6 +157,93 @@ func PathForNative(n *DiscoveredNative, env string) string {
 		return ""
 	case "Team":
 		return fmt.Sprintf("apps/%s/teams/%s.yaml", env, n.Name)
+	// ADR-017 D4 — tenant-relevant kinds.
+	case "ClusterIssuer":
+		return fmt.Sprintf("infrastructure/configs/cluster-issuers/%s.yaml", n.Name)
+	case "StorageClass":
+		return fmt.Sprintf("infrastructure/configs/storage-classes/%s.yaml", n.Name)
+	case "Kafka", "KafkaNodePool", "KafkaTopic", "KafkaUser", "KafkaConnect":
+		return fmt.Sprintf("apps/%s/workloads/strimzi/%s/%s-%s.yaml", env, n.Kind, n.Namespace, n.Name)
+	case "ScaledObject", "ScaledJob", "TriggerAuthentication":
+		return fmt.Sprintf("apps/%s/workloads/keda/%s/%s-%s.yaml", env, n.Kind, n.Namespace, n.Name)
 	}
 	return ""
+}
+
+// PathForNativeWithDefault returns a path for any DiscoveredNative,
+// using PathForNative's explicit table first, then the ADR-017 D4
+// scope-tiered default placement for kinds with no specific entry.
+//
+// The default placement avoids the single-bucket misplacement ADR-017
+// revision 2 caught: a unified apps/<env>/workloads/ bucket would route
+// capi-steward's CRDs + ClusterRoles + Deployment to apps/workloads,
+// which is wrong — they're infrastructure. Tiered placement:
+//
+//   - Cluster-scoped infra kinds (CRDs, ClusterRole, ClusterRoleBinding,
+//     ValidatingWebhookConfiguration, MutatingWebhookConfiguration,
+//     APIService, PriorityClass, RuntimeClass, IngressClass, StorageClass,
+//     Admission*Policy) → infrastructure/configs/<group>/<kind>/<name>.yaml
+//   - Namespaced infra kinds (Deployment, ServiceAccount, Role,
+//     RoleBinding, Service, ConfigMap, NetworkPolicy) in known infra
+//     namespaces → infrastructure/configs/<group>/<kind>/<ns>-<name>.yaml
+//   - Anything else (namespaced user-workload-shaped) →
+//     apps/<env>/workloads/<group>/<kind>/<ns>-<name>.yaml
+//
+// The capi-steward case (9 raw resources from butler-crop-live-infra's
+// hand-rolled infrastructure/controllers/capi-steward.yaml) lands in
+// infrastructure/configs/<group>/<kind>/... under this rule, not in
+// apps/<env>/workloads/.
+func PathForNativeWithDefault(n *DiscoveredNative, env string) string {
+	if p := PathForNative(n, env); p != "" {
+		return p
+	}
+	group := apiGroup(n.APIVersion)
+	groupSeg := sanitizeGroupSegment(group)
+	if clusterScopedInfraKinds[n.Kind] {
+		return fmt.Sprintf("infrastructure/configs/%s/%s/%s.yaml", groupSeg, n.Kind, n.Name)
+	}
+	if n.Namespace != "" && infrastructureNamespaces[n.Namespace] && namespacedInfraKinds[n.Kind] {
+		return fmt.Sprintf("infrastructure/configs/%s/%s/%s-%s.yaml", groupSeg, n.Kind, n.Namespace, n.Name)
+	}
+	return fmt.Sprintf("apps/%s/workloads/%s/%s/%s-%s.yaml", env, groupSeg, n.Kind, n.Namespace, n.Name)
+}
+
+// apiGroup extracts the API group from an apiVersion string. Returns
+// "core" for core/v1 (no slash). Used by the default-placement segmenter.
+func apiGroup(apiVersion string) string {
+	if apiVersion == "" {
+		return "core"
+	}
+	idx := -1
+	for i, c := range apiVersion {
+		if c == '/' {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return "core"
+	}
+	return apiVersion[:idx]
+}
+
+// sanitizeGroupSegment converts an API group into a path-segment-safe
+// directory name. Replaces dots with hyphens so the path doesn't have
+// hidden filesystem semantics; preserves the group identity so the
+// output is auditable (e.g. "cert-manager.io" → "cert-manager-io",
+// "apiextensions.k8s.io" → "apiextensions-k8s-io").
+func sanitizeGroupSegment(group string) string {
+	if group == "" {
+		return "core"
+	}
+	out := make([]byte, 0, len(group))
+	for i := 0; i < len(group); i++ {
+		c := group[i]
+		if c == '.' {
+			out = append(out, '-')
+			continue
+		}
+		out = append(out, c)
+	}
+	return string(out)
 }

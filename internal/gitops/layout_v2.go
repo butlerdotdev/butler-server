@@ -322,15 +322,14 @@ func emitNativeResources(acc *DirectoryAccumulator, n *NativeDiscoveryResult, en
 	}
 
 	for _, item := range all {
-		path := PathForNative(item, env)
-		if path == "" {
-			// Kind has no v2 placement rule. Per ADR-016 subsection 6.2,
-			// silently dropping would weaken prune safety. Return an error
-			// so the export fails loudly and the operator/discovery
-			// adds an entry.
-			return fmt.Errorf("native resource %s/%s/%s has no v2 placement rule",
-				item.APIVersion, item.Kind, item.Name)
-		}
+		// Use PathForNativeWithDefault so the scope-tiered default
+		// placement fires for kinds outside the explicit table
+		// (ADR-017 D4). Capi-steward's CRDs/RBAC/Deployment land in
+		// infrastructure/configs/ via the default; tenant user CRDs
+		// land in apps/<env>/workloads/. The export no longer fails
+		// on unknown kinds; coverage report (D5) surfaces placement
+		// decisions per item.
+		path := PathForNativeWithDefault(item, env)
 		content, err := yaml.Marshal(item.Object.Object)
 		if err != nil {
 			return fmt.Errorf("marshal %s/%s: %w", item.Kind, item.Name, err)
