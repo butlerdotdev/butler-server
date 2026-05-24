@@ -60,8 +60,8 @@ The Argo provider lives alongside the Flux provider in `internal/gitops/`. Acros
 - **Discovery contract.** Agnostic enumeration of `Application`, `AppProject`, `ApplicationSet`, and Argo `repository`-secret resources. The kubeconfig the discovery uses differs per mode; the discovery code is one piece, parameterized by source-cluster.
 - **Object mapping.** Application maps to a directory tree (Helm source via `release.yaml` + `repository.yaml` shape; Kustomize source via directory reference; plain source via directory reference). AppProject maps to a cluster-tier file. Repository Secrets map to the cluster-tier, deduplicated by URL.
 - **Placement rules.** Same tier rules as Flux (ADR-016): infra-namespace membership routes to `infrastructure/`; everything else routes to `apps/`. Same agnostic-where-Flux-taught-us principle: derive from cluster-resolvable fields, no per-kind hardcoded table.
-- **Export machinery.** DirectoryAccumulator, coverage report, prune-safety. All engine-agnostic; they operate on the rendered directory tree and do not know whether the source CR was Flux or Argo, standalone or centralized.
-- **Self-management filtering.** The Argo-managing-Argo Application (the bootstrap Application that points at the manifests installing Argo itself) is filtered the same way the export filters `flux-system` Kustomizations today.
+- **Export machinery.** DirectoryAccumulator, coverage report, prune-safety. Designed to be engine-agnostic: the intent is that they operate on the rendered directory tree without knowing whether the source CR was Flux or Argo, standalone or centralized. This is an architectural bet, calibrated in §Consequences / What gets built.
+- **Self-management filtering.** The Argo-managing-Argo Application (the bootstrap Application that points at the manifests installing Argo itself) is filtered out of the export, analogous to how the export filters `flux-system` Kustomizations today. The exact filter predicate (Application name, label, namespace, or source-path) is TBD at implementation: Flux's filter is namespace-based, but the Argo-managing-Argo Application may not live in a privileged namespace, so the predicate cannot be inherited directly.
 
 If "support both" is cheap, it is cheap because most of the Argo provider is one codebase shared between the two modes.
 
@@ -127,7 +127,7 @@ The platform documents both locations against both axes so the choice is reasone
 
 A third scenario (the customer has a pre-existing corporate Argo hub operated outside Butler and wants Butler clusters registered into it) is **out of scope for v1**, but doored open architecturally.
 
-The Argo provider's read-source is pluggable. The centralized provider is "kubeconfig-to-hub + destination filter." An external-hub provider would slot in the same way. v1 does not ship that mode; a future ADR may add it without violating the load-bearing invariant.
+The Argo provider's read-source is pluggable. The centralized provider is "kubeconfig-to-hub + destination filter." The design intent is for an external-hub provider to slot in the same way. v1 does not ship that mode; a future ADR may add it, and should preserve the load-bearing invariant when doing so. The export-semantic question below hints that mode (c) may pressure the invariant in ways modes (a) and (b) do not, which is one reason to defer the decision rather than commit to a clean slot-in here.
 
 The export semantic question (read Applications from the external hub, or read what Argo has rendered onto the workload cluster under Argo's tracking label) is deferred to the future ADR that adds the mode.
 
@@ -166,7 +166,7 @@ When and if argocd-agent graduates, a follow-up ADR may add optional agent-based
 
 `argocd-autopilot` is taken as a guide for the repo structure (its directory layout informs what the export emits), not a runtime dependency. Butler does not invoke autopilot during provisioning; Butler emits the layout autopilot would have produced.
 
-The bootstrap installs Argo into a Butler-managed namespace, creates the self-management Application that points at the gitops repo's `clusters/<cluster>/argocd/` directory (or `bootstrap/argo-cd/` in autopilot terms), and from that point forward Argo manages its own configuration from git.
+The bootstrap installs Argo into a Butler-managed namespace and creates the self-management Application pointing at the gitops repo's `clusters/<cluster>/argocd/` directory: the cluster-tier slot Butler already uses for engine-managed config, parallel to where Flux's `flux-system/` lives in the existing layout. From that point forward Argo manages its own configuration from git.
 
 ### Export interaction, per mode
 
