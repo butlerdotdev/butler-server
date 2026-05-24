@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Proposed — revision 2 (2026-05-23, post-ratification-gate tightening)
 
 ## Date
 
@@ -88,8 +88,10 @@ Categories of in-scope uncovered items:
 
 ## Decision
 
-Six sub-decisions. D1, D2, D4 require ratification; D3, D5 carry the
-already-shipped correctness fixes; D6 is the implementation breakdown.
+Seven sub-decisions. D1, D2, D4 require ratification; D3 records the
+already-shipped correctness fixes; D5 specifies the coverage report;
+D6 logs verification gates carried forward to PR 3; D7 is the
+implementation breakdown.
 
 ### D1 — Discovery approach: Flux-inventory-driven with placement table
 
@@ -102,9 +104,7 @@ Mechanism:
 1. List every `kustomize.toolkit.fluxcd.io/v1` Kustomization cluster-wide.
 2. For each, read `.status.inventory.entries` (each entry is
    `<namespace>_<name>_<group>_<kind>`).
-3. Filter out the Flux-self-management deny-list (kinds in the Flux GVRs,
-   the bootstrap `flux-system` Kustomization's own inventory, the CRDs
-   Flux registers for itself).
+3. Apply the Flux-self-management filter (specified below).
 4. For each remaining entry, fetch the live object via the dynamic
    client and add it to discovery output.
 5. Helm releases continue to be discovered via the existing
@@ -113,10 +113,77 @@ Mechanism:
    in Flux inventory. The HR CR enrichment pass already cross-references
    these (commit 5733616).
 
+#### Flux-self-management filter — explicit rules
+
+A coverage bug in either direction is a prune bug: under-filtering ships
+bootstrap noise into the export tree; over-filtering silently drops user
+state. The filter is enumerated, not heuristic.
+
+**Filter as Flux operational** (exclude from export):
+
+- Any resource whose `group` is in the Flux GVR set: `helm.toolkit.fluxcd.io`,
+  `source.toolkit.fluxcd.io`, `kustomize.toolkit.fluxcd.io`,
+  `notification.toolkit.fluxcd.io`, `image.toolkit.fluxcd.io`. This
+  catches HelmRelease, HelmRepository, GitRepository, OCIRepository,
+  HelmChart, Bucket, Kustomization, ResourceSet, Alert, Provider,
+  Receiver, ImagePolicy, ImageRepository, ImageUpdateAutomation.
+- The corresponding CustomResourceDefinitions for those groups
+  (`*.helm.toolkit.fluxcd.io`, `*.source.toolkit.fluxcd.io`, etc.).
+- Any resource in the `flux-system` namespace whose `kind` is in the
+  Flux runtime set: `ServiceAccount`, `Role`, `RoleBinding`,
+  `ClusterRole`, `ClusterRoleBinding`, `Service`, `Deployment`,
+  `ResourceQuota`, `NetworkPolicy` — AND whose name matches a Flux
+  controller pattern (`source-controller`, `kustomize-controller`,
+  `helm-controller`, `notification-controller`,
+  `image-reflector-controller`, `image-automation-controller`,
+  `webhook-receiver`, `crd-controller-flux-system`,
+  `cluster-reconciler-flux-system`, `flux-edit-flux-system`,
+  `flux-view-flux-system`, `critical-pods-flux-system`,
+  `allow-egress|allow-scraping|allow-webhooks`).
+
+The filter is by GROUP and KIND-plus-NAME-pattern, not by Kustomization
+NAME. A user-created Kustomization that happens to be named "flux-system"
+would still have its inventory items evaluated normally; Flux operational
+objects in flux-system get filtered by their kind+name pattern; user
+objects in flux-system that don't match a Flux controller name (rare —
+imagine a user-deployed monitoring sidecar) pass through.
+
+**Include in export** (re-emit, not filter):
+
+- HelmRelease + HelmRepository — user-declared gitops state; D3 already
+  enriches these from Flux inventory cross-reference.
+- HelmRelease + HelmRepository sources Flux is reading from (e.g. a
+  `OCIRepository` pointing at a chart registry) — also user-declared.
+
+**User-defined Kustomization CRs — explicit rule:**
+
+The user's per-component Kustomization CRs (e.g. observability-
+pipeline-prd's `infra-keda`, `infra-reflector`, `infra-strimzi`,
+`kafka-resources`, `scaledobjects`) are themselves
+`kustomize.toolkit.fluxcd.io/v1` Kustomization CRs — same group as
+Flux's own operational objects. They are **filtered as Flux operational**
+under the GVR rule above (excluded from the export tree).
+
+Rationale: the export emits its own cluster-pointer Kustomization CRs
+(at `clusters/<cluster>/{infrastructure,apps}.yaml`) that organize the
+3-tier shape. The user's existing per-component Kustomization CRs are
+the OLD organizing layer being replaced by the v2 layout. Re-emitting
+them would create two competing organizational structures in the same
+tree.
+
+What this means in practice: the export captures every RESOURCE the
+user's Kustomization CRs were managing (HelmReleases, HelmRepositories,
+Namespaces, ClusterIssuers, etc.) via the inventory walk; it does NOT
+re-emit the user's organizing Kustomization CRs themselves. On the MR
+the operator sees, the user's existing per-component Kustomizations
+appear in the "to-be-removed" set — they're being replaced by the
+v2 cluster-pointer files. The operator-review-at-MR gate (ADR-016 7.3)
+is where this restructure is reviewed before merge.
+
 Placement: per-kind table from ADR-016 (extended below in D4) routes
 known kinds to specific paths. Kinds not in the table fall through to
-a default bucket (see D4) AND get logged in the coverage report (D5)
-so the operator can see what landed in the bucket.
+a tiered default placement (see D4) AND get logged in the coverage
+report (D5) so the operator can see what landed where.
 
 #### Why Flux-inventory-driven over fixed-list
 
@@ -217,12 +284,37 @@ Extensions to the path table for tenant-relevant kinds:
 | `StorageClass` (storage.k8s.io) | `infrastructure/configs/storage-classes/<name>.yaml` |
 | `Kafka`, `KafkaNodePool`, `KafkaTopic`, `KafkaUser` (kafka.strimzi.io) | `apps/<env>/workloads/strimzi/<kind>/<namespace>-<name>.yaml` |
 | `ScaledObject`, `ScaledJob`, `TriggerAuthentication` (keda.sh) | `apps/<env>/workloads/keda/<kind>/<namespace>-<name>.yaml` |
-| any other gitops-managed CRD instance discovered via Flux inventory | `apps/<env>/workloads/<group>/<kind>/<namespace>-<name>.yaml` (default bucket) |
 
-The default bucket `apps/<env>/workloads/<group>/<kind>/<namespace>-<name>.yaml`
-catches any kind not in the explicit table. New tenant patterns
-produce files in the bucket without code changes; the coverage report
-(D5) makes them visible.
+#### Default placement for kinds not in the explicit table
+
+A single default bucket is wrong: what falls through is not
+homogeneous. capi-steward's hand-rolled raw-YAML inventory (CRDs +
+cluster-scoped RBAC + a controller Deployment in `steward-system`) is
+infrastructure, not user-workload. Routing it to `apps/<env>/workloads/`
+ships a known misplacement.
+
+Default placement is differentiated by scope and kind class:
+
+| Inventory item shape | Default path |
+|---|---|
+| Cluster-scoped infrastructure kinds: `CustomResourceDefinition`, `ClusterRole`, `ClusterRoleBinding`, `ValidatingWebhookConfiguration`, `MutatingWebhookConfiguration`, `APIService`, `PriorityClass`, `RuntimeClass`, `IngressClass`, `MutatingAdmissionPolicy`, `ValidatingAdmissionPolicy`, plus any unknown CRD instance with cluster scope and group ending in `.cluster.x-k8s.io` or matching `*-system.io` patterns | `infrastructure/configs/<sanitized-group>/<kind>/<name>.yaml` |
+| Namespaced infrastructure kinds in a known infra namespace (`flux-system` — handled by self-mgmt filter, so this row covers other infra namespaces from `infrastructureNamespaces`: `cert-manager`, `kube-system`, `longhorn-system`, `metallb-system`, `traefik`, `butler-system`, `steward-system`, `keda-system`, `strimzi-system`, `reflector`, `observability`): `Deployment`, `ServiceAccount`, `Role`, `RoleBinding`, `Service`, `ConfigMap`, `Secret`-class objects, `NetworkPolicy` | `infrastructure/configs/<sanitized-group>/<kind>/<namespace>-<name>.yaml` |
+| Anything else (user workload-shaped — namespaced CRD instances in user namespaces) | `apps/<env>/workloads/<sanitized-group>/<kind>/<namespace>-<name>.yaml` |
+
+The capi-steward case is the load-bearing test: it places under
+`infrastructure/configs/...` for the CRDs / RBAC / Deployment (all 9
+raw resources land in infra-tier subdirectories, grouped by group +
+kind), not under `apps/<env>/workloads/`.
+
+The `infrastructureNamespaces` set used for the namespaced-infra default
+is the same set the unmatched-release classifier uses (ADR-016 D-A.1
+extended in D2 below). The set is extended for tenant operator
+namespaces (`keda-system`, `strimzi-system`, `reflector`,
+`observability`) — surface in the implementation. New tenant patterns
+discovered in other namespaces fall to the user-workload bucket and
+the coverage report (D5) surfaces the placement decision for operator
+review; per-kind placement rules then get added to the explicit table
+in a follow-on.
 
 #### Why one shape, not per-cluster-type fork
 
@@ -233,10 +325,46 @@ observability-pipeline-prd is a valid Flux layout but not what the
 export emits — tenants using it will see the export propose a
 restructure, the operator decides whether to adopt it.
 
-#### Tenant reference layout — defined here
+#### Tenant reference layout — derived from butler-observability-pipeline-reference
 
-No existing tenant reference repo. The canonical tenant export shape
-is the 3-tier canonical plus the workloads/ subdir:
+A tenant reference repo exists and was confirmed during ADR
+ratification by searching butlerdotdev's public repos plus the
+butler-cli and butler-bootstrap codebases:
+[**butler-observability-pipeline-reference**](https://github.com/butlerdotdev/butler-observability-pipeline-reference).
+Its README labels it "Production-proven Vector aggregator pattern
+packaged as a fork-and-deploy GitOps reference. The pipeline cluster
+is itself a Butler-managed tenant cluster — it follows the same
+lifecycle as any other tenant."
+
+The reference's on-disk shape matches the layout this ADR defines:
+
+| ADR-017 D4 path | butler-observability-pipeline-reference actual |
+|---|---|
+| `infrastructure/controllers/<name>.yaml` + `kustomization.yaml` | `infrastructure/controllers/prometheus-operator.yaml` + `kustomization.yaml` |
+| `infrastructure/configs/` | present (README-only in the reference — minimal example covers no configs kinds) |
+| `apps/base/<name>/{repository,release,namespace,kustomization}.yaml` | `apps/base/vector/{repository,release,namespace,kustomization}.yaml` |
+| `apps/<env>/<name>-values.yaml` + `kustomization.yaml` | `apps/{prd,dev}/vector-values.yaml` + `kustomization.yaml` |
+| `clusters/<cluster>/{flux-system, apps.yaml, infrastructure.yaml, kustomization.yaml}` | `clusters/{pipeline-dev,pipeline-prd}/{flux-system/, apps.yaml, infrastructure.yaml, kustomization.yaml}` |
+| `apps/<env>/workloads/<group>/<kind>/...` | not present (reference scope is minimal — only Vector + prometheus-operator; the `workloads/` extension is consistent with the reference shape, not contradicted by it) |
+
+The reference is minimal and does not exercise the
+`infrastructure/configs/<subdir>/` placements (cluster-issuers,
+storage-classes, etc.) or the `workloads/` extension. Those parts of
+D4 extend the reference shape consistently for the broader tenant kinds
+this ADR covers; they are not contradicted by anything in the reference.
+
+**Observed divergence between the live tenant cluster
+(observability-pipeline-prd) and the reference shape:** the live
+cluster has 9 Flux Kustomizations (`apps`, `flux-system`,
+`infra-controllers`, `infra-keda`, `infra-reflector`, `infra-storage`,
+`infra-strimzi`, `kafka-resources`, `scaledobjects`) — operators
+evolved a per-component multi-Kustomization layout post-fork from the
+reference's 3-tier shape. The export emits the reference shape, which
+means tenants using the export are restored to the canonical the
+reference establishes. The operator-review-at-MR gate is where this
+restructure is reviewed before merge.
+
+The canonical tenant export shape:
 
 ```
 infrastructure/
@@ -293,7 +421,59 @@ generalized here to all-of-export visibility). The export tree itself
 remains clean Flux YAML; coverage.yaml is metadata-about-the-export,
 not part of the kustomize build.
 
-### D6 — Implementation breakdown
+### D6 — Verification gates carried forward to implementation
+
+Two items the ADR ratification gate logs for PR 3 to verify
+empirically. Neither changes the design; both are correctness
+checks where assertion-without-proof is too weak.
+
+**V1 — Flux inventory reconcile-state handling**
+
+`.status.inventory.entries` is updated as part of a Kustomization's
+reconcile loop. The inventory can be stale (last successful reconcile),
+empty (first reconcile in progress), or absent (`Ready: False`). The
+discovery pass walks N Kustomizations sequentially, so the snapshot is
+eventually-consistent across the walk, not atomic.
+
+PR 3 must specify and document the behavior chosen:
+
+- For each Kustomization, log its `Ready` condition + `lastAppliedRevision`
+  at the moment its inventory is read so the export captures the
+  consistency moment per Kustomization.
+- Skip Kustomizations whose `Ready` is False AND whose
+  `.status.inventory.entries` is empty — there's no consistent state
+  to read.
+- Surface snapshot-drift acknowledgment: discovery is eventually-consistent
+  across the walk; the coverage report (D5) records each Kustomization's
+  observed revision so the operator sees the snapshot moment.
+
+These are correctness behaviors, not design decisions. They get
+verified in PR 3's tenant validation loop by deliberately walking
+during a Kustomization reconcile.
+
+**V2 — D2 chart-CRD classifier doesn't regress mgmt tiering**
+
+D2 asserts the chart-CRD detection signal doesn't change mgmt
+behavior because mgmt's CRD-installing charts are matched via
+AddonDefinition.Tier. The assertion is true for matched releases.
+Mgmt also has 5 *unmatched* releases (`butler-crds`, `butler-controller`,
+`butler-console`, `butler-addons`, `steward`). For each, PR 3 must:
+
+- Run `chartInstallsCRDs` against its decoded Helm chart manifest.
+- Confirm the resulting tier equals the tier the current namespace
+  heuristic produces (all five currently classify as `infrastructure`
+  via `infrastructureNamespaces[butler-system]` and
+  `infrastructureNamespaces[steward-system]`).
+- If any release transitions tier under the new classifier, surface
+  before landing — a tier change for a mgmt release is a regression
+  in the half already validated.
+
+This is a 5-row spreadsheet to verify in PR 3 implementation. The
+design holds regardless of the answer (a tier change is unlikely
+because the namespace heuristic already places them correctly); the
+verification protects against an unexpected divergence.
+
+### D7 — Implementation breakdown
 
 Two PRs after ADR ratification. Order matters; the inventory-driven
 discovery is prerequisite to extended layout placement.
@@ -381,10 +561,45 @@ runs against both shapes without live-cluster access.
 - ADR-016: original gitops export design (mgmt-focused)
 - butlerdotdev/butler-server#78: out-of-scope visibility / coverage
   report follow-up — generalized in D5
+- [butlerdotdev/butler-observability-pipeline-reference](https://github.com/butlerdotdev/butler-observability-pipeline-reference):
+  the existing tenant gitops reference repo D4's shape derives from
+  (a Butler-managed tenant cluster running the Vector aggregator
+  pattern; explicitly labeled "fork-and-deploy GitOps reference")
 - Local-against-live validation run on observability-pipeline-prd
-  tenant, 2026-05-23
+  tenant, 2026-05-23 (note: live cluster has a 9-Kustomization
+  per-component layout that diverged from butler-observability-pipeline-reference's
+  3-tier shape post-fork; the export emits the reference shape)
 - Commit `5733616` on `feat/gitops-export-v2`: HelmRepository CR name
   + Namespace metadata fixes (D3)
 - Flux Kustomization inventory format:
   `.status.inventory.entries[*].id` parses to
   `<namespace>_<name>_<group>_<kind>`
+
+## Revision history
+
+- Revision 1 (initial, 2026-05-23): four ratifiable decisions (D1-D4),
+  one already-shipped record (D3), one implementation breakdown (D5/D6).
+- **Revision 2** (2026-05-23, this revision): three design-level
+  tightenings landed before ratification —
+  (a) **D1 filter precision**: explicit Flux GVR enumeration; replaced
+      name-based "flux-system Kustomization" filter with group+kind+name-pattern
+      rule; explicit answer to the user-defined Kustomization CR question
+      (filter as Flux operational, since the v2 cluster-pointer files
+      replace the user's organizing Kustomizations).
+  (b) **D4 default-bucket differentiation**: single `apps/<env>/workloads/`
+      bucket replaced with scope/kind-tiered placement so capi-steward's
+      CRDs + ClusterRoles + Deployment land in `infrastructure/configs/...`
+      (correct), not `apps/<env>/workloads/` (wrong).
+  (c) **D4 tenant reference**: tenant-reference search performed across
+      butler-bootstrap, butler-cli, and butlerdotdev's public repos.
+      Found butler-observability-pipeline-reference, an existing
+      reference repo whose 3-tier shape matches what this ADR proposed.
+      Retracted the "no existing tenant reference repo" claim;
+      D4 now derives from the existing reference rather than inventing
+      a parallel shape.
+  Plus a new **D6 (Verification gates carried forward to implementation)**
+  logging two items the ADR-ratification gate hands to PR 3:
+  reconcile-state handling for Flux inventory reads, and a 5-row check
+  that the chart-CRD classifier doesn't transition any mgmt unmatched
+  release's tier vs the current namespace heuristic. Original D6 renumbered
+  to D7.
