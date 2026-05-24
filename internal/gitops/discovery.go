@@ -62,31 +62,41 @@ type GitOpsEngineStatus struct {
 // DiscoveredRelease represents a Helm release discovered on a cluster.
 //
 // Name is the Helm release name (from the release secret's labels), which
-// is the chart's installation identity. HelmReleaseCRName and
-// HelmReleaseCRNamespace identify the Flux HelmRelease custom resource
-// that owns this release, when one exists — they are populated by an
-// enrichment pass that walks all HR CRs and matches by spec.releaseName
-// (or metadata.name when releaseName is unset). These differ for charts
-// where the Flux HR CR's metadata.name does not match its
-// spec.releaseName (e.g. butler-crop-live-infra's sealed-secrets HR has
-// releaseName: sealed-secrets-controller). Layout v2 uses the CR name
-// for the emitted HR's metadata.name so the export round-trips against
-// the existing tree without collision.
+// is the chart's installation identity. The HelmRelease and HelmRepository
+// CR fields identify the Flux custom resources that own this release on
+// the cluster, when they exist — they are populated by an enrichment pass
+// that walks all HR CRs and reads their metadata.{name,namespace} plus
+// spec.chart.sourceRef.{name,namespace}.
+//
+// These are tracked separately because mgmt and tenant clusters diverge:
+//   - HR CR vs Helm release name diverges when spec.releaseName is set
+//     (mgmt's sealed-secrets HR has releaseName: sealed-secrets-controller).
+//   - HelmRepository CR name diverges when chart publishers use names
+//     differing from the release name (tenant's kube-prometheus-stack HR
+//     references HelmRepository "prometheus-community", reflector references
+//     "emberstack", strimzi-kafka-operator references "strimzi", etc.).
+//
+// Layout v2 sources its emitted CR names/namespaces from these fields so
+// the export round-trips against the existing tree without collision.
+// When unset (release has no Flux HR CR — e.g. helm-installed directly),
+// layout v2 falls back to sanitized release-name reconstruction.
 type DiscoveredRelease struct {
-	Name                   string                 `json:"name"`
-	Namespace              string                 `json:"namespace"`
-	Chart                  string                 `json:"chart"`
-	ChartVersion           string                 `json:"chartVersion"`
-	AppVersion             string                 `json:"appVersion,omitempty"`
-	Status                 string                 `json:"status"`
-	Revision               int                    `json:"revision"`
-	Values                 map[string]interface{} `json:"values,omitempty"`
-	RepoURL                string                 `json:"repoUrl,omitempty"`
-	Category               string                 `json:"category,omitempty"`
-	AddonDefinition        string                 `json:"addonDefinition,omitempty"`
-	Platform               bool                   `json:"platform,omitempty"`
-	HelmReleaseCRName      string                 `json:"helmReleaseCRName,omitempty"`
-	HelmReleaseCRNamespace string                 `json:"helmReleaseCRNamespace,omitempty"`
+	Name                      string                 `json:"name"`
+	Namespace                 string                 `json:"namespace"`
+	Chart                     string                 `json:"chart"`
+	ChartVersion              string                 `json:"chartVersion"`
+	AppVersion                string                 `json:"appVersion,omitempty"`
+	Status                    string                 `json:"status"`
+	Revision                  int                    `json:"revision"`
+	Values                    map[string]interface{} `json:"values,omitempty"`
+	RepoURL                   string                 `json:"repoUrl,omitempty"`
+	Category                  string                 `json:"category,omitempty"`
+	AddonDefinition           string                 `json:"addonDefinition,omitempty"`
+	Platform                  bool                   `json:"platform,omitempty"`
+	HelmReleaseCRName         string                 `json:"helmReleaseCRName,omitempty"`
+	HelmReleaseCRNamespace    string                 `json:"helmReleaseCRNamespace,omitempty"`
+	HelmRepositoryCRName      string                 `json:"helmRepositoryCRName,omitempty"`
+	HelmRepositoryCRNamespace string                 `json:"helmRepositoryCRNamespace,omitempty"`
 }
 
 // DiscoverHelmReleases discovers all Helm releases on a cluster via the
@@ -197,33 +207,71 @@ func enrichWithHelmReleaseCRs(ctx context.Context, dynClient dynamic.Interface, 
 	}
 
 	type hrCRRef struct {
-		name      string
-		namespace string
+		name             string
+		namespace        string
+		sourceRefName    string
+		sourceRefNS      string
 	}
 	byReleaseName := map[string]hrCRRef{}
 	for _, item := range list.Items {
 		crName := item.GetName()
 		crNS := item.GetNamespace()
 		releaseName := crName
+		var srcName, srcNS string
 		if spec, ok := item.Object["spec"].(map[string]interface{}); ok {
 			if rn, ok := spec["releaseName"].(string); ok && rn != "" {
 				releaseName = rn
 			}
+			// spec.chart.spec.sourceRef.{name,namespace} identifies the
+			// HelmRepository this release points at. Sourcing the
+			// HelmRepository CR name from here (rather than reconstructing
+			// from the release name) is required for charts whose publisher
+			// name differs from the release name — tenant clusters expose
+			// this routinely (kedacore, prometheus-community, emberstack,
+			// strimzi, vector-repo all diverge from their HR's name).
+			if chart, ok := spec["chart"].(map[string]interface{}); ok {
+				if chartSpec, ok := chart["spec"].(map[string]interface{}); ok {
+					if srcRef, ok := chartSpec["sourceRef"].(map[string]interface{}); ok {
+						if n, ok := srcRef["name"].(string); ok {
+							srcName = n
+						}
+						if ns, ok := srcRef["namespace"].(string); ok {
+							srcNS = ns
+						}
+					}
+				}
+			}
 		}
-		byReleaseName[releaseName] = hrCRRef{name: crName, namespace: crNS}
+		byReleaseName[releaseName] = hrCRRef{
+			name:          crName,
+			namespace:     crNS,
+			sourceRefName: srcName,
+			sourceRefNS:   srcNS,
+		}
 	}
 
-	for _, rel := range result.Matched {
-		if ref, ok := byReleaseName[rel.Name]; ok {
-			rel.HelmReleaseCRName = ref.name
-			rel.HelmReleaseCRNamespace = ref.namespace
+	apply := func(rel *DiscoveredRelease) {
+		ref, ok := byReleaseName[rel.Name]
+		if !ok {
+			return
+		}
+		rel.HelmReleaseCRName = ref.name
+		rel.HelmReleaseCRNamespace = ref.namespace
+		rel.HelmRepositoryCRName = ref.sourceRefName
+		// Flux defaults sourceRef.namespace to the HR CR's namespace when
+		// unspecified — match that behavior so the export emits a
+		// non-empty namespace consistently.
+		if ref.sourceRefNS != "" {
+			rel.HelmRepositoryCRNamespace = ref.sourceRefNS
+		} else {
+			rel.HelmRepositoryCRNamespace = ref.namespace
 		}
 	}
+	for _, rel := range result.Matched {
+		apply(rel)
+	}
 	for _, rel := range result.Unmatched {
-		if ref, ok := byReleaseName[rel.Name]; ok {
-			rel.HelmReleaseCRName = ref.name
-			rel.HelmReleaseCRNamespace = ref.namespace
-		}
+		apply(rel)
 	}
 }
 

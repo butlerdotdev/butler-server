@@ -31,11 +31,20 @@ import (
 // guarantee (ADR-016 subsection 6.1).
 
 // ExportInput is the discovered cluster state passed to LayoutV2.
+//
+// NamespaceMeta carries labels/annotations from live Namespace objects
+// for the namespaces the export references — required to preserve
+// metadata like pod-security labels and network-policy targeting that
+// would otherwise be lost in the synthesized bare Namespace emit. When
+// nil or empty, the layout falls back to bare Namespaces for backward
+// compatibility (mgmt clusters typically don't carry custom namespace
+// metadata, tenant clusters do).
 type ExportInput struct {
-	ClusterName string
-	Env         string // apps overlay name (e.g. "prd")
-	Helm        *DiscoveryResult
-	Native      *NativeDiscoveryResult
+	ClusterName   string
+	Env           string // apps overlay name (e.g. "prd")
+	Helm          *DiscoveryResult
+	Native        *NativeDiscoveryResult
+	NamespaceMeta NamespaceMetadataMap
 }
 
 // GenerateLayoutV2 returns the full set of files (path -> bytes) representing
@@ -51,7 +60,7 @@ func GenerateLayoutV2(in ExportInput) (map[string][]byte, error) {
 	acc := NewDirectoryAccumulator()
 
 	if in.Helm != nil {
-		if err := emitHelmReleases(acc, in.Helm, in.Env); err != nil {
+		if err := emitHelmReleases(acc, in.Helm, in.Env, in.NamespaceMeta); err != nil {
 			return nil, err
 		}
 	}
@@ -76,7 +85,7 @@ func GenerateLayoutV2(in ExportInput) (map[string][]byte, error) {
 	return acc.FinalizeWithKustomizations(overrides)
 }
 
-func emitHelmReleases(acc *DirectoryAccumulator, hr *DiscoveryResult, env string) error {
+func emitHelmReleases(acc *DirectoryAccumulator, hr *DiscoveryResult, env string, nsMeta NamespaceMetadataMap) error {
 	all := append([]*DiscoveredRelease{}, hr.Matched...)
 	all = append(all, hr.Unmatched...)
 
@@ -84,7 +93,8 @@ func emitHelmReleases(acc *DirectoryAccumulator, hr *DiscoveryResult, env string
 		tier := releaseTier(rel)
 		switch tier {
 		case TierInfrastructure:
-			if err := emitInfrastructureRelease(acc, rel); err != nil {
+			meta := nsMeta[rel.Namespace]
+			if err := emitInfrastructureRelease(acc, rel, meta); err != nil {
 				return fmt.Errorf("infra release %s: %w", rel.Name, err)
 			}
 		case TierApps:
@@ -127,14 +137,16 @@ func releaseTier(rel *DiscoveredRelease) string {
 // (HelmReleaseCRName). When unset (no Flux HR CR matched the Helm release
 // — uncommon, e.g. a Helm release applied without a Flux HR), fall back
 // to the Helm release name. See discovery.enrichWithHelmReleaseCRs.
-func emitInfrastructureRelease(acc *DirectoryAccumulator, rel *DiscoveredRelease) error {
+func emitInfrastructureRelease(acc *DirectoryAccumulator, rel *DiscoveredRelease, nsMeta *NamespaceMetadata) error {
 	docs := [][]byte{}
 
 	hrName := exportedHRName(rel)
 	hrNamespace := exportedHRNamespace(rel)
+	repoName := exportedHelmRepoName(rel)
+	repoNamespace := exportedHelmRepoNamespace(rel)
 
 	if rel.Namespace != "" && rel.Namespace != "flux-system" {
-		ns := NewK8sNamespace(rel.Namespace)
+		ns := namespaceFromDiscovery(rel.Namespace, nsMeta)
 		nsYAML, err := yaml.Marshal(ns)
 		if err != nil {
 			return fmt.Errorf("marshal namespace: %w", err)
@@ -142,15 +154,14 @@ func emitInfrastructureRelease(acc *DirectoryAccumulator, rel *DiscoveredRelease
 		docs = append(docs, nsYAML)
 	}
 
-	repoName := sanitizeName(hrName)
-	helmRepo := NewFluxHelmRepository(repoName, hrNamespace, rel.RepoURL)
+	helmRepo := NewFluxHelmRepository(repoName, repoNamespace, rel.RepoURL)
 	repoYAML, err := yaml.Marshal(helmRepo)
 	if err != nil {
 		return fmt.Errorf("marshal helmrepository: %w", err)
 	}
 	docs = append(docs, repoYAML)
 
-	helmRelease := buildHelmReleaseFromDiscovered(rel, hrName, hrNamespace, repoName)
+	helmRelease := buildHelmReleaseFromDiscovered(rel, hrName, hrNamespace, repoName, repoNamespace)
 	relYAML, err := yaml.Marshal(helmRelease)
 	if err != nil {
 		return fmt.Errorf("marshal helmrelease: %w", err)
@@ -182,6 +193,30 @@ func exportedHRNamespace(rel *DiscoveredRelease) string {
 	return "flux-system"
 }
 
+// exportedHelmRepoName returns the HelmRepository CR metadata.name the
+// export should emit. Sourced from the HR's spec.chart.sourceRef.name on
+// the cluster (enrichWithHelmReleaseCRs); fallback to a sanitized HR
+// CR name only when discovery did not find a corresponding HR CR. Required
+// for charts whose publisher-named HelmRepository diverges from the
+// release name — tenant clusters expose this routinely.
+func exportedHelmRepoName(rel *DiscoveredRelease) string {
+	if rel.HelmRepositoryCRName != "" {
+		return rel.HelmRepositoryCRName
+	}
+	return sanitizeName(exportedHRName(rel))
+}
+
+// exportedHelmRepoNamespace returns the HelmRepository CR
+// metadata.namespace. HelmRepository CR namespace from discovery wins;
+// fallback to the HR's namespace which matches Flux's default sourceRef
+// resolution.
+func exportedHelmRepoNamespace(rel *DiscoveredRelease) string {
+	if rel.HelmRepositoryCRNamespace != "" {
+		return rel.HelmRepositoryCRNamespace
+	}
+	return exportedHRNamespace(rel)
+}
+
 // emitAppRelease writes apps/base/<name>/{repository,release,kustomization
 // optional namespace}.yaml plus an empty apps/<env>/<name>-values.yaml
 // stub for env-specific overrides. The base directory's kustomization.yaml
@@ -195,17 +230,18 @@ func exportedHRNamespace(rel *DiscoveredRelease) string {
 func emitAppRelease(acc *DirectoryAccumulator, rel *DiscoveredRelease, env string) error {
 	hrName := exportedHRName(rel)
 	hrNamespace := exportedHRNamespace(rel)
+	repoName := exportedHelmRepoName(rel)
+	repoNamespace := exportedHelmRepoNamespace(rel)
 	baseDir := fmt.Sprintf("apps/base/%s", hrName)
 
-	repoName := sanitizeName(hrName)
-	helmRepo := NewFluxHelmRepository(repoName, hrNamespace, rel.RepoURL)
+	helmRepo := NewFluxHelmRepository(repoName, repoNamespace, rel.RepoURL)
 	repoYAML, err := yaml.Marshal(helmRepo)
 	if err != nil {
 		return fmt.Errorf("marshal helmrepository: %w", err)
 	}
 	acc.Add(fmt.Sprintf("%s/repository.yaml", baseDir), repoYAML)
 
-	helmRelease := buildHelmReleaseFromDiscovered(rel, hrName, hrNamespace, repoName)
+	helmRelease := buildHelmReleaseFromDiscovered(rel, hrName, hrNamespace, repoName, repoNamespace)
 	relYAML, err := yaml.Marshal(helmRelease)
 	if err != nil {
 		return fmt.Errorf("marshal helmrelease: %w", err)
@@ -243,7 +279,9 @@ func buildEnvValuesPatch(releaseName string) *FluxHelmRelease {
 // metadata.name comes from hrName (HR CR name from discovery, or fallback
 // Helm release name); spec.releaseName uses the Helm release name so the
 // produced Helm release identity is preserved when this HR reconciles.
-func buildHelmReleaseFromDiscovered(rel *DiscoveredRelease, hrName, hrNamespace, repoName string) *FluxHelmRelease {
+// sourceRef name + namespace come from the looked-up HelmRepository CR
+// metadata (or fallback to the synthesized values).
+func buildHelmReleaseFromDiscovered(rel *DiscoveredRelease, hrName, hrNamespace, repoName, repoNamespace string) *FluxHelmRelease {
 	hr := NewFluxHelmRelease(hrName, hrNamespace)
 	hr.Spec.ReleaseName = rel.Name
 	hr.Spec.Chart = FluxHelmChartTemplate{
@@ -254,7 +292,7 @@ func buildHelmReleaseFromDiscovered(rel *DiscoveredRelease, hrName, hrNamespace,
 			SourceRef: FluxCrossNamespaceRef{
 				Kind:      "HelmRepository",
 				Name:      repoName,
-				Namespace: hrNamespace,
+				Namespace: repoNamespace,
 			},
 		},
 	}

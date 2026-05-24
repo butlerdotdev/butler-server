@@ -131,11 +131,18 @@ func run() error {
 		"metallbL2", len(nat.MetalLBL2Advertisements),
 		"butlerGitopsConfig", nat.ButlerGitOpsConfig != nil)
 
+	nsNames := collectNamespaceNames(hr)
+	nsMeta, err := gitops.DiscoverNamespaceMetadata(ctx, kubeconfig, nsNames)
+	if err != nil {
+		slog.Warn("namespace metadata discovery failed; will emit bare namespaces", "error", err)
+	}
+
 	tree, err := gitops.GenerateLayoutV2(gitops.ExportInput{
-		ClusterName: *clusterName,
-		Env:         *env,
-		Helm:        hr,
-		Native:      nat,
+		ClusterName:   *clusterName,
+		Env:           *env,
+		Helm:          hr,
+		Native:        nat,
+		NamespaceMeta: nsMeta,
 	})
 	if err != nil {
 		return fmt.Errorf("GenerateLayoutV2: %w", err)
@@ -191,6 +198,29 @@ func run() error {
 	}
 	fmt.Printf("files: %d\n", res.FilesCount)
 	return nil
+}
+
+// collectNamespaceNames returns the set of namespace names the export
+// will reference and therefore needs metadata for. Currently sourced
+// from discovered HelmReleases' targetNamespaces; tenant-only namespaced
+// native resources (KEDA, Strimzi, etc.) will be added when their
+// discovery lands.
+func collectNamespaceNames(hr *gitops.DiscoveryResult) map[string]bool {
+	out := map[string]bool{}
+	if hr == nil {
+		return out
+	}
+	for _, r := range hr.Matched {
+		if r.Namespace != "" {
+			out[r.Namespace] = true
+		}
+	}
+	for _, r := range hr.Unmatched {
+		if r.Namespace != "" {
+			out[r.Namespace] = true
+		}
+	}
+	return out
 }
 
 func loadAddonDefinitions(ctx context.Context, kubeconfig []byte) ([]butlerv1alpha1.AddonDefinition, error) {
