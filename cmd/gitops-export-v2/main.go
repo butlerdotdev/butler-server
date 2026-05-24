@@ -178,6 +178,7 @@ func run() error {
 		Env:           *env,
 		Helm:          hr,
 		Native:        nat,
+		NamespaceMeta: nsMeta,
 		Owner:         *gitOwner,
 		Repo:          *gitRepo,
 		Branch:        *gitBranch,

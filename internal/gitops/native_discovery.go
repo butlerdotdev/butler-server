@@ -19,15 +19,8 @@ package gitops
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 // DiscoveredNative represents a single native (non-HelmRelease) Kubernetes
@@ -44,14 +37,20 @@ type DiscoveredNative struct {
 }
 
 // NativeDiscoveryResult buckets discovered native resources by kind so the
-// layout generator can iterate them with kind-specific placement rules. See
-// ADR-016 subsection 1 for the canonical list.
+// layout generator can iterate them with kind-specific placement rules.
 //
-// Only kinds that are gitops-managed desired-state belong here. Controller-
-// owned runtime objects (e.g. StewardControlPlane, reconciled by butler-
-// controller from TenantCluster CRs) are deliberately excluded — exporting
-// them would put two controllers in conflict over the same objects. See
-// ADR-016 Deferred section for the explicit list of dropped kinds.
+// ADR-017 D1 changed the discovery source from a fixed-kind list to a
+// Flux-inventory walk. The typed buckets remain for caller ergonomics
+// (counts per kind for logging/coverage), populated by routing each
+// inventory item to its bucket by Kind. Items whose Kind doesn't match
+// a typed bucket land in Other, which the layout generator still
+// iterates so the scope-tiered default placement (D4) catches them.
+//
+// Only kinds that are gitops-managed desired-state belong here.
+// Controller-owned runtime objects (e.g. StewardControlPlane, reconciled
+// by butler-controller from TenantCluster CRs) are deliberately excluded
+// at the inventory-walk level: anything that Flux is not managing is not
+// in the inventory.
 type NativeDiscoveryResult struct {
 	IdentityProviders       []*DiscoveredNative
 	NetworkPools            []*DiscoveredNative
@@ -62,144 +61,81 @@ type NativeDiscoveryResult struct {
 	SealedSecrets           []*DiscoveredNative
 	MetalLBIPAddressPools   []*DiscoveredNative
 	MetalLBL2Advertisements []*DiscoveredNative
+	// Other holds inventory items whose Kind doesn't match a typed
+	// bucket. Layout v2 routes them via PathForNativeWithDefault
+	// (scope-tiered default placement); the coverage report surfaces
+	// them as InScopeUncaptured so operators can request explicit
+	// path-table entries.
+	Other []*DiscoveredNative
+	// InventoryWalk captures the per-Kustomization observations
+	// (Ready, lastAppliedRevision, inline patches) so coverage.go can
+	// surface them. Empty when discovery falls back to the v1 fixed-
+	// kind path (e.g., a cluster with no Flux Kustomizations).
+	InventoryWalk *InventoryWalkResult
 }
 
-// nativeKind binds a GVR to its discovery target on NativeDiscoveryResult.
-// Discovery is read-only: each entry calls List on the dynamic client and
-// either appends to the slice or sets the singleton pointer. Missing CRDs
-// and RBAC denials are skipped, not fatal.
-type nativeKind struct {
-	gvr        schema.GroupVersionResource
-	namespace  string // empty for cluster-scope or all-namespaces
-	apply      func(result *NativeDiscoveryResult, items []*DiscoveredNative)
-	singleton  string // when set, the singleton ConfigMap-by-name lookup applies
-	applyOne   func(result *NativeDiscoveryResult, item *DiscoveredNative)
-}
-
-func nativeKinds() []nativeKind {
-	return []nativeKind{
-		{
-			gvr:   schema.GroupVersionResource{Group: "butler.butlerlabs.dev", Version: "v1alpha1", Resource: "identityproviders"},
-			apply: func(r *NativeDiscoveryResult, items []*DiscoveredNative) { r.IdentityProviders = items },
-		},
-		{
-			gvr:   schema.GroupVersionResource{Group: "butler.butlerlabs.dev", Version: "v1alpha1", Resource: "networkpools"},
-			apply: func(r *NativeDiscoveryResult, items []*DiscoveredNative) { r.NetworkPools = items },
-		},
-		{
-			gvr:   schema.GroupVersionResource{Group: "butler.butlerlabs.dev", Version: "v1alpha1", Resource: "providerconfigs"},
-			apply: func(r *NativeDiscoveryResult, items []*DiscoveredNative) { r.ProviderConfigs = items },
-		},
-		{
-			gvr:   schema.GroupVersionResource{Group: "butler.butlerlabs.dev", Version: "v1alpha1", Resource: "teams"},
-			apply: func(r *NativeDiscoveryResult, items []*DiscoveredNative) { r.Teams = items },
-		},
-		{
-			gvr:   schema.GroupVersionResource{Group: "butler.butlerlabs.dev", Version: "v1alpha1", Resource: "clustercreationpolicies"},
-			apply: func(r *NativeDiscoveryResult, items []*DiscoveredNative) { r.ClusterCreationPolicies = items },
-		},
-		{
-			gvr:   schema.GroupVersionResource{Group: "bitnami.com", Version: "v1alpha1", Resource: "sealedsecrets"},
-			apply: func(r *NativeDiscoveryResult, items []*DiscoveredNative) { r.SealedSecrets = items },
-		},
-		{
-			gvr:       schema.GroupVersionResource{Group: "metallb.io", Version: "v1beta1", Resource: "ipaddresspools"},
-			namespace: "metallb-system",
-			apply:     func(r *NativeDiscoveryResult, items []*DiscoveredNative) { r.MetalLBIPAddressPools = items },
-		},
-		{
-			gvr:       schema.GroupVersionResource{Group: "metallb.io", Version: "v1beta1", Resource: "l2advertisements"},
-			namespace: "metallb-system",
-			apply:     func(r *NativeDiscoveryResult, items []*DiscoveredNative) { r.MetalLBL2Advertisements = items },
-		},
-	}
-}
-
-// DiscoverNativeResources enumerates the native (non-HelmRelease) resources
-// listed in ADR-016 subsection 1. Missing CRDs and RBAC denials are skipped
-// per the ADR — a kind not registered on the cluster simply produces an
-// empty slice rather than failing the whole export. The butler-gitops-config
-// ConfigMap is fetched by name from butler-system.
+// DiscoverNativeResources enumerates native (non-HelmRelease) resources
+// gitops-managed on the cluster. Per ADR-017 D1, discovery now routes
+// through DiscoverFluxInventory: walks every Flux Kustomization on the
+// cluster, reads its inventory, filters Flux-self-management, fetches
+// each remaining inventory item via the dynamic client. The v1 fixed-
+// kind table is gone — the inventory walk handles any kind Flux is
+// reconciling without per-kind code.
 //
 // Read-only: only List and Get are called; no cluster writes.
+//
+// ADR-017 D1: discovery now routes through DiscoverFluxInventory (walks
+// every Flux Kustomization on the cluster, reads inventories, filters
+// Flux-self-management, fetches each remaining inventory item). The
+// typed-bucket signature is preserved for caller compatibility; items
+// are bucketed by Kind after the walk. Items whose Kind doesn't match
+// a typed bucket land in result.Other and flow through scope-tiered
+// default placement (D4) at layout time.
 func DiscoverNativeResources(ctx context.Context, kubeconfig []byte) (*NativeDiscoveryResult, error) {
-	config, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
+	walk, err := DiscoverFluxInventory(ctx, kubeconfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse kubeconfig: %w", err)
+		return nil, fmt.Errorf("inventory walk failed: %w", err)
 	}
 
-	dynClient, err := dynamic.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
+	result := &NativeDiscoveryResult{InventoryWalk: walk}
+	for _, item := range walk.Items {
+		bucketize(result, item)
 	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create clientset: %w", err)
-	}
-
-	result := &NativeDiscoveryResult{}
-
-	for _, k := range nativeKinds() {
-		items, err := listNativeKind(ctx, dynClient, k)
-		if err != nil {
-			slog.Debug("native discovery skipped kind", "gvr", k.gvr.String(), "error", err)
-			continue
-		}
-		k.apply(result, items)
-	}
-
-	cm, err := clientset.CoreV1().ConfigMaps("butler-system").Get(ctx, "butler-gitops-config", metav1.GetOptions{})
-	if err == nil {
-		obj := unstructured.Unstructured{}
-		obj.SetAPIVersion("v1")
-		obj.SetKind("ConfigMap")
-		obj.SetName(cm.Name)
-		obj.SetNamespace(cm.Namespace)
-		data := make(map[string]interface{}, len(cm.Data))
-		for k, v := range cm.Data {
-			data[k] = v
-		}
-		_ = unstructured.SetNestedMap(obj.Object, data, "data")
-		result.ButlerGitOpsConfig = &DiscoveredNative{
-			Kind:       "ConfigMap",
-			APIVersion: "v1",
-			Namespace:  cm.Namespace,
-			Name:       cm.Name,
-			Object:     &obj,
-		}
-	} else if !apierrors.IsNotFound(err) {
-		slog.Debug("native discovery skipped butler-gitops-config", "error", err)
-	}
-
 	return result, nil
 }
 
-func listNativeKind(ctx context.Context, dynClient dynamic.Interface, k nativeKind) ([]*DiscoveredNative, error) {
-	var list *unstructured.UnstructuredList
-	var err error
-	if k.namespace != "" {
-		list, err = dynClient.Resource(k.gvr).Namespace(k.namespace).List(ctx, metav1.ListOptions{})
-	} else {
-		list, err = dynClient.Resource(k.gvr).List(ctx, metav1.ListOptions{})
+// bucketize routes a discovered native item to its typed bucket on
+// NativeDiscoveryResult, or to Other if the Kind doesn't match a typed
+// bucket. The typed buckets exist for caller ergonomics (per-kind
+// counts in logging + coverage); the layout generator flattens all
+// buckets including Other for emission.
+func bucketize(result *NativeDiscoveryResult, item *DiscoveredNative) {
+	switch item.Kind {
+	case "IdentityProvider":
+		result.IdentityProviders = append(result.IdentityProviders, item)
+	case "NetworkPool":
+		result.NetworkPools = append(result.NetworkPools, item)
+	case "ProviderConfig":
+		result.ProviderConfigs = append(result.ProviderConfigs, item)
+	case "Team":
+		result.Teams = append(result.Teams, item)
+	case "ClusterCreationPolicy":
+		result.ClusterCreationPolicies = append(result.ClusterCreationPolicies, item)
+	case "SealedSecret":
+		result.SealedSecrets = append(result.SealedSecrets, item)
+	case "IPAddressPool":
+		result.MetalLBIPAddressPools = append(result.MetalLBIPAddressPools, item)
+	case "L2Advertisement":
+		result.MetalLBL2Advertisements = append(result.MetalLBL2Advertisements, item)
+	case "ConfigMap":
+		if item.Name == "butler-gitops-config" && item.Namespace == "butler-system" {
+			result.ButlerGitOpsConfig = item
+			return
+		}
+		result.Other = append(result.Other, item)
+	default:
+		result.Other = append(result.Other, item)
 	}
-	if err != nil {
-		return nil, err
-	}
-
-	items := make([]*DiscoveredNative, 0, len(list.Items))
-	for i := range list.Items {
-		obj := list.Items[i].DeepCopy()
-		stripServerGeneratedFields(obj)
-		items = append(items, &DiscoveredNative{
-			Kind:       obj.GetKind(),
-			APIVersion: obj.GetAPIVersion(),
-			Namespace:  obj.GetNamespace(),
-			Name:       obj.GetName(),
-			Object:     obj,
-		})
-	}
-	return items, nil
 }
 
 // stripServerGeneratedFields removes fields that the API server populates

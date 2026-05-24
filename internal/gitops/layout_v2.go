@@ -320,6 +320,14 @@ func emitNativeResources(acc *DirectoryAccumulator, n *NativeDiscoveryResult, en
 	if n.ButlerGitOpsConfig != nil {
 		all = append(all, n.ButlerGitOpsConfig)
 	}
+	// ADR-017 D1/D4: items the bucketize helper routed to Other (Kinds
+	// outside the typed buckets — e.g., capi-steward's CRDs + RBAC +
+	// Deployment from inventory walk, tenant user CRDs like
+	// Kafka/KafkaTopic/ScaledObject) flow through here too. Each routes
+	// via PathForNativeWithDefault's scope-tiered default placement.
+	// Coverage report (D5) surfaces them as InScopeUncaptured so the
+	// operator sees the placement decision.
+	all = append(all, n.Other...)
 
 	for _, item := range all {
 		// Use PathForNativeWithDefault so the scope-tiered default

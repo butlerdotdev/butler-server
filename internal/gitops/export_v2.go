@@ -31,6 +31,13 @@ type ExportV2Request struct {
 	Helm   *DiscoveryResult
 	Native *NativeDiscoveryResult
 
+	// NamespaceMeta carries labels/annotations from live Namespace
+	// objects so layout v2 can emit Namespaces with preserved metadata
+	// (pod-security labels, network-policy targeting) rather than
+	// synthesized-bare. Populated by DiscoverNamespaceMetadata; nil
+	// when not supplied (export falls back to bare Namespaces).
+	NamespaceMeta NamespaceMetadataMap
+
 	// Repository targets.
 	Owner  string
 	Repo   string
@@ -84,13 +91,51 @@ func RunExportV2(ctx context.Context, gp GitProvider, req ExportV2Request) (*Exp
 	}
 
 	tree, err := GenerateLayoutV2(ExportInput{
-		ClusterName: req.ClusterName,
-		Env:         req.Env,
-		Helm:        req.Helm,
-		Native:      req.Native,
+		ClusterName:   req.ClusterName,
+		Env:           req.Env,
+		Helm:          req.Helm,
+		Native:        req.Native,
+		NamespaceMeta: req.NamespaceMeta,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("generate layout: %w", err)
+	}
+
+	// Synthesize coverage.yaml (ADR-017 D5). Carries the inline-patches
+	// visibility surface from inventory walk's per-Kustomization
+	// observations — operators see env-override-via-inline-patch
+	// explicitly rather than having it silently flattened.
+	if req.Native != nil {
+		var nativeItems []*DiscoveredNative
+		nativeItems = append(nativeItems, req.Native.IdentityProviders...)
+		nativeItems = append(nativeItems, req.Native.NetworkPools...)
+		nativeItems = append(nativeItems, req.Native.ProviderConfigs...)
+		nativeItems = append(nativeItems, req.Native.Teams...)
+		nativeItems = append(nativeItems, req.Native.ClusterCreationPolicies...)
+		nativeItems = append(nativeItems, req.Native.SealedSecrets...)
+		nativeItems = append(nativeItems, req.Native.MetalLBIPAddressPools...)
+		nativeItems = append(nativeItems, req.Native.MetalLBL2Advertisements...)
+		nativeItems = append(nativeItems, req.Native.Other...)
+		if req.Native.ButlerGitOpsConfig != nil {
+			nativeItems = append(nativeItems, req.Native.ButlerGitOpsConfig)
+		}
+		report := BuildCoverage(CoverageInput{
+			ClusterName:   req.ClusterName,
+			Env:           req.Env,
+			EmittedFiles:  tree,
+			Helm:          req.Helm,
+			Inventory:     req.Native.InventoryWalk,
+			NativeResults: nativeItems,
+			NamespaceMeta: req.NamespaceMeta,
+		})
+		coverageYAML, err := MarshalCoverage(report)
+		if err != nil {
+			return nil, fmt.Errorf("marshal coverage: %w", err)
+		}
+		// coverage.yaml lives at the tree root — operator metadata,
+		// not part of any Kustomize build, deliberately not listed in
+		// clusters/<cluster>/kustomization.yaml.
+		tree["coverage.yaml"] = coverageYAML
 	}
 
 	matches := req.ForceMRPath == false && existingTreeMatchesV2(ctx, gp, req.Owner, req.Repo, req.Branch, req.ClusterName, req.Env)
