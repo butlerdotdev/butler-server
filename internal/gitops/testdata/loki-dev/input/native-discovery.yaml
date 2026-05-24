@@ -1,0 +1,1994 @@
+InventoryWalk:
+  FetchFailures: null
+  Items:
+  - APIVersion: v1
+    IsNamespaced: false
+    Kind: Namespace
+    Name: loki
+    Namespace: ""
+    Object:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: loki
+  - APIVersion: v1
+    IsNamespaced: true
+    Kind: Service
+    Name: loki-gateway-lb
+    Namespace: loki
+    Object:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        annotations:
+          metallb.io/ip-allocated-from-pool: default-pool
+        name: loki-gateway-lb
+        namespace: loki
+      spec:
+        allocateLoadBalancerNodePorts: true
+        clusterIP: 10.99.3.176
+        clusterIPs:
+        - 10.99.3.176
+        externalTrafficPolicy: Cluster
+        internalTrafficPolicy: Cluster
+        ipFamilies:
+        - IPv4
+        ipFamilyPolicy: SingleStack
+        ports:
+        - name: http
+          nodePort: 32260
+          port: 3100
+          protocol: TCP
+          targetPort: 8080
+        selector:
+          app.kubernetes.io/component: gateway
+          app.kubernetes.io/name: loki
+        sessionAffinity: None
+        type: LoadBalancer
+  - APIVersion: bitnami.com/v1alpha1
+    IsNamespaced: true
+    Kind: SealedSecret
+    Name: loki-gateway-tls
+    Namespace: loki
+    Object:
+      apiVersion: bitnami.com/v1alpha1
+      kind: SealedSecret
+      metadata:
+        name: loki-gateway-tls
+        namespace: loki
+      spec:
+        encryptedData:
+          tls.crt: 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
+          tls.key: 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
+        template:
+          metadata:
+            name: loki-gateway-tls
+            namespace: loki
+          type: kubernetes.io/tls
+  - APIVersion: bitnami.com/v1alpha1
+    IsNamespaced: true
+    Kind: SealedSecret
+    Name: seaweedfs-s3-credentials
+    Namespace: loki
+    Object:
+      apiVersion: bitnami.com/v1alpha1
+      kind: SealedSecret
+      metadata:
+        name: seaweedfs-s3-credentials
+        namespace: loki
+      spec:
+        encryptedData:
+          S3_ACCESS_KEY_ID: AgBgxEhPv5Kx4P1zm6kAg1d63MrqngBdG2+foYh8Gm4b44mpJC4mwjIFjJbpaOh3KTuGbCv2cGX1av4CwsUftChP2KLcsdbafkrSRmrle/FfoBH+0mO5y0J5Kd0DHFakoQq08j+QAVIUVTYpG+Pqv3c4v4r84XBdr2e4UbI201u5hxRfeNcUZcfdAQeqq93b+9I6hc5gmZ32c5N8eWgMKbLtfMs4EWcW3eCv4qGd+7es7Q1z5n8DP7Kk+ZQDjiUrnn1BwXiR4nHnIRT7bjBN/tZz+qSNgMnkqU1HXnuc/scIA7JJQI+gZhnj0Q2dkhmlILDtWjtgtZH+ZQolHpL+ACeM+wjRmYL6h+DeCzIfyhd99CYFpCo7j2vuiNtbNABQhVPj7OgdpuOSFeJTvNiYkfyZSfLRUmLwwq08P/Cb882QaFVVNQtiX00+Qidef6UK0bKAveJNKKjNlm+shL2x7Ho0hoyVP3jOQwu7jrMCjvTHXKwous/EjCvl96cbhaI7cuMgCCdwp29xxR1BlckVKlDibZSBEj5Pz+RVNeHf4c/zAkW4V98G58ZhZJTMVJ52q4yYXZOAMU+wBTgyMi0iakbDtzeD5UQ23Er51BPTyo9+6uwwfRiJ04XktnKQyMyJ0vICp1QVtMoe6O7SzjoSmvooldN+zuquoPs1McgZrZm99ziP2w/n1N0i5rOqe0HE4CK7twwGGEbJVDWtVdu44e/TahRUmePxJ637VwPEfmcMAg==
+          S3_SECRET_ACCESS_KEY: AgBDrM8S2dFO953OrQzYZm/OHKPFC7C9HrkILCfS+PG87IVN/rFcqfIZEHVY++DngNru72tbmbIsY1GzB5OmjPVflZmlOYKBUi061+o3UUg+aH1yCYlYkbkLRLhyWkIwo5RLg7rnlc2e9ngqbQE/+weVGi0lCWxgrzmRgK3W0VPf49A2c/xZT3PtM4OFroNA+ZPQy7trHPc8ae7O2hq7+oo5D7lr/lgz1IQyWEversEsw1VxKVG3e3SrYcYHmOEAUyKCKNHdBKU0RVN9wqCnNq5w447aotRwJqqvbnP9qpLjW3eGKlQBTjboIIJJBLqFEC6kjdNqt8VvIvxBS7LpPYz8nThhXTn65/UA/HkPRBmH19ms/u2GNxr13TSpPtWsZncnYJrrWMcDHV48WCy/i94dV+tyNYyEVtq73kwB7OcKJa+B3gqgHF43531DgzYsm5jOz4F7oRsv3TiMYGSs8lkNsX3K3RcABI1kQm0EPMH2Gq1Q47RXb+IM9a+lXg8NNnkqK9U9kGB02NycpweiGRFNF0CIwvK2aj+2aNtlvAS5pKZiUcIZT+oqbDJ9QTMTW2f91dd90QkYM1qWl7AeYlPW64Cdl9VXxiBefK2dXCjCsTC5ktRp4I9AZcGdhbvSPP6xWf7Fz3Z7isuXF5d8NgaajdRYvZwdFgFc/yEDKhFhkylkT4OZI7dRYacEomu9isFBNh/N0c6Z5TnYhAGQSfG3u+osccaLexBBq7jUY+d2iaa5WJtb2odcrwipFMwENQmDFTIthVF8xYocAXxgq99h
+        template:
+          metadata:
+            name: seaweedfs-s3-credentials
+            namespace: loki
+          type: Opaque
+  - APIVersion: helm.toolkit.fluxcd.io/v2
+    IsNamespaced: true
+    Kind: HelmRelease
+    Name: loki
+    Namespace: loki
+    Object:
+      apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata:
+        name: loki
+        namespace: loki
+      spec:
+        chart:
+          spec:
+            chart: loki
+            reconcileStrategy: ChartVersion
+            sourceRef:
+              kind: HelmRepository
+              name: grafana
+              namespace: flux-system
+            version: ~6.24.0
+        dependsOn:
+        - name: sealed-secrets
+          namespace: flux-system
+        install:
+          createNamespace: true
+          remediation:
+            retries: 3
+        interval: 1h0m0s
+        releaseName: loki
+        timeout: 15m0s
+        upgrade:
+          remediation:
+            retries: 3
+        values:
+          backend:
+            replicas: 0
+          chunksCache:
+            allocatedMemory: 8192
+            enabled: true
+            replicas: 3
+            resources:
+              limits:
+                cpu: "1"
+                memory: 12Gi
+              requests:
+                cpu: 250m
+                memory: 2Gi
+          compactor:
+            extraArgs:
+            - -config.expand-env=true
+            extraEnvFrom:
+            - secretRef:
+                name: seaweedfs-s3-credentials
+            persistence:
+              claims:
+              - name: data
+                size: 10Gi
+                storageClass: longhorn
+              enabled: true
+            replicas: 1
+            resources:
+              limits:
+                cpu: "2"
+                memory: 8Gi
+              requests:
+                cpu: 500m
+                memory: 2Gi
+          deploymentMode: Distributed
+          distributor:
+            extraArgs:
+            - -config.expand-env=true
+            extraEnvFrom:
+            - secretRef:
+                name: seaweedfs-s3-credentials
+            maxUnavailable: 1
+            replicas: 4
+            resources:
+              limits:
+                cpu: "2"
+                memory: 4Gi
+              requests:
+                cpu: 500m
+                memory: 1Gi
+          gateway:
+            maxUnavailable: 1
+            replicas: 2
+            resources:
+              limits:
+                cpu: 500m
+                memory: 512Mi
+              requests:
+                cpu: 250m
+                memory: 256Mi
+          indexGateway:
+            extraArgs:
+            - -config.expand-env=true
+            extraEnvFrom:
+            - secretRef:
+                name: seaweedfs-s3-credentials
+            maxUnavailable: 1
+            persistence:
+              enabled: true
+              size: 10Gi
+              storageClass: longhorn
+            replicas: 2
+            resources:
+              limits:
+                cpu: "1"
+                memory: 4Gi
+              requests:
+                cpu: 500m
+                memory: 2Gi
+          ingester:
+            affinity:
+              podAntiAffinity:
+                preferredDuringSchedulingIgnoredDuringExecution:
+                - podAffinityTerm:
+                    labelSelector:
+                      matchExpressions:
+                      - key: app.kubernetes.io/component
+                        operator: In
+                        values:
+                        - ingester
+                    topologyKey: kubernetes.io/hostname
+                  weight: 100
+            extraArgs:
+            - -config.expand-env=true
+            extraEnvFrom:
+            - secretRef:
+                name: seaweedfs-s3-credentials
+            maxUnavailable: 1
+            persistence:
+              claims:
+              - name: data
+                size: 10Gi
+                storageClass: longhorn
+              enabled: true
+            replicas: 3
+            resources:
+              limits:
+                cpu: "4"
+                memory: 16Gi
+              requests:
+                cpu: 2000m
+                memory: 8Gi
+            zoneAwareReplication:
+              enabled: false
+          loki:
+            auth_enabled: true
+            commonConfig:
+              compactor_address: '{{ include "loki.compactorAddress" . }}'
+              path_prefix: /var/loki
+              replication_factor: 3
+            compactor:
+              compaction_interval: 10m
+              delete_request_store: s3
+              retention_delete_delay: 2h
+              retention_delete_worker_count: 150
+              retention_enabled: true
+              working_directory: /var/loki/compactor
+            ingester:
+              chunk_encoding: snappy
+              chunk_target_size: 1572864
+              concurrent_flushes: 64
+              max_chunk_age: 2h
+            limits_config:
+              ingestion_burst_size_mb: 75
+              ingestion_rate_mb: 50
+              max_cache_freshness_per_query: 10m
+              max_query_parallelism: 64
+              max_streams_per_user: 50000
+              per_stream_rate_limit: 25MB
+              per_stream_rate_limit_burst: 50MB
+              query_timeout: 300s
+              reject_old_samples: true
+              reject_old_samples_max_age: 168h
+              retention_period: 168h
+              split_queries_by_interval: 15m
+              tsdb_max_query_parallelism: 128
+              volume_enabled: true
+            pattern_ingester:
+              enabled: false
+            querier:
+              max_concurrent: 16
+            schemaConfig:
+              configs:
+              - from: "2024-04-01"
+                index:
+                  period: 24h
+                  prefix: loki_index_
+                object_store: s3
+                schema: v13
+                store: tsdb
+            server:
+              grpc_listen_port: 9095
+              http_listen_port: 3100
+              http_server_read_timeout: 600s
+              http_server_write_timeout: 600s
+            storage:
+              bucketNames:
+                admin: loki-admin
+                chunks: loki-chunks
+                ruler: loki-ruler
+              s3:
+                accessKeyId: ${S3_ACCESS_KEY_ID}
+                endpoint: https://s3-crop-dev.phibred.com
+                http_config:
+                  insecure_skip_verify: true
+                insecure: false
+                region: us-east-1
+                s3ForcePathStyle: true
+                secretAccessKey: ${S3_SECRET_ACCESS_KEY}
+              type: s3
+          lokiCanary:
+            enabled: false
+          querier:
+            extraArgs:
+            - -config.expand-env=true
+            extraEnvFrom:
+            - secretRef:
+                name: seaweedfs-s3-credentials
+            maxUnavailable: 1
+            replicas: 3
+            resources:
+              limits:
+                cpu: "2"
+                memory: 8Gi
+              requests:
+                cpu: 500m
+                memory: 2Gi
+          queryFrontend:
+            extraArgs:
+            - -config.expand-env=true
+            extraEnvFrom:
+            - secretRef:
+                name: seaweedfs-s3-credentials
+            maxUnavailable: 1
+            replicas: 2
+            resources:
+              limits:
+                cpu: "1"
+                memory: 4Gi
+              requests:
+                cpu: 500m
+                memory: 2Gi
+          queryScheduler:
+            extraArgs:
+            - -config.expand-env=true
+            extraEnvFrom:
+            - secretRef:
+                name: seaweedfs-s3-credentials
+            maxUnavailable: 1
+            replicas: 2
+            resources:
+              limits:
+                cpu: 500m
+                memory: 2Gi
+              requests:
+                cpu: 250m
+                memory: 1Gi
+          read:
+            replicas: 0
+          resultsCache:
+            allocatedMemory: 4096
+            defaultValidity: 12h
+            enabled: true
+            replicas: 2
+            resources:
+              limits:
+                cpu: "1"
+                memory: 6Gi
+              requests:
+                cpu: 500m
+                memory: 2Gi
+          ruler:
+            enabled: false
+          singleBinary:
+            replicas: 0
+          test:
+            enabled: false
+          write:
+            replicas: 0
+  - APIVersion: source.toolkit.fluxcd.io/v1
+    IsNamespaced: true
+    Kind: HelmRepository
+    Name: grafana
+    Namespace: flux-system
+    Object:
+      apiVersion: source.toolkit.fluxcd.io/v1
+      kind: HelmRepository
+      metadata:
+        name: grafana
+        namespace: flux-system
+      spec:
+        interval: 1h
+        provider: generic
+        url: https://grafana.github.io/helm-charts
+  - APIVersion: traefik.io/v1alpha1
+    IsNamespaced: true
+    Kind: IngressRoute
+    Name: loki-gateway
+    Namespace: loki
+    Object:
+      apiVersion: traefik.io/v1alpha1
+      kind: IngressRoute
+      metadata:
+        name: loki-gateway
+        namespace: loki
+      spec:
+        entryPoints:
+        - websecure
+        routes:
+        - kind: Rule
+          match: Host(`loki-crop-dev.phibred.com`)
+          services:
+          - name: loki-gateway
+            port: 80
+        tls:
+          secretName: loki-gateway-tls
+  - APIVersion: v1
+    IsNamespaced: false
+    Kind: Namespace
+    Name: observability
+    Namespace: ""
+    Object:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: observability
+  - APIVersion: helm.toolkit.fluxcd.io/v2
+    IsNamespaced: true
+    Kind: HelmRelease
+    Name: sealed-secrets
+    Namespace: flux-system
+    Object:
+      apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata:
+        name: sealed-secrets
+        namespace: flux-system
+      spec:
+        chart:
+          spec:
+            chart: sealed-secrets
+            reconcileStrategy: ChartVersion
+            sourceRef:
+              kind: HelmRepository
+              name: sealed-secrets
+            version: '>=1.15.0-0'
+        install:
+          crds: Create
+        interval: 1h0m0s
+        releaseName: sealed-secrets-controller
+        targetNamespace: flux-system
+        upgrade:
+          crds: CreateReplace
+  - APIVersion: helm.toolkit.fluxcd.io/v2
+    IsNamespaced: true
+    Kind: HelmRelease
+    Name: kube-prometheus-stack
+    Namespace: observability
+    Object:
+      apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata:
+        name: kube-prometheus-stack
+        namespace: observability
+      spec:
+        chart:
+          spec:
+            chart: kube-prometheus-stack
+            reconcileStrategy: ChartVersion
+            sourceRef:
+              kind: HelmRepository
+              name: prometheus-community
+              namespace: flux-system
+            version: ~67.0.0
+        install:
+          crds: Create
+          createNamespace: true
+          remediation:
+            retries: 3
+        interval: 1h0m0s
+        releaseName: kube-prometheus-stack
+        timeout: 10m0s
+        upgrade:
+          crds: CreateReplace
+          remediation:
+            retries: 3
+        values:
+          alertmanager:
+            enabled: false
+          grafana:
+            enabled: false
+          kube-state-metrics:
+            customResourceState:
+              config:
+                spec:
+                  resources:
+                  - groupVersionKind:
+                      group: kustomize.toolkit.fluxcd.io
+                      kind: Kustomization
+                      version: v1
+                    metricNamePrefix: gotk
+                    metrics:
+                    - each:
+                        info:
+                          labelsFromPath:
+                            name:
+                            - metadata
+                            - name
+                        type: Info
+                      help: The current state of a Flux Kustomization resource.
+                      labelsFromPath:
+                        exported_namespace:
+                        - metadata
+                        - namespace
+                        ready:
+                        - status
+                        - conditions
+                        - '[type=Ready]'
+                        - status
+                        revision:
+                        - status
+                        - lastAppliedRevision
+                        source_name:
+                        - spec
+                        - sourceRef
+                        - name
+                        suspended:
+                        - spec
+                        - suspend
+                      name: resource_info
+                  - groupVersionKind:
+                      group: helm.toolkit.fluxcd.io
+                      kind: HelmRelease
+                      version: v2
+                    metricNamePrefix: gotk
+                    metrics:
+                    - each:
+                        info:
+                          labelsFromPath:
+                            name:
+                            - metadata
+                            - name
+                        type: Info
+                      help: The current state of a Flux HelmRelease resource.
+                      labelsFromPath:
+                        chart_app_version:
+                        - status
+                        - history
+                        - "0"
+                        - appVersion
+                        chart_name:
+                        - status
+                        - history
+                        - "0"
+                        - chartName
+                        chart_ref_name:
+                        - spec
+                        - chartRef
+                        - name
+                        chart_source_name:
+                        - spec
+                        - chart
+                        - spec
+                        - sourceRef
+                        - name
+                        exported_namespace:
+                        - metadata
+                        - namespace
+                        ready:
+                        - status
+                        - conditions
+                        - '[type=Ready]'
+                        - status
+                        revision:
+                        - status
+                        - history
+                        - "0"
+                        - chartVersion
+                        suspended:
+                        - spec
+                        - suspend
+                      name: resource_info
+                  - groupVersionKind:
+                      group: source.toolkit.fluxcd.io
+                      kind: GitRepository
+                      version: v1
+                    metricNamePrefix: gotk
+                    metrics:
+                    - each:
+                        info:
+                          labelsFromPath:
+                            name:
+                            - metadata
+                            - name
+                        type: Info
+                      help: The current state of a Flux GitRepository resource.
+                      labelsFromPath:
+                        exported_namespace:
+                        - metadata
+                        - namespace
+                        ready:
+                        - status
+                        - conditions
+                        - '[type=Ready]'
+                        - status
+                        revision:
+                        - status
+                        - artifact
+                        - revision
+                        suspended:
+                        - spec
+                        - suspend
+                        url:
+                        - spec
+                        - url
+                      name: resource_info
+                  - groupVersionKind:
+                      group: source.toolkit.fluxcd.io
+                      kind: HelmRepository
+                      version: v1
+                    metricNamePrefix: gotk
+                    metrics:
+                    - each:
+                        info:
+                          labelsFromPath:
+                            name:
+                            - metadata
+                            - name
+                        type: Info
+                      help: The current state of a Flux HelmRepository resource.
+                      labelsFromPath:
+                        exported_namespace:
+                        - metadata
+                        - namespace
+                        ready:
+                        - status
+                        - conditions
+                        - '[type=Ready]'
+                        - status
+                        revision:
+                        - status
+                        - artifact
+                        - revision
+                        suspended:
+                        - spec
+                        - suspend
+                        url:
+                        - spec
+                        - url
+                      name: resource_info
+                  - groupVersionKind:
+                      group: source.toolkit.fluxcd.io
+                      kind: HelmChart
+                      version: v1
+                    metricNamePrefix: gotk
+                    metrics:
+                    - each:
+                        info:
+                          labelsFromPath:
+                            name:
+                            - metadata
+                            - name
+                        type: Info
+                      help: The current state of a Flux HelmChart resource.
+                      labelsFromPath:
+                        chart_name:
+                        - spec
+                        - chart
+                        chart_version:
+                        - spec
+                        - version
+                        exported_namespace:
+                        - metadata
+                        - namespace
+                        ready:
+                        - status
+                        - conditions
+                        - '[type=Ready]'
+                        - status
+                        revision:
+                        - status
+                        - artifact
+                        - revision
+                        suspended:
+                        - spec
+                        - suspend
+                      name: resource_info
+                  - groupVersionKind:
+                      group: source.toolkit.fluxcd.io
+                      kind: OCIRepository
+                      version: v1beta2
+                    metricNamePrefix: gotk
+                    metrics:
+                    - each:
+                        info:
+                          labelsFromPath:
+                            name:
+                            - metadata
+                            - name
+                        type: Info
+                      help: The current state of a Flux OCIRepository resource.
+                      labelsFromPath:
+                        exported_namespace:
+                        - metadata
+                        - namespace
+                        ready:
+                        - status
+                        - conditions
+                        - '[type=Ready]'
+                        - status
+                        revision:
+                        - status
+                        - artifact
+                        - revision
+                        suspended:
+                        - spec
+                        - suspend
+                        url:
+                        - spec
+                        - url
+                      name: resource_info
+                  - groupVersionKind:
+                      group: notification.toolkit.fluxcd.io
+                      kind: Alert
+                      version: v1beta3
+                    metricNamePrefix: gotk
+                    metrics:
+                    - each:
+                        info:
+                          labelsFromPath:
+                            name:
+                            - metadata
+                            - name
+                        type: Info
+                      help: The current state of a Flux Alert resource.
+                      labelsFromPath:
+                        exported_namespace:
+                        - metadata
+                        - namespace
+                        suspended:
+                        - spec
+                        - suspend
+                      name: resource_info
+                  - groupVersionKind:
+                      group: notification.toolkit.fluxcd.io
+                      kind: Provider
+                      version: v1beta3
+                    metricNamePrefix: gotk
+                    metrics:
+                    - each:
+                        info:
+                          labelsFromPath:
+                            name:
+                            - metadata
+                            - name
+                        type: Info
+                      help: The current state of a Flux Provider resource.
+                      labelsFromPath:
+                        exported_namespace:
+                        - metadata
+                        - namespace
+                        suspended:
+                        - spec
+                        - suspend
+                      name: resource_info
+                  - groupVersionKind:
+                      group: notification.toolkit.fluxcd.io
+                      kind: Receiver
+                      version: v1
+                    metricNamePrefix: gotk
+                    metrics:
+                    - each:
+                        info:
+                          labelsFromPath:
+                            name:
+                            - metadata
+                            - name
+                        type: Info
+                      help: The current state of a Flux Receiver resource.
+                      labelsFromPath:
+                        exported_namespace:
+                        - metadata
+                        - namespace
+                        ready:
+                        - status
+                        - conditions
+                        - '[type=Ready]'
+                        - status
+                        suspended:
+                        - spec
+                        - suspend
+                        webhook_path:
+                        - status
+                        - webhookPath
+                      name: resource_info
+                  - groupVersionKind:
+                      group: image.toolkit.fluxcd.io
+                      kind: ImageRepository
+                      version: v1beta2
+                    metricNamePrefix: gotk
+                    metrics:
+                    - each:
+                        info:
+                          labelsFromPath:
+                            name:
+                            - metadata
+                            - name
+                        type: Info
+                      help: The current state of a Flux ImageRepository resource.
+                      labelsFromPath:
+                        exported_namespace:
+                        - metadata
+                        - namespace
+                        image:
+                        - spec
+                        - image
+                        ready:
+                        - status
+                        - conditions
+                        - '[type=Ready]'
+                        - status
+                        suspended:
+                        - spec
+                        - suspend
+                      name: resource_info
+                  - groupVersionKind:
+                      group: image.toolkit.fluxcd.io
+                      kind: ImagePolicy
+                      version: v1beta2
+                    metricNamePrefix: gotk
+                    metrics:
+                    - each:
+                        info:
+                          labelsFromPath:
+                            name:
+                            - metadata
+                            - name
+                        type: Info
+                      help: The current state of a Flux ImagePolicy resource.
+                      labelsFromPath:
+                        exported_namespace:
+                        - metadata
+                        - namespace
+                        ready:
+                        - status
+                        - conditions
+                        - '[type=Ready]'
+                        - status
+                        source_name:
+                        - spec
+                        - imageRepositoryRef
+                        - name
+                        suspended:
+                        - spec
+                        - suspend
+                      name: resource_info
+                  - groupVersionKind:
+                      group: image.toolkit.fluxcd.io
+                      kind: ImageUpdateAutomation
+                      version: v1beta2
+                    metricNamePrefix: gotk
+                    metrics:
+                    - each:
+                        info:
+                          labelsFromPath:
+                            name:
+                            - metadata
+                            - name
+                        type: Info
+                      help: The current state of a Flux ImageUpdateAutomation resource.
+                      labelsFromPath:
+                        exported_namespace:
+                        - metadata
+                        - namespace
+                        ready:
+                        - status
+                        - conditions
+                        - '[type=Ready]'
+                        - status
+                        source_name:
+                        - spec
+                        - sourceRef
+                        - name
+                        suspended:
+                        - spec
+                        - suspend
+                      name: resource_info
+              enabled: true
+            rbac:
+              extraRules:
+              - apiGroups:
+                - source.toolkit.fluxcd.io
+                - kustomize.toolkit.fluxcd.io
+                - helm.toolkit.fluxcd.io
+                - notification.toolkit.fluxcd.io
+                - image.toolkit.fluxcd.io
+                resources:
+                - gitrepositories
+                - buckets
+                - helmrepositories
+                - helmcharts
+                - ocirepositories
+                - kustomizations
+                - helmreleases
+                - alerts
+                - providers
+                - receivers
+                - imagerepositories
+                - imagepolicies
+                - imageupdateautomations
+                verbs:
+                - list
+                - watch
+          kubeStateMetrics:
+            enabled: true
+          nodeExporter:
+            enabled: true
+          prometheus:
+            enabled: true
+            prometheusSpec:
+              externalLabels:
+                cluster: loki-dev
+              podMonitorSelectorNilUsesHelmValues: false
+              remoteWrite:
+              - name: vector-pipeline-dev
+                url: http://10.92.90.38:9000
+              replicas: 1
+              resources:
+                limits:
+                  cpu: 500m
+                  memory: 2Gi
+                requests:
+                  cpu: 250m
+                  memory: 1Gi
+              retention: 2h
+              securityContext:
+                fsGroup: 65534
+                runAsNonRoot: true
+                runAsUser: 65534
+              serviceMonitorSelectorNilUsesHelmValues: false
+              storageSpec:
+                volumeClaimTemplate:
+                  spec:
+                    accessModes:
+                    - ReadWriteOnce
+                    resources:
+                      requests:
+                        storage: 10Gi
+                    storageClassName: longhorn
+              walCompression: true
+          prometheusOperator:
+            admissionWebhooks:
+              enabled: false
+            resources:
+              limits:
+                cpu: 250m
+                memory: 256Mi
+              requests:
+                cpu: 100m
+                memory: 128Mi
+            tls:
+              enabled: false
+  - APIVersion: source.toolkit.fluxcd.io/v1
+    IsNamespaced: true
+    Kind: HelmRepository
+    Name: prometheus-community
+    Namespace: flux-system
+    Object:
+      apiVersion: source.toolkit.fluxcd.io/v1
+      kind: HelmRepository
+      metadata:
+        name: prometheus-community
+        namespace: flux-system
+      spec:
+        interval: 1h
+        provider: generic
+        url: https://prometheus-community.github.io/helm-charts
+  - APIVersion: source.toolkit.fluxcd.io/v1
+    IsNamespaced: true
+    Kind: HelmRepository
+    Name: sealed-secrets
+    Namespace: flux-system
+    Object:
+      apiVersion: source.toolkit.fluxcd.io/v1
+      kind: HelmRepository
+      metadata:
+        name: sealed-secrets
+        namespace: flux-system
+      spec:
+        interval: 1h0m0s
+        provider: generic
+        url: https://bitnami-labs.github.io/sealed-secrets
+  Kustomizations:
+  - InventoryItemCount: 7
+    LastAppliedRevision: main@sha1:fdcd68eba7c425ff57219426b19409eaa728fff3
+    Name: apps
+    Namespace: flux-system
+    Ready: true
+    SkipReason: ""
+    Skipped: false
+    SpecPatches: null
+  - InventoryItemCount: 42
+    LastAppliedRevision: main@sha1:fdcd68eba7c425ff57219426b19409eaa728fff3
+    Name: flux-system
+    Namespace: flux-system
+    Ready: true
+    SkipReason: ""
+    Skipped: false
+    SpecPatches: null
+  - InventoryItemCount: 5
+    LastAppliedRevision: main@sha1:fdcd68eba7c425ff57219426b19409eaa728fff3
+    Name: infra-controllers
+    Namespace: flux-system
+    Ready: true
+    SkipReason: ""
+    Skipped: false
+    SpecPatches:
+    - PatchSize: 966
+      TargetGroup: ""
+      TargetKind: HelmRelease
+      TargetName: kube-prometheus-stack
+      TargetNamespace: ""
+Items:
+- APIVersion: v1
+  IsNamespaced: false
+  Kind: Namespace
+  Name: loki
+  Namespace: ""
+  Object:
+    apiVersion: v1
+    kind: Namespace
+    metadata:
+      name: loki
+- APIVersion: v1
+  IsNamespaced: true
+  Kind: Service
+  Name: loki-gateway-lb
+  Namespace: loki
+  Object:
+    apiVersion: v1
+    kind: Service
+    metadata:
+      annotations:
+        metallb.io/ip-allocated-from-pool: default-pool
+      name: loki-gateway-lb
+      namespace: loki
+    spec:
+      allocateLoadBalancerNodePorts: true
+      clusterIP: 10.99.3.176
+      clusterIPs:
+      - 10.99.3.176
+      externalTrafficPolicy: Cluster
+      internalTrafficPolicy: Cluster
+      ipFamilies:
+      - IPv4
+      ipFamilyPolicy: SingleStack
+      ports:
+      - name: http
+        nodePort: 32260
+        port: 3100
+        protocol: TCP
+        targetPort: 8080
+      selector:
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/name: loki
+      sessionAffinity: None
+      type: LoadBalancer
+- APIVersion: bitnami.com/v1alpha1
+  IsNamespaced: true
+  Kind: SealedSecret
+  Name: loki-gateway-tls
+  Namespace: loki
+  Object:
+    apiVersion: bitnami.com/v1alpha1
+    kind: SealedSecret
+    metadata:
+      name: loki-gateway-tls
+      namespace: loki
+    spec:
+      encryptedData:
+        tls.crt: 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
+        tls.key: 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
+      template:
+        metadata:
+          name: loki-gateway-tls
+          namespace: loki
+        type: kubernetes.io/tls
+- APIVersion: bitnami.com/v1alpha1
+  IsNamespaced: true
+  Kind: SealedSecret
+  Name: seaweedfs-s3-credentials
+  Namespace: loki
+  Object:
+    apiVersion: bitnami.com/v1alpha1
+    kind: SealedSecret
+    metadata:
+      name: seaweedfs-s3-credentials
+      namespace: loki
+    spec:
+      encryptedData:
+        S3_ACCESS_KEY_ID: AgBgxEhPv5Kx4P1zm6kAg1d63MrqngBdG2+foYh8Gm4b44mpJC4mwjIFjJbpaOh3KTuGbCv2cGX1av4CwsUftChP2KLcsdbafkrSRmrle/FfoBH+0mO5y0J5Kd0DHFakoQq08j+QAVIUVTYpG+Pqv3c4v4r84XBdr2e4UbI201u5hxRfeNcUZcfdAQeqq93b+9I6hc5gmZ32c5N8eWgMKbLtfMs4EWcW3eCv4qGd+7es7Q1z5n8DP7Kk+ZQDjiUrnn1BwXiR4nHnIRT7bjBN/tZz+qSNgMnkqU1HXnuc/scIA7JJQI+gZhnj0Q2dkhmlILDtWjtgtZH+ZQolHpL+ACeM+wjRmYL6h+DeCzIfyhd99CYFpCo7j2vuiNtbNABQhVPj7OgdpuOSFeJTvNiYkfyZSfLRUmLwwq08P/Cb882QaFVVNQtiX00+Qidef6UK0bKAveJNKKjNlm+shL2x7Ho0hoyVP3jOQwu7jrMCjvTHXKwous/EjCvl96cbhaI7cuMgCCdwp29xxR1BlckVKlDibZSBEj5Pz+RVNeHf4c/zAkW4V98G58ZhZJTMVJ52q4yYXZOAMU+wBTgyMi0iakbDtzeD5UQ23Er51BPTyo9+6uwwfRiJ04XktnKQyMyJ0vICp1QVtMoe6O7SzjoSmvooldN+zuquoPs1McgZrZm99ziP2w/n1N0i5rOqe0HE4CK7twwGGEbJVDWtVdu44e/TahRUmePxJ637VwPEfmcMAg==
+        S3_SECRET_ACCESS_KEY: AgBDrM8S2dFO953OrQzYZm/OHKPFC7C9HrkILCfS+PG87IVN/rFcqfIZEHVY++DngNru72tbmbIsY1GzB5OmjPVflZmlOYKBUi061+o3UUg+aH1yCYlYkbkLRLhyWkIwo5RLg7rnlc2e9ngqbQE/+weVGi0lCWxgrzmRgK3W0VPf49A2c/xZT3PtM4OFroNA+ZPQy7trHPc8ae7O2hq7+oo5D7lr/lgz1IQyWEversEsw1VxKVG3e3SrYcYHmOEAUyKCKNHdBKU0RVN9wqCnNq5w447aotRwJqqvbnP9qpLjW3eGKlQBTjboIIJJBLqFEC6kjdNqt8VvIvxBS7LpPYz8nThhXTn65/UA/HkPRBmH19ms/u2GNxr13TSpPtWsZncnYJrrWMcDHV48WCy/i94dV+tyNYyEVtq73kwB7OcKJa+B3gqgHF43531DgzYsm5jOz4F7oRsv3TiMYGSs8lkNsX3K3RcABI1kQm0EPMH2Gq1Q47RXb+IM9a+lXg8NNnkqK9U9kGB02NycpweiGRFNF0CIwvK2aj+2aNtlvAS5pKZiUcIZT+oqbDJ9QTMTW2f91dd90QkYM1qWl7AeYlPW64Cdl9VXxiBefK2dXCjCsTC5ktRp4I9AZcGdhbvSPP6xWf7Fz3Z7isuXF5d8NgaajdRYvZwdFgFc/yEDKhFhkylkT4OZI7dRYacEomu9isFBNh/N0c6Z5TnYhAGQSfG3u+osccaLexBBq7jUY+d2iaa5WJtb2odcrwipFMwENQmDFTIthVF8xYocAXxgq99h
+      template:
+        metadata:
+          name: seaweedfs-s3-credentials
+          namespace: loki
+        type: Opaque
+- APIVersion: helm.toolkit.fluxcd.io/v2
+  IsNamespaced: true
+  Kind: HelmRelease
+  Name: loki
+  Namespace: loki
+  Object:
+    apiVersion: helm.toolkit.fluxcd.io/v2
+    kind: HelmRelease
+    metadata:
+      name: loki
+      namespace: loki
+    spec:
+      chart:
+        spec:
+          chart: loki
+          reconcileStrategy: ChartVersion
+          sourceRef:
+            kind: HelmRepository
+            name: grafana
+            namespace: flux-system
+          version: ~6.24.0
+      dependsOn:
+      - name: sealed-secrets
+        namespace: flux-system
+      install:
+        createNamespace: true
+        remediation:
+          retries: 3
+      interval: 1h0m0s
+      releaseName: loki
+      timeout: 15m0s
+      upgrade:
+        remediation:
+          retries: 3
+      values:
+        backend:
+          replicas: 0
+        chunksCache:
+          allocatedMemory: 8192
+          enabled: true
+          replicas: 3
+          resources:
+            limits:
+              cpu: "1"
+              memory: 12Gi
+            requests:
+              cpu: 250m
+              memory: 2Gi
+        compactor:
+          extraArgs:
+          - -config.expand-env=true
+          extraEnvFrom:
+          - secretRef:
+              name: seaweedfs-s3-credentials
+          persistence:
+            claims:
+            - name: data
+              size: 10Gi
+              storageClass: longhorn
+            enabled: true
+          replicas: 1
+          resources:
+            limits:
+              cpu: "2"
+              memory: 8Gi
+            requests:
+              cpu: 500m
+              memory: 2Gi
+        deploymentMode: Distributed
+        distributor:
+          extraArgs:
+          - -config.expand-env=true
+          extraEnvFrom:
+          - secretRef:
+              name: seaweedfs-s3-credentials
+          maxUnavailable: 1
+          replicas: 4
+          resources:
+            limits:
+              cpu: "2"
+              memory: 4Gi
+            requests:
+              cpu: 500m
+              memory: 1Gi
+        gateway:
+          maxUnavailable: 1
+          replicas: 2
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 250m
+              memory: 256Mi
+        indexGateway:
+          extraArgs:
+          - -config.expand-env=true
+          extraEnvFrom:
+          - secretRef:
+              name: seaweedfs-s3-credentials
+          maxUnavailable: 1
+          persistence:
+            enabled: true
+            size: 10Gi
+            storageClass: longhorn
+          replicas: 2
+          resources:
+            limits:
+              cpu: "1"
+              memory: 4Gi
+            requests:
+              cpu: 500m
+              memory: 2Gi
+        ingester:
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+              - podAffinityTerm:
+                  labelSelector:
+                    matchExpressions:
+                    - key: app.kubernetes.io/component
+                      operator: In
+                      values:
+                      - ingester
+                  topologyKey: kubernetes.io/hostname
+                weight: 100
+          extraArgs:
+          - -config.expand-env=true
+          extraEnvFrom:
+          - secretRef:
+              name: seaweedfs-s3-credentials
+          maxUnavailable: 1
+          persistence:
+            claims:
+            - name: data
+              size: 10Gi
+              storageClass: longhorn
+            enabled: true
+          replicas: 3
+          resources:
+            limits:
+              cpu: "4"
+              memory: 16Gi
+            requests:
+              cpu: 2000m
+              memory: 8Gi
+          zoneAwareReplication:
+            enabled: false
+        loki:
+          auth_enabled: true
+          commonConfig:
+            compactor_address: '{{ include "loki.compactorAddress" . }}'
+            path_prefix: /var/loki
+            replication_factor: 3
+          compactor:
+            compaction_interval: 10m
+            delete_request_store: s3
+            retention_delete_delay: 2h
+            retention_delete_worker_count: 150
+            retention_enabled: true
+            working_directory: /var/loki/compactor
+          ingester:
+            chunk_encoding: snappy
+            chunk_target_size: 1572864
+            concurrent_flushes: 64
+            max_chunk_age: 2h
+          limits_config:
+            ingestion_burst_size_mb: 75
+            ingestion_rate_mb: 50
+            max_cache_freshness_per_query: 10m
+            max_query_parallelism: 64
+            max_streams_per_user: 50000
+            per_stream_rate_limit: 25MB
+            per_stream_rate_limit_burst: 50MB
+            query_timeout: 300s
+            reject_old_samples: true
+            reject_old_samples_max_age: 168h
+            retention_period: 168h
+            split_queries_by_interval: 15m
+            tsdb_max_query_parallelism: 128
+            volume_enabled: true
+          pattern_ingester:
+            enabled: false
+          querier:
+            max_concurrent: 16
+          schemaConfig:
+            configs:
+            - from: "2024-04-01"
+              index:
+                period: 24h
+                prefix: loki_index_
+              object_store: s3
+              schema: v13
+              store: tsdb
+          server:
+            grpc_listen_port: 9095
+            http_listen_port: 3100
+            http_server_read_timeout: 600s
+            http_server_write_timeout: 600s
+          storage:
+            bucketNames:
+              admin: loki-admin
+              chunks: loki-chunks
+              ruler: loki-ruler
+            s3:
+              accessKeyId: ${S3_ACCESS_KEY_ID}
+              endpoint: https://s3-crop-dev.phibred.com
+              http_config:
+                insecure_skip_verify: true
+              insecure: false
+              region: us-east-1
+              s3ForcePathStyle: true
+              secretAccessKey: ${S3_SECRET_ACCESS_KEY}
+            type: s3
+        lokiCanary:
+          enabled: false
+        querier:
+          extraArgs:
+          - -config.expand-env=true
+          extraEnvFrom:
+          - secretRef:
+              name: seaweedfs-s3-credentials
+          maxUnavailable: 1
+          replicas: 3
+          resources:
+            limits:
+              cpu: "2"
+              memory: 8Gi
+            requests:
+              cpu: 500m
+              memory: 2Gi
+        queryFrontend:
+          extraArgs:
+          - -config.expand-env=true
+          extraEnvFrom:
+          - secretRef:
+              name: seaweedfs-s3-credentials
+          maxUnavailable: 1
+          replicas: 2
+          resources:
+            limits:
+              cpu: "1"
+              memory: 4Gi
+            requests:
+              cpu: 500m
+              memory: 2Gi
+        queryScheduler:
+          extraArgs:
+          - -config.expand-env=true
+          extraEnvFrom:
+          - secretRef:
+              name: seaweedfs-s3-credentials
+          maxUnavailable: 1
+          replicas: 2
+          resources:
+            limits:
+              cpu: 500m
+              memory: 2Gi
+            requests:
+              cpu: 250m
+              memory: 1Gi
+        read:
+          replicas: 0
+        resultsCache:
+          allocatedMemory: 4096
+          defaultValidity: 12h
+          enabled: true
+          replicas: 2
+          resources:
+            limits:
+              cpu: "1"
+              memory: 6Gi
+            requests:
+              cpu: 500m
+              memory: 2Gi
+        ruler:
+          enabled: false
+        singleBinary:
+          replicas: 0
+        test:
+          enabled: false
+        write:
+          replicas: 0
+- APIVersion: source.toolkit.fluxcd.io/v1
+  IsNamespaced: true
+  Kind: HelmRepository
+  Name: grafana
+  Namespace: flux-system
+  Object:
+    apiVersion: source.toolkit.fluxcd.io/v1
+    kind: HelmRepository
+    metadata:
+      name: grafana
+      namespace: flux-system
+    spec:
+      interval: 1h
+      provider: generic
+      url: https://grafana.github.io/helm-charts
+- APIVersion: traefik.io/v1alpha1
+  IsNamespaced: true
+  Kind: IngressRoute
+  Name: loki-gateway
+  Namespace: loki
+  Object:
+    apiVersion: traefik.io/v1alpha1
+    kind: IngressRoute
+    metadata:
+      name: loki-gateway
+      namespace: loki
+    spec:
+      entryPoints:
+      - websecure
+      routes:
+      - kind: Rule
+        match: Host(`loki-crop-dev.phibred.com`)
+        services:
+        - name: loki-gateway
+          port: 80
+      tls:
+        secretName: loki-gateway-tls
+- APIVersion: v1
+  IsNamespaced: false
+  Kind: Namespace
+  Name: observability
+  Namespace: ""
+  Object:
+    apiVersion: v1
+    kind: Namespace
+    metadata:
+      name: observability
+- APIVersion: helm.toolkit.fluxcd.io/v2
+  IsNamespaced: true
+  Kind: HelmRelease
+  Name: sealed-secrets
+  Namespace: flux-system
+  Object:
+    apiVersion: helm.toolkit.fluxcd.io/v2
+    kind: HelmRelease
+    metadata:
+      name: sealed-secrets
+      namespace: flux-system
+    spec:
+      chart:
+        spec:
+          chart: sealed-secrets
+          reconcileStrategy: ChartVersion
+          sourceRef:
+            kind: HelmRepository
+            name: sealed-secrets
+          version: '>=1.15.0-0'
+      install:
+        crds: Create
+      interval: 1h0m0s
+      releaseName: sealed-secrets-controller
+      targetNamespace: flux-system
+      upgrade:
+        crds: CreateReplace
+- APIVersion: helm.toolkit.fluxcd.io/v2
+  IsNamespaced: true
+  Kind: HelmRelease
+  Name: kube-prometheus-stack
+  Namespace: observability
+  Object:
+    apiVersion: helm.toolkit.fluxcd.io/v2
+    kind: HelmRelease
+    metadata:
+      name: kube-prometheus-stack
+      namespace: observability
+    spec:
+      chart:
+        spec:
+          chart: kube-prometheus-stack
+          reconcileStrategy: ChartVersion
+          sourceRef:
+            kind: HelmRepository
+            name: prometheus-community
+            namespace: flux-system
+          version: ~67.0.0
+      install:
+        crds: Create
+        createNamespace: true
+        remediation:
+          retries: 3
+      interval: 1h0m0s
+      releaseName: kube-prometheus-stack
+      timeout: 10m0s
+      upgrade:
+        crds: CreateReplace
+        remediation:
+          retries: 3
+      values:
+        alertmanager:
+          enabled: false
+        grafana:
+          enabled: false
+        kube-state-metrics:
+          customResourceState:
+            config:
+              spec:
+                resources:
+                - groupVersionKind:
+                    group: kustomize.toolkit.fluxcd.io
+                    kind: Kustomization
+                    version: v1
+                  metricNamePrefix: gotk
+                  metrics:
+                  - each:
+                      info:
+                        labelsFromPath:
+                          name:
+                          - metadata
+                          - name
+                      type: Info
+                    help: The current state of a Flux Kustomization resource.
+                    labelsFromPath:
+                      exported_namespace:
+                      - metadata
+                      - namespace
+                      ready:
+                      - status
+                      - conditions
+                      - '[type=Ready]'
+                      - status
+                      revision:
+                      - status
+                      - lastAppliedRevision
+                      source_name:
+                      - spec
+                      - sourceRef
+                      - name
+                      suspended:
+                      - spec
+                      - suspend
+                    name: resource_info
+                - groupVersionKind:
+                    group: helm.toolkit.fluxcd.io
+                    kind: HelmRelease
+                    version: v2
+                  metricNamePrefix: gotk
+                  metrics:
+                  - each:
+                      info:
+                        labelsFromPath:
+                          name:
+                          - metadata
+                          - name
+                      type: Info
+                    help: The current state of a Flux HelmRelease resource.
+                    labelsFromPath:
+                      chart_app_version:
+                      - status
+                      - history
+                      - "0"
+                      - appVersion
+                      chart_name:
+                      - status
+                      - history
+                      - "0"
+                      - chartName
+                      chart_ref_name:
+                      - spec
+                      - chartRef
+                      - name
+                      chart_source_name:
+                      - spec
+                      - chart
+                      - spec
+                      - sourceRef
+                      - name
+                      exported_namespace:
+                      - metadata
+                      - namespace
+                      ready:
+                      - status
+                      - conditions
+                      - '[type=Ready]'
+                      - status
+                      revision:
+                      - status
+                      - history
+                      - "0"
+                      - chartVersion
+                      suspended:
+                      - spec
+                      - suspend
+                    name: resource_info
+                - groupVersionKind:
+                    group: source.toolkit.fluxcd.io
+                    kind: GitRepository
+                    version: v1
+                  metricNamePrefix: gotk
+                  metrics:
+                  - each:
+                      info:
+                        labelsFromPath:
+                          name:
+                          - metadata
+                          - name
+                      type: Info
+                    help: The current state of a Flux GitRepository resource.
+                    labelsFromPath:
+                      exported_namespace:
+                      - metadata
+                      - namespace
+                      ready:
+                      - status
+                      - conditions
+                      - '[type=Ready]'
+                      - status
+                      revision:
+                      - status
+                      - artifact
+                      - revision
+                      suspended:
+                      - spec
+                      - suspend
+                      url:
+                      - spec
+                      - url
+                    name: resource_info
+                - groupVersionKind:
+                    group: source.toolkit.fluxcd.io
+                    kind: HelmRepository
+                    version: v1
+                  metricNamePrefix: gotk
+                  metrics:
+                  - each:
+                      info:
+                        labelsFromPath:
+                          name:
+                          - metadata
+                          - name
+                      type: Info
+                    help: The current state of a Flux HelmRepository resource.
+                    labelsFromPath:
+                      exported_namespace:
+                      - metadata
+                      - namespace
+                      ready:
+                      - status
+                      - conditions
+                      - '[type=Ready]'
+                      - status
+                      revision:
+                      - status
+                      - artifact
+                      - revision
+                      suspended:
+                      - spec
+                      - suspend
+                      url:
+                      - spec
+                      - url
+                    name: resource_info
+                - groupVersionKind:
+                    group: source.toolkit.fluxcd.io
+                    kind: HelmChart
+                    version: v1
+                  metricNamePrefix: gotk
+                  metrics:
+                  - each:
+                      info:
+                        labelsFromPath:
+                          name:
+                          - metadata
+                          - name
+                      type: Info
+                    help: The current state of a Flux HelmChart resource.
+                    labelsFromPath:
+                      chart_name:
+                      - spec
+                      - chart
+                      chart_version:
+                      - spec
+                      - version
+                      exported_namespace:
+                      - metadata
+                      - namespace
+                      ready:
+                      - status
+                      - conditions
+                      - '[type=Ready]'
+                      - status
+                      revision:
+                      - status
+                      - artifact
+                      - revision
+                      suspended:
+                      - spec
+                      - suspend
+                    name: resource_info
+                - groupVersionKind:
+                    group: source.toolkit.fluxcd.io
+                    kind: OCIRepository
+                    version: v1beta2
+                  metricNamePrefix: gotk
+                  metrics:
+                  - each:
+                      info:
+                        labelsFromPath:
+                          name:
+                          - metadata
+                          - name
+                      type: Info
+                    help: The current state of a Flux OCIRepository resource.
+                    labelsFromPath:
+                      exported_namespace:
+                      - metadata
+                      - namespace
+                      ready:
+                      - status
+                      - conditions
+                      - '[type=Ready]'
+                      - status
+                      revision:
+                      - status
+                      - artifact
+                      - revision
+                      suspended:
+                      - spec
+                      - suspend
+                      url:
+                      - spec
+                      - url
+                    name: resource_info
+                - groupVersionKind:
+                    group: notification.toolkit.fluxcd.io
+                    kind: Alert
+                    version: v1beta3
+                  metricNamePrefix: gotk
+                  metrics:
+                  - each:
+                      info:
+                        labelsFromPath:
+                          name:
+                          - metadata
+                          - name
+                      type: Info
+                    help: The current state of a Flux Alert resource.
+                    labelsFromPath:
+                      exported_namespace:
+                      - metadata
+                      - namespace
+                      suspended:
+                      - spec
+                      - suspend
+                    name: resource_info
+                - groupVersionKind:
+                    group: notification.toolkit.fluxcd.io
+                    kind: Provider
+                    version: v1beta3
+                  metricNamePrefix: gotk
+                  metrics:
+                  - each:
+                      info:
+                        labelsFromPath:
+                          name:
+                          - metadata
+                          - name
+                      type: Info
+                    help: The current state of a Flux Provider resource.
+                    labelsFromPath:
+                      exported_namespace:
+                      - metadata
+                      - namespace
+                      suspended:
+                      - spec
+                      - suspend
+                    name: resource_info
+                - groupVersionKind:
+                    group: notification.toolkit.fluxcd.io
+                    kind: Receiver
+                    version: v1
+                  metricNamePrefix: gotk
+                  metrics:
+                  - each:
+                      info:
+                        labelsFromPath:
+                          name:
+                          - metadata
+                          - name
+                      type: Info
+                    help: The current state of a Flux Receiver resource.
+                    labelsFromPath:
+                      exported_namespace:
+                      - metadata
+                      - namespace
+                      ready:
+                      - status
+                      - conditions
+                      - '[type=Ready]'
+                      - status
+                      suspended:
+                      - spec
+                      - suspend
+                      webhook_path:
+                      - status
+                      - webhookPath
+                    name: resource_info
+                - groupVersionKind:
+                    group: image.toolkit.fluxcd.io
+                    kind: ImageRepository
+                    version: v1beta2
+                  metricNamePrefix: gotk
+                  metrics:
+                  - each:
+                      info:
+                        labelsFromPath:
+                          name:
+                          - metadata
+                          - name
+                      type: Info
+                    help: The current state of a Flux ImageRepository resource.
+                    labelsFromPath:
+                      exported_namespace:
+                      - metadata
+                      - namespace
+                      image:
+                      - spec
+                      - image
+                      ready:
+                      - status
+                      - conditions
+                      - '[type=Ready]'
+                      - status
+                      suspended:
+                      - spec
+                      - suspend
+                    name: resource_info
+                - groupVersionKind:
+                    group: image.toolkit.fluxcd.io
+                    kind: ImagePolicy
+                    version: v1beta2
+                  metricNamePrefix: gotk
+                  metrics:
+                  - each:
+                      info:
+                        labelsFromPath:
+                          name:
+                          - metadata
+                          - name
+                      type: Info
+                    help: The current state of a Flux ImagePolicy resource.
+                    labelsFromPath:
+                      exported_namespace:
+                      - metadata
+                      - namespace
+                      ready:
+                      - status
+                      - conditions
+                      - '[type=Ready]'
+                      - status
+                      source_name:
+                      - spec
+                      - imageRepositoryRef
+                      - name
+                      suspended:
+                      - spec
+                      - suspend
+                    name: resource_info
+                - groupVersionKind:
+                    group: image.toolkit.fluxcd.io
+                    kind: ImageUpdateAutomation
+                    version: v1beta2
+                  metricNamePrefix: gotk
+                  metrics:
+                  - each:
+                      info:
+                        labelsFromPath:
+                          name:
+                          - metadata
+                          - name
+                      type: Info
+                    help: The current state of a Flux ImageUpdateAutomation resource.
+                    labelsFromPath:
+                      exported_namespace:
+                      - metadata
+                      - namespace
+                      ready:
+                      - status
+                      - conditions
+                      - '[type=Ready]'
+                      - status
+                      source_name:
+                      - spec
+                      - sourceRef
+                      - name
+                      suspended:
+                      - spec
+                      - suspend
+                    name: resource_info
+            enabled: true
+          rbac:
+            extraRules:
+            - apiGroups:
+              - source.toolkit.fluxcd.io
+              - kustomize.toolkit.fluxcd.io
+              - helm.toolkit.fluxcd.io
+              - notification.toolkit.fluxcd.io
+              - image.toolkit.fluxcd.io
+              resources:
+              - gitrepositories
+              - buckets
+              - helmrepositories
+              - helmcharts
+              - ocirepositories
+              - kustomizations
+              - helmreleases
+              - alerts
+              - providers
+              - receivers
+              - imagerepositories
+              - imagepolicies
+              - imageupdateautomations
+              verbs:
+              - list
+              - watch
+        kubeStateMetrics:
+          enabled: true
+        nodeExporter:
+          enabled: true
+        prometheus:
+          enabled: true
+          prometheusSpec:
+            externalLabels:
+              cluster: loki-dev
+            podMonitorSelectorNilUsesHelmValues: false
+            remoteWrite:
+            - name: vector-pipeline-dev
+              url: http://10.92.90.38:9000
+            replicas: 1
+            resources:
+              limits:
+                cpu: 500m
+                memory: 2Gi
+              requests:
+                cpu: 250m
+                memory: 1Gi
+            retention: 2h
+            securityContext:
+              fsGroup: 65534
+              runAsNonRoot: true
+              runAsUser: 65534
+            serviceMonitorSelectorNilUsesHelmValues: false
+            storageSpec:
+              volumeClaimTemplate:
+                spec:
+                  accessModes:
+                  - ReadWriteOnce
+                  resources:
+                    requests:
+                      storage: 10Gi
+                  storageClassName: longhorn
+            walCompression: true
+        prometheusOperator:
+          admissionWebhooks:
+            enabled: false
+          resources:
+            limits:
+              cpu: 250m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          tls:
+            enabled: false
+- APIVersion: source.toolkit.fluxcd.io/v1
+  IsNamespaced: true
+  Kind: HelmRepository
+  Name: prometheus-community
+  Namespace: flux-system
+  Object:
+    apiVersion: source.toolkit.fluxcd.io/v1
+    kind: HelmRepository
+    metadata:
+      name: prometheus-community
+      namespace: flux-system
+    spec:
+      interval: 1h
+      provider: generic
+      url: https://prometheus-community.github.io/helm-charts
+- APIVersion: source.toolkit.fluxcd.io/v1
+  IsNamespaced: true
+  Kind: HelmRepository
+  Name: sealed-secrets
+  Namespace: flux-system
+  Object:
+    apiVersion: source.toolkit.fluxcd.io/v1
+    kind: HelmRepository
+    metadata:
+      name: sealed-secrets
+      namespace: flux-system
+    spec:
+      interval: 1h0m0s
+      provider: generic
+      url: https://bitnami-labs.github.io/sealed-secrets

@@ -1,0 +1,50 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/warn-version: latest
+  name: traefik
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: traefik
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://github.com/traefik/traefik-helm-chart
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: traefik
+  namespace: flux-system
+spec:
+  chart:
+    spec:
+      chart: traefik
+      interval: 1h
+      sourceRef:
+        kind: HelmRepository
+        name: traefik
+        namespace: flux-system
+      version: 34.3.0
+  install:
+    createNamespace: true
+  interval: 5m
+  releaseName: traefik
+  targetNamespace: traefik
+  values:
+    commonLabels:
+      butler.butlerlabs.dev/platform-lb: "true"
+    ingressClass:
+      enabled: true
+      isDefaultClass: true
+    service:
+      type: LoadBalancer

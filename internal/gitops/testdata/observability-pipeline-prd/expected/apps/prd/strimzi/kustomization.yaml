@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- kafka-kafka-pipeline-kafka.yaml
+- kafkanodepool-kafka-dual-role.yaml
+- kafkatopic-kafka-pipeline-logs-k8s.yaml
+- kafkatopic-kafka-pipeline-metrics.yaml
+- kafkatopic-kafka-pipeline-traces.yaml
+- kafkauser-kafka-obs-perf-producer.yaml
+- kafkauser-kafka-otel-collector.yaml
+- kafkauser-kafka-vector-consumer.yaml
+- kafkauser-kafka-vm-agent-alloy.yaml
+- kafkauser-kafka-vm-agent-telegraf.yaml
+- kafkauser-kafka-vm-agent-vector.yaml

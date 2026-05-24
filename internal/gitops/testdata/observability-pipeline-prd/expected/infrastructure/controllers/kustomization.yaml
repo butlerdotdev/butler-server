@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- cert-manager.yaml
+- cilium.yaml
+- keda.yaml
+- kube-prometheus-stack.yaml
+- longhorn.yaml
+- metallb.yaml
+- reflector.yaml
+- sealed-secrets.yaml
+- strimzi-kafka-operator.yaml
+- traefik.yaml

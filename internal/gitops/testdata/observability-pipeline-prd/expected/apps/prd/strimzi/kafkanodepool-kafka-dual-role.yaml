@@ -1,0 +1,58 @@
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  labels:
+    strimzi.io/cluster: pipeline-kafka
+  name: dual-role
+  namespace: kafka
+spec:
+  jvmOptions:
+    -Xms: 12g
+    -Xmx: 12g
+  replicas: 3
+  resources:
+    limits:
+      cpu: 8
+      memory: 24Gi
+    requests:
+      cpu: 4
+      memory: 16Gi
+  roles:
+  - controller
+  - broker
+  storage:
+    type: jbod
+    volumes:
+    - class: longhorn
+      deleteClaim: false
+      id: 0
+      size: 750Gi
+      type: persistent-claim
+  template:
+    pod:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-pool
+                operator: In
+                values:
+                - kafka-pool
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: strimzi.io/cluster
+                operator: In
+                values:
+                - pipeline-kafka
+              - key: strimzi.io/pool-name
+                operator: In
+                values:
+                - dual-role
+            topologyKey: kubernetes.io/hostname
+      tolerations:
+      - effect: NoSchedule
+        key: workload
+        value: kafka

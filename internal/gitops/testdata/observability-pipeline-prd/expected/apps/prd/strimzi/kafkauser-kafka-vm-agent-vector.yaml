@@ -1,0 +1,19 @@
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  labels:
+    strimzi.io/cluster: pipeline-kafka
+  name: vm-agent-vector
+  namespace: kafka
+spec:
+  authentication:
+    type: tls
+  authorization:
+    acls:
+    - operations:
+      - Write
+      - Describe
+      resource:
+        name: pipeline.logs.k8s
+        type: topic
+    type: simple

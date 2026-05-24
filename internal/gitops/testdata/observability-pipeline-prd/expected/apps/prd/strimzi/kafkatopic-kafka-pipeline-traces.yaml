@@ -1,0 +1,16 @@
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  labels:
+    strimzi.io/cluster: pipeline-kafka
+  name: pipeline-traces
+  namespace: kafka
+spec:
+  config:
+    cleanup.policy: delete
+    min.insync.replicas: "2"
+    retention.bytes: "268435456"
+    retention.ms: "21600000"
+  partitions: 32
+  replicas: 3
+  topicName: pipeline.traces

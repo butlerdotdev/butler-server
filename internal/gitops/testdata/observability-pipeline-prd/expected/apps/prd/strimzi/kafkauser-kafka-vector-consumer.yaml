@@ -1,0 +1,46 @@
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  labels:
+    strimzi.io/cluster: pipeline-kafka
+  name: vector-consumer
+  namespace: kafka
+spec:
+  authentication:
+    type: tls
+  authorization:
+    acls:
+    - operations:
+      - Read
+      - Describe
+      resource:
+        name: pipeline.metrics
+        type: topic
+    - operations:
+      - Read
+      - Describe
+      resource:
+        name: pipeline.logs.k8s
+        type: topic
+    - operations:
+      - Read
+      - Describe
+      resource:
+        name: pipeline.traces
+        type: topic
+    - operations:
+      - Read
+      - Describe
+      resource:
+        name: vector-aggregator
+        patternType: prefix
+        type: group
+    type: simple
+  template:
+    secret:
+      metadata:
+        annotations:
+          reflector.v1.k8s.emberstack.com/reflection-allowed: "true"
+          reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: vector
+          reflector.v1.k8s.emberstack.com/reflection-auto-enabled: "true"
+          reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: vector
