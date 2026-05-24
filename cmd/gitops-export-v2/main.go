@@ -120,16 +120,18 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("DiscoverNativeResources: %w", err)
 	}
+	kindCounts := map[string]int{}
+	for _, item := range nat.Items {
+		kindCounts[item.Kind]++
+	}
+	fetchFailures := 0
+	if nat.InventoryWalk != nil {
+		fetchFailures = len(nat.InventoryWalk.FetchFailures)
+	}
 	slog.Info("native discovery complete",
-		"identityProviders", len(nat.IdentityProviders),
-		"networkPools", len(nat.NetworkPools),
-		"providerConfigs", len(nat.ProviderConfigs),
-		"teams", len(nat.Teams),
-		"clusterCreationPolicies", len(nat.ClusterCreationPolicies),
-		"sealedSecrets", len(nat.SealedSecrets),
-		"metallbIPPools", len(nat.MetalLBIPAddressPools),
-		"metallbL2", len(nat.MetalLBL2Advertisements),
-		"butlerGitopsConfig", nat.ButlerGitOpsConfig != nil)
+		"totalItems", len(nat.Items),
+		"kindCounts", kindCounts,
+		"fetchFailures", fetchFailures)
 
 	nsNames := collectNamespaceNames(hr)
 	nsMeta, err := gitops.DiscoverNamespaceMetadata(ctx, kubeconfig, nsNames)

@@ -77,19 +77,32 @@ func (a *DirectoryAccumulator) HasFile(filePath string) bool {
 }
 
 // FinalizeWithKustomizations returns the full set of files including a
-// synthesized kustomization.yaml per tracked directory listing every resource
-// file in it. The synthesis is deterministic: resources are listed in
-// lexicographic order so identical inputs produce byte-identical outputs.
+// synthesized kustomization.yaml per tracked directory listing every direct
+// child resource (files AND immediate subdirectories) in lexicographic
+// order so identical inputs produce byte-identical outputs.
 //
-// Callers may supply per-directory transforms via the kustomizationOverrides
-// map keyed by directory path. The override receives the default-resources
-// kustomize file and may mutate it (e.g. to add a patches block for an env
-// overlay). A nil map disables overrides.
+// AGNOSTIC CHAINING: every directory on the path from each emitted file
+// up to the repo root is auto-tracked, and each tracked directory's
+// kustomization.yaml lists both files and subdirectories. This is what
+// Kustomize needs to actually build the tree — without subdirectory
+// references in parent kustomization.yaml files, Kustomize ignores any
+// emitted leaf and Flux would prune the corresponding live state. The
+// rule derives entirely from the emitted directory structure; no
+// hardcoded paths or depth limits.
 //
-// kustomization.yaml is itself never listed as a resource — Kustomize treats
-// it as the entry point, not a resource. EnsureDirectory'd directories with
-// no files get an empty resources list, which is valid Kustomize that
-// reconciles to nothing.
+// Callers may supply per-directory transforms via kustomizationOverrides
+// keyed by directory path. The override receives the auto-built kustomize
+// file (with resources already populated from files + subdirs) and may
+// mutate it (e.g. to add a patches block). Overrides that need to add
+// resources should APPEND to kf.Resources, not replace it, so the
+// agnostic chain stays intact.
+//
+// Manually-emitted kustomization.yaml at a directory wins over synthesis;
+// the caller is taking full responsibility for that directory's resources
+// list (and must include any subdirectory references themselves).
+//
+// kustomization.yaml is itself never listed as a resource — Kustomize
+// treats it as the entry point, not a resource.
 func (a *DirectoryAccumulator) FinalizeWithKustomizations(
 	kustomizationOverrides map[string]func(*KustomizeFile),
 ) (map[string][]byte, error) {
@@ -98,17 +111,42 @@ func (a *DirectoryAccumulator) FinalizeWithKustomizations(
 		out[p] = c
 	}
 
-	// Build the per-directory resources list. Skip any directory where the
-	// caller already supplied a kustomization.yaml manually — let manual
-	// emission win to support the rare cases where the synthesized file is
-	// not what we want.
+	// Walk-up: ensure every INTERMEDIATE ancestor of every tracked
+	// directory is itself tracked, so the chain of kustomization.yaml
+	// files from each leaf up to a Flux entry path exists. Stop one
+	// level above the repo root — top-level dirs (apps/, clusters/,
+	// infrastructure/) are NOT Flux entry paths and don't need their
+	// own kustomization.yaml; Flux points at depth-2 paths like
+	// apps/<env>/ or infrastructure/<tier>/.
+	for dir := range a.dirs {
+		cur := dir
+		for {
+			parent := path.Dir(cur)
+			if parent == "." || parent == "/" || parent == cur {
+				break
+			}
+			// Stop before walking into a top-level dir — we want
+			// kustomization.yaml synthesized at depth-2 and below
+			// (e.g., apps/prd/workloads), not at depth-1 (apps/).
+			if path.Dir(parent) == "." {
+				break
+			}
+			a.dirs[parent] = true
+			cur = parent
+		}
+	}
+
+	// Build the per-directory resources list (files + direct subdirs).
+	// Skip any directory where the caller already supplied a
+	// kustomization.yaml manually — manual emission wins.
 	for dir := range a.dirs {
 		kustPath := path.Join(dir, "kustomization.yaml")
 		if _, exists := out[kustPath]; exists {
 			continue
 		}
 
-		var resources []string
+		// Direct child files.
+		var fileResources []string
 		for filePath := range a.files {
 			if path.Dir(filePath) != dir {
 				continue
@@ -117,8 +155,24 @@ func (a *DirectoryAccumulator) FinalizeWithKustomizations(
 			if base == "kustomization.yaml" {
 				continue
 			}
-			resources = append(resources, base)
+			fileResources = append(fileResources, base)
 		}
+
+		// Direct child subdirectories. A tracked dir D is a direct child
+		// of dir iff path.Dir(D) == dir. Each child is listed by basename
+		// so Kustomize descends via its own kustomization.yaml.
+		var subdirResources []string
+		for other := range a.dirs {
+			if other == dir {
+				continue
+			}
+			if path.Dir(other) != dir {
+				continue
+			}
+			subdirResources = append(subdirResources, path.Base(other))
+		}
+
+		resources := append(fileResources, subdirResources...)
 		sort.Strings(resources)
 
 		kf := NewKustomizeFile()

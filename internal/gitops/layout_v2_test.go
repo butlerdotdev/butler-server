@@ -82,7 +82,7 @@ func TestLayoutV2ClusterFiles_WithConfigs(t *testing.T) {
 		Env:         "prd",
 		Helm:        &DiscoveryResult{},
 		Native: &NativeDiscoveryResult{
-			SealedSecrets: []*DiscoveredNative{
+			Items: []*DiscoveredNative{
 				wrap("SealedSecret", newUnstructured("bitnami.com/v1alpha1", "SealedSecret", "entra-oidc", "butler-system")),
 			},
 		},
@@ -202,11 +202,13 @@ func TestLayoutV2NativeResourcePlacement(t *testing.T) {
 		Env:         "prd",
 		Helm:        &DiscoveryResult{},
 		Native: &NativeDiscoveryResult{
-			IdentityProviders:       []*DiscoveredNative{wrap("IdentityProvider", identityProvider)},
-			Teams:                   []*DiscoveredNative{wrap("Team", team)},
-			ClusterCreationPolicies: []*DiscoveredNative{wrap("ClusterCreationPolicy", ccp)},
-			SealedSecrets:           []*DiscoveredNative{wrap("SealedSecret", sealed)},
-			ButlerGitOpsConfig:      wrap("ConfigMap", gitopsCM),
+			Items: []*DiscoveredNative{
+				wrap("IdentityProvider", identityProvider),
+				wrap("Team", team),
+				wrap("ClusterCreationPolicy", ccp),
+				wrap("SealedSecret", sealed),
+				wrap("ConfigMap", gitopsCM),
+			},
 		},
 	}
 	tree, err := GenerateLayoutV2(in)
@@ -214,12 +216,20 @@ func TestLayoutV2NativeResourcePlacement(t *testing.T) {
 		t.Fatalf("GenerateLayoutV2: %v", err)
 	}
 
+	// Under the unified D4-corrected rule:
+	//   - butler.butlerlabs.dev → group-short "butlerlabs"
+	//   - bitnami.com → "bitnami"
+	//   - core (v1) → "core"
+	//   - Cluster-scoped CRs land in infrastructure/configs/<group-short>/
+	//     with filename <kind-lower>-<name>.yaml.
+	//   - Namespaced CRs in infra namespaces land with filename
+	//     <kind-lower>-<namespace>-<name>.yaml.
 	for _, p := range []string{
-		"infrastructure/configs/identity-providers/microsoft-entra.yaml",
-		"apps/prd/teams/platform-engineering.yaml",
-		"infrastructure/configs/cluster-creation-policies/platform-wide.yaml",
-		"infrastructure/configs/sealed-secrets/butler-system-entra-oidc.yaml",
-		"infrastructure/configs/butler-gitops-config.yaml",
+		"infrastructure/configs/butlerlabs/identityprovider-microsoft-entra.yaml",
+		"infrastructure/configs/butlerlabs/team-platform-engineering.yaml",
+		"infrastructure/configs/butlerlabs/clustercreationpolicy-platform-wide.yaml",
+		"infrastructure/configs/bitnami/sealedsecret-butler-system-entra-oidc.yaml",
+		"infrastructure/configs/configmap-butler-system-butler-gitops-config.yaml",
 	} {
 		if _, ok := tree[p]; !ok {
 			t.Errorf("expected native file %s missing from tree", p)
@@ -258,15 +268,13 @@ func TestPruneSafetyPropertyAgainstSyntheticState(t *testing.T) {
 		}
 	}
 
-	for _, kind := range collectNativeKinds(in.Native) {
-		for _, item := range kind {
-			expected := PathForNative(item, in.Env)
-			if expected == "" {
-				continue
-			}
-			if !listed[expected] {
-				t.Errorf("native %s/%s not covered by any kustomization.yaml: expected at %s", item.Kind, item.Name, expected)
-			}
+	for _, item := range collectNativeItems(in.Native) {
+		expected := PathForNative(item, in.Env)
+		if expected == "" {
+			continue
+		}
+		if !listed[expected] {
+			t.Errorf("native %s/%s not covered by any kustomization.yaml: expected at %s", item.Kind, item.Name, expected)
 		}
 	}
 }
@@ -288,41 +296,38 @@ func TestPruneSafetyAgainstLiveStateSurrogate(t *testing.T) {
 	in := loadMinimalScenario(t)
 
 	// Surrogate "live state": real input + an extra resource of a kind
-	// not in PathForNative's explicit table (Workspace).
-	workspace := newUnstructured("butler.butlerlabs.dev/v1alpha1", "Workspace", "team-a", "")
+	// this code has never seen (Workspace). Under the unified D4-corrected
+	// rule, every namespaced item in a non-infra namespace routes to apps/<env>/<group-short>/.
+	workspace := newUnstructured("butler.butlerlabs.dev/v1alpha1", "Workspace", "team-a", "team-payments")
 
-	// PathForNative explicit-table lookup returns empty — Workspace is
-	// not in the v1 table. That's the entry condition for the default
-	// placement.
-	if got := PathForNative(&DiscoveredNative{Kind: "Workspace", Name: "team-a"}, in.Env); got != "" {
-		t.Fatalf("Workspace should have empty PathForNative mapping (not in explicit table), got %q", got)
+	// Unified rule always returns a path for non-nil items — agnostic
+	// placement, no per-kind table.
+	got := PathForNative(&DiscoveredNative{
+		Kind: "Workspace", Name: "team-a", Namespace: "team-payments",
+		APIVersion:   "butler.butlerlabs.dev/v1alpha1",
+		IsNamespaced: true,
+	}, in.Env)
+	if got == "" {
+		t.Fatalf("PathForNative should always return a path under the unified rule")
+	}
+	// Group-short: butler.butlerlabs.dev → "butlerlabs" (TLD strip then
+	// last segment). Filename: <kind-lower>-<ns>-<name>.yaml.
+	wantPath := "apps/prd/butlerlabs/workspace-team-payments-team-a.yaml"
+	if got != wantPath {
+		t.Errorf("Workspace placement = %q, want %q", got, wantPath)
 	}
 
-	// PathForNativeWithDefault routes it via the scope-tiered default.
-	// Workspace is a butler.butlerlabs.dev/v1alpha1 CRD instance,
-	// namespaced (the surrogate has no namespace set, so it falls to the
-	// user-workload bucket per D4's rule).
-	defaultPath := PathForNativeWithDefault(
-		&DiscoveredNative{Kind: "Workspace", Name: "team-a", APIVersion: "butler.butlerlabs.dev/v1alpha1"},
-		in.Env,
-	)
-	if defaultPath == "" {
-		t.Fatalf("PathForNativeWithDefault should never return empty for default placement")
-	}
-	wantPrefix := "apps/prd/workloads/butler-butlerlabs-dev/Workspace/"
-	if !strings.HasPrefix(defaultPath, wantPrefix) {
-		t.Errorf("Workspace should route to user-workload default bucket; got %q, want prefix %q", defaultPath, wantPrefix)
-	}
-
-	// Add it to the layout input and confirm GenerateLayoutV2 accepts
-	// it (no longer errors on unknown kinds — placement is via default
-	// bucket; coverage report surfaces the placement).
-	in.Native.IdentityProviders = append(in.Native.IdentityProviders, &DiscoveredNative{
-		Kind:       "Workspace",
-		Name:       "team-a",
-		APIVersion: "butler.butlerlabs.dev/v1alpha1",
-		Object:     workspace,
+	// Confirm GenerateLayoutV2 accepts the unknown kind without error
+	// and emits it at the derived path.
+	in.Native.Items = append(in.Native.Items, &DiscoveredNative{
+		Kind:         "Workspace",
+		Name:         "team-a",
+		Namespace:    "team-payments",
+		APIVersion:   "butler.butlerlabs.dev/v1alpha1",
+		IsNamespaced: true,
+		Object:       workspace,
 	})
+	defaultPath := wantPath
 	tree, err := GenerateLayoutV2(in)
 	if err != nil {
 		t.Fatalf("GenerateLayoutV2 should not reject unknown kinds under ADR-017 D4 default placement: %v", err)
@@ -336,89 +341,103 @@ func TestPruneSafetyAgainstLiveStateSurrogate(t *testing.T) {
 // scope-tiered default placement (ADR-017 D4 revision 2): capi-steward's
 // hand-rolled raw-YAML resources (CRDs + ClusterRoles + Deployment) MUST
 // land in infrastructure/configs/ (cluster-scoped infra path), NOT in
-// apps/<env>/workloads/ (the wrong-placement bug an earlier single-bucket
+// apps/<env>/ (the wrong-placement bug an earlier single-bucket
 // default would have shipped).
 func TestCapiStewardScopeTieredPlacement(t *testing.T) {
 	env := "prd"
 	cases := []struct {
-		name      string
-		apiVer    string
-		kind      string
-		objName   string
-		objNS     string
-		wantPath  string
+		name         string
+		apiVer       string
+		kind         string
+		objName      string
+		objNS        string
+		isNamespaced bool
+		wantPath     string
 	}{
+		// Cluster-scoped → infra tier. Filename: <kind-lower>-<name>.yaml.
+		// Group-short: apiextensions.k8s.io → k8s (TLD strip + last segment).
 		{
-			name: "CRD: stewardcontrolplanes",
-			apiVer:   "apiextensions.k8s.io/v1",
-			kind:     "CustomResourceDefinition",
-			objName:  "stewardcontrolplanes.controlplane.cluster.x-k8s.io",
-			wantPath: "infrastructure/configs/apiextensions-k8s-io/CustomResourceDefinition/stewardcontrolplanes.controlplane.cluster.x-k8s.io.yaml",
+			name:         "CRD: stewardcontrolplanes",
+			apiVer:       "apiextensions.k8s.io/v1",
+			kind:         "CustomResourceDefinition",
+			objName:      "stewardcontrolplanes.controlplane.cluster.x-k8s.io",
+			isNamespaced: false,
+			wantPath:     "infrastructure/configs/apiextensions/customresourcedefinition-stewardcontrolplanes.controlplane.cluster.x-k8s.io.yaml",
 		},
 		{
-			name: "CRD: stewardcontrolplanetemplates",
-			apiVer:   "apiextensions.k8s.io/v1",
-			kind:     "CustomResourceDefinition",
-			objName:  "stewardcontrolplanetemplates.controlplane.cluster.x-k8s.io",
-			wantPath: "infrastructure/configs/apiextensions-k8s-io/CustomResourceDefinition/stewardcontrolplanetemplates.controlplane.cluster.x-k8s.io.yaml",
+			name:         "CRD: stewardcontrolplanetemplates",
+			apiVer:       "apiextensions.k8s.io/v1",
+			kind:         "CustomResourceDefinition",
+			objName:      "stewardcontrolplanetemplates.controlplane.cluster.x-k8s.io",
+			isNamespaced: false,
+			wantPath:     "infrastructure/configs/apiextensions/customresourcedefinition-stewardcontrolplanetemplates.controlplane.cluster.x-k8s.io.yaml",
+		},
+		// rbac.authorization.k8s.io → k8s.
+		{
+			name:         "ClusterRole: capi-steward-manager-role (cluster-scoped infra)",
+			apiVer:       "rbac.authorization.k8s.io/v1",
+			kind:         "ClusterRole",
+			objName:      "capi-steward-manager-role",
+			isNamespaced: false,
+			wantPath:     "infrastructure/configs/rbac/clusterrole-capi-steward-manager-role.yaml",
 		},
 		{
-			name: "ClusterRole: capi-steward-manager-role (cluster-scoped infra)",
-			apiVer:   "rbac.authorization.k8s.io/v1",
-			kind:     "ClusterRole",
-			objName:  "capi-steward-manager-role",
-			wantPath: "infrastructure/configs/rbac-authorization-k8s-io/ClusterRole/capi-steward-manager-role.yaml",
+			name:         "ClusterRoleBinding: capi-steward-manager-rolebinding",
+			apiVer:       "rbac.authorization.k8s.io/v1",
+			kind:         "ClusterRoleBinding",
+			objName:      "capi-steward-manager-rolebinding",
+			isNamespaced: false,
+			wantPath:     "infrastructure/configs/rbac/clusterrolebinding-capi-steward-manager-rolebinding.yaml",
+		},
+		// Namespaced in known infra ns → infra tier with <kind>-<ns>-<name>.yaml.
+		// apps group has no TLD → group-short = "apps".
+		{
+			name:         "Deployment in steward-system (namespaced infra in known infra ns)",
+			apiVer:       "apps/v1",
+			kind:         "Deployment",
+			objName:      "capi-steward-controller-manager",
+			objNS:        "steward-system",
+			isNamespaced: true,
+			wantPath:     "infrastructure/configs/apps/deployment-steward-system-capi-steward-controller-manager.yaml",
+		},
+		// core (v1) → "core".
+		{
+			name:         "ServiceAccount in steward-system",
+			apiVer:       "v1",
+			kind:         "ServiceAccount",
+			objName:      "capi-steward-controller-manager",
+			objNS:        "steward-system",
+			isNamespaced: true,
+			wantPath:     "infrastructure/configs/serviceaccount-steward-system-capi-steward-controller-manager.yaml",
 		},
 		{
-			name: "ClusterRoleBinding: capi-steward-manager-rolebinding",
-			apiVer:   "rbac.authorization.k8s.io/v1",
-			kind:     "ClusterRoleBinding",
-			objName:  "capi-steward-manager-rolebinding",
-			wantPath: "infrastructure/configs/rbac-authorization-k8s-io/ClusterRoleBinding/capi-steward-manager-rolebinding.yaml",
+			name:         "Role in steward-system",
+			apiVer:       "rbac.authorization.k8s.io/v1",
+			kind:         "Role",
+			objName:      "capi-steward-leader-election-role",
+			objNS:        "steward-system",
+			isNamespaced: true,
+			wantPath:     "infrastructure/configs/rbac/role-steward-system-capi-steward-leader-election-role.yaml",
 		},
+		// Namespaced in user ns → apps tier. example.com → "example".
 		{
-			name: "Deployment in steward-system (namespaced infra in known infra ns)",
-			apiVer:   "apps/v1",
-			kind:     "Deployment",
-			objName:  "capi-steward-controller-manager",
-			objNS:    "steward-system",
-			wantPath: "infrastructure/configs/apps/Deployment/steward-system-capi-steward-controller-manager.yaml",
-		},
-		{
-			name: "ServiceAccount in steward-system",
-			apiVer:   "v1",
-			kind:     "ServiceAccount",
-			objName:  "capi-steward-controller-manager",
-			objNS:    "steward-system",
-			wantPath: "infrastructure/configs/core/ServiceAccount/steward-system-capi-steward-controller-manager.yaml",
-		},
-		{
-			name: "Role in steward-system",
-			apiVer:   "rbac.authorization.k8s.io/v1",
-			kind:     "Role",
-			objName:  "capi-steward-leader-election-role",
-			objNS:    "steward-system",
-			wantPath: "infrastructure/configs/rbac-authorization-k8s-io/Role/steward-system-capi-steward-leader-election-role.yaml",
-		},
-		// Negative control: a user workload-shaped object in a user
-		// namespace correctly lands in apps/<env>/workloads/, NOT in
-		// infrastructure/configs/.
-		{
-			name: "User CRD instance in user namespace (negative control)",
-			apiVer:   "example.com/v1",
-			kind:     "MyWorkload",
-			objName:  "my-app",
-			objNS:    "team-payments",
-			wantPath: "apps/prd/workloads/example-com/MyWorkload/team-payments-my-app.yaml",
+			name:         "User CRD instance in user namespace (negative control)",
+			apiVer:       "example.com/v1",
+			kind:         "MyWorkload",
+			objName:      "my-app",
+			objNS:        "team-payments",
+			isNamespaced: true,
+			wantPath:     "apps/prd/example/myworkload-team-payments-my-app.yaml",
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			n := &DiscoveredNative{
-				APIVersion: c.apiVer,
-				Kind:       c.kind,
-				Name:       c.objName,
-				Namespace:  c.objNS,
+				APIVersion:   c.apiVer,
+				Kind:         c.kind,
+				Name:         c.objName,
+				Namespace:    c.objNS,
+				IsNamespaced: c.isNamespaced,
 			}
 			got := PathForNativeWithDefault(n, env)
 			if got != c.wantPath {
@@ -463,13 +482,9 @@ func loadMinimalScenario(t *testing.T) ExportInput {
 			},
 		},
 		Native: &NativeDiscoveryResult{
-			IdentityProviders: []*DiscoveredNative{
+			Items: []*DiscoveredNative{
 				wrap("IdentityProvider", newUnstructured("butler.butlerlabs.dev/v1alpha1", "IdentityProvider", "microsoft-entra", "")),
-			},
-			ProviderConfigs: []*DiscoveredNative{
 				wrap("ProviderConfig", newUnstructured("butler.butlerlabs.dev/v1alpha1", "ProviderConfig", "nutanix", "")),
-			},
-			Teams: []*DiscoveredNative{
 				wrap("Team", newUnstructured("butler.butlerlabs.dev/v1alpha1", "Team", "platform-engineering", "")),
 			},
 		},
@@ -489,19 +504,11 @@ func primaryPathForRelease(rel *DiscoveredRelease) string {
 	}
 }
 
-func collectNativeKinds(n *NativeDiscoveryResult) [][]*DiscoveredNative {
+func collectNativeItems(n *NativeDiscoveryResult) []*DiscoveredNative {
 	if n == nil {
 		return nil
 	}
-	all := [][]*DiscoveredNative{
-		n.IdentityProviders, n.NetworkPools, n.ProviderConfigs, n.Teams,
-		n.ClusterCreationPolicies, n.SealedSecrets,
-		n.MetalLBIPAddressPools, n.MetalLBL2Advertisements,
-	}
-	if n.ButlerGitOpsConfig != nil {
-		all = append(all, []*DiscoveredNative{n.ButlerGitOpsConfig})
-	}
-	return all
+	return n.Items
 }
 
 // buildListedSet parses every kustomization.yaml in the tree and returns
@@ -577,11 +584,12 @@ func newUnstructured(apiVersion, kind, name, namespace string) *unstructured.Uns
 
 func wrap(kind string, obj *unstructured.Unstructured) *DiscoveredNative {
 	return &DiscoveredNative{
-		Kind:       kind,
-		APIVersion: obj.GetAPIVersion(),
-		Name:       obj.GetName(),
-		Namespace:  obj.GetNamespace(),
-		Object:     obj,
+		Kind:         kind,
+		APIVersion:   obj.GetAPIVersion(),
+		Name:         obj.GetName(),
+		Namespace:    obj.GetNamespace(),
+		IsNamespaced: obj.GetNamespace() != "",
+		Object:       obj,
 	}
 }
 

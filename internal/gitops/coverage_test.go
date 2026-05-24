@@ -229,34 +229,43 @@ func TestCoverage_RoundTripsYAML(t *testing.T) {
 	}
 }
 
-// TestCoverage_InScopeUncaptured surfaces default-bucket placements
-// (kinds outside PathForNative's explicit table that PathForNativeWithDefault
-// routed) so the operator can see them and request a per-kind placement
-// rule if the default isn't right.
-func TestCoverage_InScopeUncaptured(t *testing.T) {
-	// A capi-steward-class CRD (cluster-scoped infra) routed to default
-	// bucket — should appear in InScopeUncaptured.
+// TestCoverage_UnifiedPathRule verifies a cluster-scoped CRD lands in
+// Captured under the unified placement rule (D4 correction): every
+// native item gets a path via PathForNative; the previous
+// InScopeUncaptured distinction is gone because there is no longer an
+// explicit-table vs default-bucket split. The CRD must land in
+// infrastructure/configs/ via the cluster-scoped → infra tier rule,
+// with group-short + kind-in-filename naming.
+func TestCoverage_UnifiedPathRule(t *testing.T) {
 	stewardCRD := &DiscoveredNative{
 		APIVersion: "apiextensions.k8s.io/v1",
 		Kind:       "CustomResourceDefinition",
 		Name:       "stewardcontrolplanes.controlplane.cluster.x-k8s.io",
+		// Cluster-scoped — routes to infra tier.
+		IsNamespaced: false,
 	}
 	report := BuildCoverage(CoverageInput{
 		ClusterName:   "mgmt",
 		Env:           "prd",
 		NativeResults: []*DiscoveredNative{stewardCRD},
 	})
-	if len(report.InScopeUncaptured) != 1 {
-		t.Fatalf("InScopeUncaptured count = %d, want 1 (stewardcontrolplanes CRD)", len(report.InScopeUncaptured))
+	if len(report.Captured) != 1 {
+		t.Fatalf("Captured count = %d, want 1 (the CRD)", len(report.Captured))
 	}
-	entry := report.InScopeUncaptured[0]
+	entry := report.Captured[0]
 	if entry.Kind != "CustomResourceDefinition" {
-		t.Errorf("InScopeUncaptured entry Kind = %q, want CustomResourceDefinition", entry.Kind)
+		t.Errorf("Captured entry Kind = %q, want CustomResourceDefinition", entry.Kind)
 	}
 	if !strings.HasPrefix(entry.Path, "infrastructure/configs/") {
-		t.Errorf("CRD default placement should land in infrastructure/configs/, got %q", entry.Path)
+		t.Errorf("Cluster-scoped CRD should land in infrastructure/configs/, got %q", entry.Path)
 	}
-	if len(report.Captured) != 0 {
-		t.Errorf("CRD without explicit PathForNative entry should NOT be in Captured; got %d Captured items", len(report.Captured))
+	// Filename should be <kind-lower>-<name>.yaml (no namespace segment
+	// because cluster-scoped). Group-short for apiextensions.k8s.io →
+	// "k8s" (TLD-strip then last segment).
+	if !strings.HasSuffix(entry.Path, "/customresourcedefinition-stewardcontrolplanes.controlplane.cluster.x-k8s.io.yaml") {
+		t.Errorf("expected filename <kind-lower>-<name>.yaml shape, got %q", entry.Path)
+	}
+	if len(report.PathCollisions) != 0 {
+		t.Errorf("PathCollisions should be empty for single item, got %d", len(report.PathCollisions))
 	}
 }

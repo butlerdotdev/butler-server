@@ -33,115 +33,81 @@ type DiscoveredNative struct {
 	APIVersion string
 	Namespace  string
 	Name       string
-	Object     *unstructured.Unstructured
+	// IsNamespaced is the cluster-derived scope for this kind (RESTMapper
+	// scope at fetch time). True for namespaced kinds, false for
+	// cluster-scoped. Consumed by the placement layer to decide whether
+	// the emitted filename should include the namespace segment.
+	IsNamespaced bool
+	Object       *unstructured.Unstructured
 }
 
-// NativeDiscoveryResult buckets discovered native resources by kind so the
-// layout generator can iterate them with kind-specific placement rules.
+// NativeDiscoveryResult holds the output of native-resource discovery:
+// the flat list of items the inventory walk produced plus the walk
+// metadata used by coverage.go (per-Kustomization observations, inline
+// patches, fetch failures).
 //
-// ADR-017 D1 changed the discovery source from a fixed-kind list to a
-// Flux-inventory walk. The typed buckets remain for caller ergonomics
-// (counts per kind for logging/coverage), populated by routing each
-// inventory item to its bucket by Kind. Items whose Kind doesn't match
-// a typed bucket land in Other, which the layout generator still
-// iterates so the scope-tiered default placement (D4) catches them.
-//
-// Only kinds that are gitops-managed desired-state belong here.
-// Controller-owned runtime objects (e.g. StewardControlPlane, reconciled
-// by butler-controller from TenantCluster CRs) are deliberately excluded
-// at the inventory-walk level: anything that Flux is not managing is not
-// in the inventory.
+// AGNOSTIC DISCOVERY PRINCIPLE: this package does NOT pre-bucket items
+// by kind. Kind-aware behavior belongs to placement (layout_paths.go) and
+// to the layout/coverage code that consumes the flat list. The discovery
+// path itself names exactly one irreducible seed — the Flux Kustomization
+// GVK — and derives everything else from the cluster.
 type NativeDiscoveryResult struct {
-	IdentityProviders       []*DiscoveredNative
-	NetworkPools            []*DiscoveredNative
-	ProviderConfigs         []*DiscoveredNative
-	Teams                   []*DiscoveredNative
-	ClusterCreationPolicies []*DiscoveredNative
-	ButlerGitOpsConfig      *DiscoveredNative
-	SealedSecrets           []*DiscoveredNative
-	MetalLBIPAddressPools   []*DiscoveredNative
-	MetalLBL2Advertisements []*DiscoveredNative
-	// Other holds inventory items whose Kind doesn't match a typed
-	// bucket. Layout v2 routes them via PathForNativeWithDefault
-	// (scope-tiered default placement); the coverage report surfaces
-	// them as InScopeUncaptured so operators can request explicit
-	// path-table entries.
-	Other []*DiscoveredNative
-	// InventoryWalk captures the per-Kustomization observations
-	// (Ready, lastAppliedRevision, inline patches) so coverage.go can
-	// surface them. Empty when discovery falls back to the v1 fixed-
-	// kind path (e.g., a cluster with no Flux Kustomizations).
+	// Items is every native resource the Flux inventory walk fetched.
+	// Each item carries its own (Kind, APIVersion, Namespace, Name) so
+	// downstream code can route or count by kind without the discovery
+	// layer having to enumerate kinds in advance.
+	Items []*DiscoveredNative
+
+	// InventoryWalk carries the per-Kustomization observations
+	// (Ready, lastAppliedRevision, inline patches) and the FetchFailures
+	// list. coverage.go uses both: the observations populate
+	// kustomizationObservations; the failures populate discoveryFailures
+	// so an inventory entry the walk found but couldn't fetch is
+	// operator-visible rather than disappearing.
 	InventoryWalk *InventoryWalkResult
 }
 
 // DiscoverNativeResources enumerates native (non-HelmRelease) resources
-// gitops-managed on the cluster. Per ADR-017 D1, discovery now routes
-// through DiscoverFluxInventory: walks every Flux Kustomization on the
-// cluster, reads its inventory, filters Flux-self-management, fetches
-// each remaining inventory item via the dynamic client. The v1 fixed-
-// kind table is gone — the inventory walk handles any kind Flux is
-// reconciling without per-kind code.
+// gitops-managed on the cluster. Per ADR-017 D1, discovery routes through
+// DiscoverFluxInventory: walks every Flux Kustomization on the cluster,
+// reads its inventory, filters Flux-self-management (derived from the
+// bootstrap Kustomization's self-referential inventory), fetches each
+// remaining inventory item via RESTMapper-resolved dynamic-client calls.
 //
 // Read-only: only List and Get are called; no cluster writes.
 //
-// ADR-017 D1: discovery now routes through DiscoverFluxInventory (walks
-// every Flux Kustomization on the cluster, reads inventories, filters
-// Flux-self-management, fetches each remaining inventory item). The
-// typed-bucket signature is preserved for caller compatibility; items
-// are bucketed by Kind after the walk. Items whose Kind doesn't match
-// a typed bucket land in result.Other and flow through scope-tiered
-// default placement (D4) at layout time.
+// The function deliberately returns a flat Items list — no per-kind
+// pre-bucketing happens here. Kind-aware routing is the layout layer's
+// job (PathForNativeWithDefault). This keeps discovery agnostic to which
+// kinds happen to exist on a given cluster.
 func DiscoverNativeResources(ctx context.Context, kubeconfig []byte) (*NativeDiscoveryResult, error) {
 	walk, err := DiscoverFluxInventory(ctx, kubeconfig)
 	if err != nil {
 		return nil, fmt.Errorf("inventory walk failed: %w", err)
 	}
-
-	result := &NativeDiscoveryResult{InventoryWalk: walk}
-	for _, item := range walk.Items {
-		bucketize(result, item)
-	}
-	return result, nil
+	return &NativeDiscoveryResult{
+		Items:         walk.Items,
+		InventoryWalk: walk,
+	}, nil
 }
 
-// bucketize routes a discovered native item to its typed bucket on
-// NativeDiscoveryResult, or to Other if the Kind doesn't match a typed
-// bucket. The typed buckets exist for caller ergonomics (per-kind
-// counts in logging + coverage); the layout generator flattens all
-// buckets including Other for emission.
-func bucketize(result *NativeDiscoveryResult, item *DiscoveredNative) {
-	switch item.Kind {
-	case "IdentityProvider":
-		result.IdentityProviders = append(result.IdentityProviders, item)
-	case "NetworkPool":
-		result.NetworkPools = append(result.NetworkPools, item)
-	case "ProviderConfig":
-		result.ProviderConfigs = append(result.ProviderConfigs, item)
-	case "Team":
-		result.Teams = append(result.Teams, item)
-	case "ClusterCreationPolicy":
-		result.ClusterCreationPolicies = append(result.ClusterCreationPolicies, item)
-	case "SealedSecret":
-		result.SealedSecrets = append(result.SealedSecrets, item)
-	case "IPAddressPool":
-		result.MetalLBIPAddressPools = append(result.MetalLBIPAddressPools, item)
-	case "L2Advertisement":
-		result.MetalLBL2Advertisements = append(result.MetalLBL2Advertisements, item)
-	case "ConfigMap":
-		if item.Name == "butler-gitops-config" && item.Namespace == "butler-system" {
-			result.ButlerGitOpsConfig = item
-			return
-		}
-		result.Other = append(result.Other, item)
-	default:
-		result.Other = append(result.Other, item)
-	}
-}
-
-// stripServerGeneratedFields removes fields that the API server populates
-// (uid, resourceVersion, generation, status, managedFields, creationTimestamp).
-// These should not appear in exported manifests — they belong to a specific
-// cluster instance, not to the declarative config that the GitOps tree carries.
+// stripServerGeneratedFields removes the runtime/server-managed parts
+// of a fetched object so the exported manifest is declarative-only:
+//
+//   - top-level fields the API server populates (uid, resourceVersion,
+//     generation, creationTimestamp, managedFields, selfLink)
+//   - the entire status subtree
+//   - metadata.finalizers (admission controllers stamp these; never
+//     part of an operator's declaration)
+//   - runtime labels per isRuntimeLabel (Flux ownership, etc.)
+//   - runtime annotations per isRuntimeAnnotation
+//   - any nested creationTimestamp: null artifact in sub-objects
+//     (spec.template.metadata.creationTimestamp is a known marshaling
+//     leakage when the unstructured object round-trips through the
+//     API server)
+//
+// Operator-declared labels and annotations (anything not matched by
+// the runtime predicates) pass through unchanged.
 func stripServerGeneratedFields(obj *unstructured.Unstructured) {
 	meta, ok := obj.Object["metadata"].(map[string]interface{})
 	if !ok {
@@ -154,8 +120,90 @@ func stripServerGeneratedFields(obj *unstructured.Unstructured) {
 		"creationTimestamp",
 		"managedFields",
 		"selfLink",
+		"finalizers",
 	} {
 		delete(meta, field)
 	}
+	stripRuntimeLabelsAnnotations(meta)
 	delete(obj.Object, "status")
+	stripNestedCreationTimestamps(obj.Object)
+	stripNamespaceLifecycleFinalizer(obj.Object)
+}
+
+// stripNamespaceLifecycleFinalizer removes the well-known k8s namespace
+// lifecycle marker spec.finalizers: [kubernetes]. The API server stamps
+// this on every Namespace at creation; operators never declare it.
+// Path 1's NewK8sNamespace builder doesn't emit it, so this keeps
+// path 2's Namespace emission consistent with path 1.
+//
+// Value-based filter: only strips when spec.finalizers is exactly the
+// single-element ["kubernetes"] slice. Any other spec.finalizers value
+// is operator-declared and preserved (no CRD in current use has
+// user-declared spec.finalizers, but the value check guards against
+// over-filtering if one appears).
+func stripNamespaceLifecycleFinalizer(obj map[string]interface{}) {
+	spec, ok := obj["spec"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	finalizers, ok := spec["finalizers"].([]interface{})
+	if !ok {
+		return
+	}
+	if len(finalizers) == 1 {
+		if s, ok := finalizers[0].(string); ok && s == "kubernetes" {
+			delete(spec, "finalizers")
+			if len(spec) == 0 {
+				delete(obj, "spec")
+			}
+		}
+	}
+}
+
+// stripRuntimeLabelsAnnotations removes runtime entries from
+// metadata.labels and metadata.annotations using the same predicates
+// the namespace-enrichment path uses. Keeps operator-declared keys.
+func stripRuntimeLabelsAnnotations(meta map[string]interface{}) {
+	if labels, ok := meta["labels"].(map[string]interface{}); ok {
+		for k := range labels {
+			if isRuntimeLabel(k) {
+				delete(labels, k)
+			}
+		}
+		if len(labels) == 0 {
+			delete(meta, "labels")
+		}
+	}
+	if annotations, ok := meta["annotations"].(map[string]interface{}); ok {
+		for k := range annotations {
+			if isRuntimeAnnotation(k) {
+				delete(annotations, k)
+			}
+		}
+		if len(annotations) == 0 {
+			delete(meta, "annotations")
+		}
+	}
+}
+
+// stripNestedCreationTimestamps walks the object recursively and
+// removes creationTimestamp keys whose value is nil. This appears in
+// nested metadata blocks (e.g. spec.template.metadata) as a
+// round-tripping artifact from the API server. The top-level
+// metadata.creationTimestamp is handled by the explicit delete above;
+// this catches the nested cases.
+func stripNestedCreationTimestamps(v interface{}) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		if val, ok := t["creationTimestamp"]; ok && val == nil {
+			delete(t, "creationTimestamp")
+		}
+		for _, child := range t {
+			stripNestedCreationTimestamps(child)
+		}
+	case []interface{}:
+		for _, child := range t {
+			stripNestedCreationTimestamps(child)
+		}
+	}
 }

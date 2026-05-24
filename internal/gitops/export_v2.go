@@ -106,26 +106,13 @@ func RunExportV2(ctx context.Context, gp GitProvider, req ExportV2Request) (*Exp
 	// observations — operators see env-override-via-inline-patch
 	// explicitly rather than having it silently flattened.
 	if req.Native != nil {
-		var nativeItems []*DiscoveredNative
-		nativeItems = append(nativeItems, req.Native.IdentityProviders...)
-		nativeItems = append(nativeItems, req.Native.NetworkPools...)
-		nativeItems = append(nativeItems, req.Native.ProviderConfigs...)
-		nativeItems = append(nativeItems, req.Native.Teams...)
-		nativeItems = append(nativeItems, req.Native.ClusterCreationPolicies...)
-		nativeItems = append(nativeItems, req.Native.SealedSecrets...)
-		nativeItems = append(nativeItems, req.Native.MetalLBIPAddressPools...)
-		nativeItems = append(nativeItems, req.Native.MetalLBL2Advertisements...)
-		nativeItems = append(nativeItems, req.Native.Other...)
-		if req.Native.ButlerGitOpsConfig != nil {
-			nativeItems = append(nativeItems, req.Native.ButlerGitOpsConfig)
-		}
 		report := BuildCoverage(CoverageInput{
 			ClusterName:   req.ClusterName,
 			Env:           req.Env,
 			EmittedFiles:  tree,
 			Helm:          req.Helm,
 			Inventory:     req.Native.InventoryWalk,
-			NativeResults: nativeItems,
+			NativeResults: req.Native.Items,
 			NamespaceMeta: req.NamespaceMeta,
 		})
 		coverageYAML, err := MarshalCoverage(report)

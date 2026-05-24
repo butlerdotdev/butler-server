@@ -86,19 +86,61 @@ func DiscoverNamespaceMetadata(ctx context.Context, kubeconfig []byte, names map
 	return out, nil
 }
 
-// filterServerLabels removes labels the API server or kubernetes runtime
-// adds and that should not appear in a declarative export. Notably the
-// kubernetes.io/metadata.name label is server-applied (added by the
-// NamespaceDefaultLabelName admission plugin) and is not part of an
-// operator's intended declaration.
+// isRuntimeLabel reports whether a metadata.labels key is added by the
+// API server or a cluster controller and should not appear in a
+// declarative export. Single source of truth for the LABEL filter,
+// used by both the namespace-enrichment path and the inventory-walk
+// path. Operator-declared labels (e.g. strimzi.io/cluster) are NOT in
+// this set and pass through.
+func isRuntimeLabel(key string) bool {
+	if key == "kubernetes.io/metadata.name" {
+		return true
+	}
+	// Flux stamps ownership as both labels and annotations. The label
+	// form participates in Flux's adoption logic; if it's left in the
+	// exported tree pointing at the old Kustomization name, Flux
+	// rewrites it on first reconcile of the new tree. Operator-visible
+	// churn rather than corruption, but inconsistent with the
+	// declarative-export stance, so strip.
+	if hasPrefix(key, "kustomize.toolkit.fluxcd.io/") ||
+		hasPrefix(key, "reconcile.fluxcd.io/") ||
+		hasPrefix(key, "fluxcd.io/") {
+		return true
+	}
+	return false
+}
+
+// isRuntimeAnnotation reports whether a metadata.annotations key is
+// controller-managed runtime state. Same role as isRuntimeLabel for
+// the annotation set.
+func isRuntimeAnnotation(key string) bool {
+	if hasPrefix(key, "kustomize.toolkit.fluxcd.io/") ||
+		hasPrefix(key, "reconcile.fluxcd.io/") ||
+		hasPrefix(key, "fluxcd.io/") {
+		return true
+	}
+	// Helm release tracking — meta.helm.sh/release-name and
+	// meta.helm.sh/release-namespace are stamped by the helm controller
+	// at install time, never declared by the operator.
+	if hasPrefix(key, "meta.helm.sh/") {
+		return true
+	}
+	// Server-side apply field manager metadata
+	if key == "kubectl.kubernetes.io/last-applied-configuration" {
+		return true
+	}
+	return false
+}
+
+// filterServerLabels removes runtime labels per the isRuntimeLabel
+// predicate. Used by the namespace-enrichment emission path.
 func filterServerLabels(in map[string]string) map[string]string {
 	if in == nil {
 		return nil
 	}
 	out := make(map[string]string, len(in))
 	for k, v := range in {
-		switch k {
-		case "kubernetes.io/metadata.name":
+		if isRuntimeLabel(k) {
 			continue
 		}
 		out[k] = v
@@ -109,28 +151,16 @@ func filterServerLabels(in map[string]string) map[string]string {
 	return out
 }
 
-// filterServerAnnotations removes Flux's reconciliation-state annotations
-// and other controller-managed annotations that should not be carried in
-// a declarative export. Reconciliation state belongs to a cluster's
-// runtime, not the desired-state YAML.
+// filterServerAnnotations removes runtime annotations per the
+// isRuntimeAnnotation predicate. Used by the namespace-enrichment
+// emission path.
 func filterServerAnnotations(in map[string]string) map[string]string {
 	if in == nil {
 		return nil
 	}
 	out := make(map[string]string, len(in))
 	for k, v := range in {
-		// Flux reconciler tracking annotations
-		if hasPrefix(k, "kustomize.toolkit.fluxcd.io/") ||
-			hasPrefix(k, "reconcile.fluxcd.io/") ||
-			hasPrefix(k, "fluxcd.io/") {
-			continue
-		}
-		// Helm release tracking
-		if hasPrefix(k, "meta.helm.sh/") {
-			continue
-		}
-		// Server-side apply field manager metadata
-		if k == "kubectl.kubernetes.io/last-applied-configuration" {
+		if isRuntimeAnnotation(k) {
 			continue
 		}
 		out[k] = v

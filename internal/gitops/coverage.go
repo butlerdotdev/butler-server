@@ -58,13 +58,6 @@ type CoverageReport struct {
 	// `flux bootstrap`, not by the exported repo.
 	FluxSelfManagement []CoverageItem `json:"fluxSelfManagement" yaml:"fluxSelfManagement"`
 
-	// InScopeUncaptured: inventory items that fell through the explicit
-	// PathForNative table to the scope-tiered default placement
-	// (PathForNativeWithDefault). Each lists where it landed (default-
-	// bucket path) so the operator can request a per-kind placement
-	// rule if the default isn't right.
-	InScopeUncaptured []CoverageItem `json:"inScopeUncaptured" yaml:"inScopeUncaptured"`
-
 	// KustomizationObservations: per-Kustomization snapshot of the
 	// inventory-read moment. Captures Ready condition,
 	// lastAppliedRevision, and inline patches observed on
@@ -75,6 +68,29 @@ type CoverageReport struct {
 	// explicitly rather than having them silently flattened into
 	// base values.
 	KustomizationObservations []KustomizationCoverage `json:"kustomizationObservations" yaml:"kustomizationObservations"`
+
+	// DiscoveryFailures: inventory entries the walk discovered in some
+	// Flux Kustomization's inventory but couldn't fetch via the dynamic
+	// client (RESTMapper miss, RBAC denial, stale inventory entry,
+	// etc.). Surfaced here so the loud-on-silent-drop guarantee is
+	// visible in coverage.yaml — without this, the class of bug where
+	// an inventory entry references a CRD version the cluster no longer
+	// serves would silently drop user state and pass the prune-safety
+	// property test because the missing item never reached the layout
+	// layer.
+	DiscoveryFailures []DiscoveryFailureCoverage `json:"discoveryFailures,omitempty" yaml:"discoveryFailures,omitempty"`
+
+	// PathCollisions: defense-in-depth backstop. Two distinct
+	// emitted objects that resolve to the same tree path are recorded
+	// here with both identities. The placement rule (group-short +
+	// kind-lower + optional-namespace + name) makes collisions
+	// structurally near-impossible, but near-impossible isn't
+	// impossible: any unanticipated collision (path-shape change, new
+	// kind with surprising naming, operator quirks) surfaces here
+	// instead of silently overwriting one object with another. Same
+	// loud-on-unknown pattern as DiscoveryFailures. Empty = every
+	// emitted path unique (the good zero).
+	PathCollisions []PathCollisionCoverage `json:"pathCollisions,omitempty" yaml:"pathCollisions,omitempty"`
 }
 
 // CoverageItem is one resource entry in the coverage report.
@@ -107,6 +123,33 @@ type KustomizationCoverage struct {
 	// Surfaced here for operator visibility — without this, the
 	// limitation would be silent.
 	InlinePatches []InlinePatchCoverage `json:"inlinePatches,omitempty" yaml:"inlinePatches,omitempty"`
+}
+
+// PathCollisionCoverage records two or more distinct emitted objects
+// resolving to the same tree path. Surfaced when the placement rule
+// produces a collision so the operator sees both identities rather
+// than the export silently last-write-wins overwriting.
+type PathCollisionCoverage struct {
+	Path      string         `json:"path" yaml:"path"`
+	Conflicts []CoverageItem `json:"conflicts" yaml:"conflicts"`
+}
+
+// DiscoveryFailureCoverage is one entry in the discoveryFailures surface
+// — an inventory entry the walk found but couldn't fetch. The Hint field
+// is a short triage classification (RESTMapper miss, RBAC denial, stale
+// inventory, etc.) so the operator has a starting point without reading
+// the raw error. Kind/group are reported verbatim from the inventory ID
+// so the operator can correlate against the source Kustomization on the
+// cluster.
+type DiscoveryFailureCoverage struct {
+	InventoryID         string `json:"inventoryID" yaml:"inventoryID"`
+	Group               string `json:"group,omitempty" yaml:"group,omitempty"`
+	Kind                string `json:"kind" yaml:"kind"`
+	Namespace           string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	Name                string `json:"name" yaml:"name"`
+	SourceKustomization string `json:"sourceKustomization,omitempty" yaml:"sourceKustomization,omitempty"`
+	Error               string `json:"error" yaml:"error"`
+	Hint                string `json:"hint,omitempty" yaml:"hint,omitempty"`
 }
 
 // InlinePatchCoverage is one entry in the inline-patches surface — one
@@ -148,33 +191,32 @@ func BuildCoverage(in CoverageInput) *CoverageReport {
 		Env:         in.Env,
 	}
 
-	// Captured: every native item, plus every Helm release (HR +
-	// HelmRepository pair). Path resolved via PathForNativeWithDefault
-	// (native) or by file basename convention (HR).
-	for _, item := range in.NativeResults {
-		path := PathForNativeWithDefault(item, in.Env)
+	// Captured + PathCollisions: derived from the single
+	// AnalyzeNativePathCollisions pass that the layout emit ALSO
+	// consumes. Same analysis, two consumers: emit writes the owners
+	// to disk, coverage reports them. Items that lost a collision are
+	// in analysis.Collisions and do NOT appear under Captured (only
+	// what's actually on disk is captured). Closes the previous
+	// drift class where emit's pathOwners and coverage's pathOwners
+	// were separate implementations of the same rule.
+	analysis := AnalyzeNativePathCollisions(in.NativeResults, buildHelmPathOwnedSet(in.Helm), in.Env)
+	for path, item := range analysis.Owners {
 		src := ""
 		if in.SourceKustomizations != nil {
 			key := fmt.Sprintf("%s/%s/%s/%s", apiGroup(item.APIVersion), item.Kind, item.Namespace, item.Name)
 			src = in.SourceKustomizations[key]
 		}
-		entry := CoverageItem{
+		report.Captured = append(report.Captured, CoverageItem{
 			APIVersion:          item.APIVersion,
 			Kind:                item.Kind,
 			Namespace:           item.Namespace,
 			Name:                item.Name,
 			Path:                path,
 			SourceKustomization: src,
-		}
-		// If PathForNative (the explicit table) returned empty but
-		// PathForNativeWithDefault returned a path, the item landed
-		// in the default bucket — record it as InScopeUncaptured so
-		// the operator sees the placement decision.
-		if PathForNative(item, in.Env) == "" {
-			report.InScopeUncaptured = append(report.InScopeUncaptured, entry)
-		} else {
-			report.Captured = append(report.Captured, entry)
-		}
+		})
+	}
+	for _, c := range analysis.Collisions {
+		report.PathCollisions = append(report.PathCollisions, *c)
 	}
 	if in.Helm != nil {
 		for _, rel := range append(in.Helm.Matched, in.Helm.Unmatched...) {
@@ -222,14 +264,31 @@ func BuildCoverage(in CoverageInput) *CoverageReport {
 			}
 			report.KustomizationObservations = append(report.KustomizationObservations, obs)
 		}
+		for _, f := range in.Inventory.FetchFailures {
+			report.DiscoveryFailures = append(report.DiscoveryFailures, DiscoveryFailureCoverage{
+				InventoryID:         f.InventoryID,
+				Group:               f.Group,
+				Kind:                f.Kind,
+				Namespace:           f.Namespace,
+				Name:                f.Name,
+				SourceKustomization: f.SourceKustomization,
+				Error:               f.Error,
+				Hint:                f.Hint,
+			})
+		}
 	}
 
 	// Stable ordering for diffs.
 	sortCoverageItems(report.Captured)
-	sortCoverageItems(report.InScopeUncaptured)
 	sortCoverageItems(report.FluxSelfManagement)
 	sort.SliceStable(report.KustomizationObservations, func(i, j int) bool {
 		return report.KustomizationObservations[i].Name < report.KustomizationObservations[j].Name
+	})
+	sort.SliceStable(report.DiscoveryFailures, func(i, j int) bool {
+		return report.DiscoveryFailures[i].InventoryID < report.DiscoveryFailures[j].InventoryID
+	})
+	sort.SliceStable(report.PathCollisions, func(i, j int) bool {
+		return report.PathCollisions[i].Path < report.PathCollisions[j].Path
 	})
 
 	return report
@@ -260,6 +319,12 @@ func MarshalCoverage(report *CoverageReport) ([]byte, error) {
 	buf.WriteString("# inlinePatches under kustomizationObservations records per-env\n")
 	buf.WriteString("# controller value overrides the v1 export does not preserve as\n")
 	buf.WriteString("# separate overlays (ADR-017 Negative consequences).\n")
+	buf.WriteString("# discoveryFailures records inventory entries the walk found but\n")
+	buf.WriteString("# could not fetch — surfacing the loud-on-silent-drop guarantee\n")
+	buf.WriteString("# so missing items are operator-visible instead of disappearing.\n")
+	buf.WriteString("# pathCollisions records two or more distinct objects resolving to\n")
+	buf.WriteString("# the same emitted path — defense in depth against silent overwrite.\n")
+	buf.WriteString("# Empty pathCollisions means every emitted path is unique.\n")
 	body, err := yaml.Marshal(report)
 	if err != nil {
 		return nil, fmt.Errorf("marshal coverage report: %w", err)

@@ -16,16 +16,52 @@ limitations under the License.
 
 package gitops
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
-// Per-kind placement rules for ADR-016 layout v2. Centralized here so the
-// layout decisions are auditable in one table rather than scattered through
-// the generator.
+// Layout v2 placement, corrected: discovery is agnostic; placement is
+// opinionated by TIER (infra vs app, namespaced vs cluster-scoped) and
+// derives the path from cluster-resolvable fields — no per-kind table.
+//
+// Three top-source verification (Flux canonical, onedr0p template,
+// live tenant repo) established that no convention uses
+// <group>/<kind>/ directories. The corrected rule is:
+//
+//   - Namespace kind → apps/<env>/<name>-namespace.yaml (flat). The
+//     one ratified kind special-case, matching the live tenant repo's
+//     apps/<env>/<name>-namespace.yaml and onedr0p's per-bundle
+//     namespace.yaml conventions.
+//
+//   - All other kinds → <tier-base>/<group-short>/<filename>:
+//       tier-base: infrastructure/configs (infra tier) or
+//                  apps/<env> (app tier)
+//       group-short: derived from API group via TLD strip
+//                    (kafka.strimzi.io → strimzi, keda.sh → keda)
+//       filename: namespaced → <kind-lower>-<namespace>-<name>.yaml
+//                 cluster-scoped → <kind-lower>-<name>.yaml
+//
+// The asymmetry at the apps tier (no intermediate "workloads/" wrapper)
+// vs. infra tier (where infrastructure/configs/<group-short>/ is the
+// first grouping level) is intentional and matches three independent
+// top sources (Flux canonical, onedr0p, live tenant repo). At the apps
+// tier, apps/<env>/ IS the env scope and the bundle name <group-short>
+// IS the operator signal — no additional wrapper repeats anything.
+// At the infra tier there's no env context, so <group-short>/ is the
+// first grouping level and carries load.
+//
+// Kind appears in the FILENAME, not the path. Namespace appears in
+// the filename only when the kind is namespaced (cluster-derived from
+// DiscoveredNative.IsNamespaced, populated by RESTMapper at fetch
+// time). The verbose-but-always-unique namespaced filename closes
+// the within-group within-kind cross-namespace collision class:
+// watchAnyNamespace operators with same kind+name in two namespaces
+// no longer silently overwrite to one path.
 
-// infrastructureNamespaces is the set of targetNamespaces that classify an
-// unmatched Helm release as infrastructure rather than apps. ADR-016
-// subsection 3.2. Extend by adding a single line; the heuristic is intended
-// to be cheap to maintain.
+// infrastructureNamespaces classifies a target namespace as
+// infrastructure-tier. Used by classifyUnmatchedRelease (Helm path)
+// and classifyTier (native path).
 var infrastructureNamespaces = map[string]bool{
 	"flux-system":     true,
 	"cert-manager":    true,
@@ -35,87 +71,22 @@ var infrastructureNamespaces = map[string]bool{
 	"traefik":         true,
 	"butler-system":   true,
 	"steward-system":  true,
-	// ADR-017 D4: tenant operator namespaces. Used by the scope-tiered
-	// default placement (PathForNativeWithDefault) to route namespaced
-	// infra-shaped resources (Deployment, ServiceAccount, RBAC) in these
-	// namespaces to infrastructure/configs/ rather than apps/<env>/workloads/.
-	"keda-system":    true,
-	"strimzi-system": true,
-	"reflector":      true,
-	"observability":  true,
+	"keda-system":     true,
+	"strimzi-system":  true,
+	"reflector":       true,
+	"observability":   true,
 }
 
-// clusterScopedInfraKinds enumerates kinds that, when discovered via the
-// inventory walk and not matched by a specific entry in PathForNative,
-// default to infrastructure/configs/<sanitized-group>/<kind>/<name>.yaml.
-// ADR-017 D4 scope-tiered default placement — the capi-steward case is
-// the test: its CRDs + ClusterRoles + ClusterRoleBindings land here, not
-// in apps/<env>/workloads/.
-var clusterScopedInfraKinds = map[string]bool{
-	"CustomResourceDefinition":        true,
-	"ClusterRole":                     true,
-	"ClusterRoleBinding":              true,
-	"ValidatingWebhookConfiguration":  true,
-	"MutatingWebhookConfiguration":    true,
-	"APIService":                      true,
-	"PriorityClass":                   true,
-	"RuntimeClass":                    true,
-	"IngressClass":                    true,
-	"MutatingAdmissionPolicy":         true,
-	"ValidatingAdmissionPolicy":       true,
-	"StorageClass":                    true,
-}
-
-// namespacedInfraKinds enumerates kinds that, when in an
-// infrastructureNamespaces entry, default to infrastructure/configs/...
-// Mostly controller-machinery shapes (deployments, RBAC, configmaps
-// adjacent to a controller).
-var namespacedInfraKinds = map[string]bool{
-	"Deployment":     true,
-	"ServiceAccount": true,
-	"Role":           true,
-	"RoleBinding":    true,
-	"Service":        true,
-	"ConfigMap":      true,
-	"NetworkPolicy":  true,
-}
-
-// Tier names used by layout v2. Matched releases get their tier from
-// tierForAddon() (ADR-015); unmatched releases get their tier from
-// classifyUnmatchedRelease() (ADR-016 subsection 3.2). Native resources
-// have a hard-coded path per kind (subsection 3.3) and do not flow through
-// this tier abstraction. The label set matches ADR-015's AddonTier enum —
-// "infrastructure" releases land in infrastructure/controllers/<name>.yaml
-// as a single consolidated file, "apps" releases land in
-// apps/base/<name>/{repository,release,kustomization,optional namespace}.yaml.
+// Tier names used by the Helm path. Native path uses an internal
+// tier classification (see classifyTier).
 const (
 	TierInfrastructure = "infrastructure"
 	TierApps           = "apps"
 )
 
-// classifyUnmatchedRelease decides infrastructure vs apps for a Helm
-// release that has no matching AddonDefinition.
-//
-// Order of signals (ADR-017 D2):
-//
-//  1. ChartInstallsCRDs — if the chart bundles CRDs (either in crds/ or
-//     via templates containing kind: CustomResourceDefinition), the
-//     chart is necessarily infrastructure-tier: it provides types other
-//     workloads consume; placing it in apps/base/ breaks Flux dependsOn
-//     ordering. This signal is robust to namespace choice — catches
-//     tenant operators like kube-prometheus-stack, strimzi-kafka-operator,
-//     cert-manager, longhorn whose charts install CRDs in non-heuristic
-//     namespaces.
-//  2. Namespace heuristic (ADR-016 D-A.1) — well-known controller
-//     namespaces map to infrastructure. Catches charts that don't
-//     install CRDs but are placed in known infra namespaces.
-//  3. Default — apps. A user-installed chart targeting a custom
-//     namespace with no CRDs in its chart falls here; recoverable on
-//     operator review of the export output.
-//
-// Takes the full DiscoveredRelease so the chart-CRD signal is available;
-// the previous targetNamespace-only signature is no longer sufficient
-// for the tenant case where namespace alone mis-tiers operators.
+// classifyUnmatchedRelease decides infrastructure vs apps for an
+// unmatched Helm release (no AddonDefinition). Kept as-is from the
+// Helm path; not affected by the native-path rule rewrite.
 func classifyUnmatchedRelease(rel *DiscoveredRelease) string {
 	if rel == nil {
 		return TierApps
@@ -129,87 +100,150 @@ func classifyUnmatchedRelease(rel *DiscoveredRelease) string {
 	return TierApps
 }
 
-// PathForNative returns the v2 layout path for a discovered native resource.
-// The env parameter is the apps overlay env (e.g. "prd"); it is only consumed
-// by kinds placed under apps/<env>/.
+// nativeTier values returned by classifyNativeTier. Internal to
+// layout placement — not exposed.
+const (
+	nativeTierNamespaceFlat = "namespace-flat"
+	nativeTierInfra         = "infra"
+	nativeTierApp           = "app"
+)
+
+// classifyNativeTier decides which placement tier a native item lands
+// in. Three tiers, all derivable from cluster-resolvable signals
+// (scope + namespace) plus the one ratified kind special-case:
 //
-// Returns empty string for kinds that have no specific placement rule —
-// callers should consult PathForNativeWithDefault to route those through the
-// scope-tiered default placement (ADR-017 D4).
-func PathForNative(n *DiscoveredNative, env string) string {
-	switch n.Kind {
-	case "IdentityProvider":
-		return fmt.Sprintf("infrastructure/configs/identity-providers/%s.yaml", n.Name)
-	case "NetworkPool":
-		return fmt.Sprintf("infrastructure/configs/network-pools/%s.yaml", n.Name)
-	case "ProviderConfig":
-		return fmt.Sprintf("infrastructure/configs/provider-configs/%s.yaml", n.Name)
-	case "ClusterCreationPolicy":
-		return fmt.Sprintf("infrastructure/configs/cluster-creation-policies/%s.yaml", n.Name)
-	case "IPAddressPool", "L2Advertisement":
-		return fmt.Sprintf("infrastructure/configs/metallb/%s.yaml", n.Name)
-	case "SealedSecret":
-		return fmt.Sprintf("infrastructure/configs/sealed-secrets/%s-%s.yaml", n.Namespace, n.Name)
-	case "ConfigMap":
-		if n.Name == "butler-gitops-config" {
-			return "infrastructure/configs/butler-gitops-config.yaml"
-		}
-		return ""
-	case "Team":
-		return fmt.Sprintf("apps/%s/teams/%s.yaml", env, n.Name)
-	// ADR-017 D4 — tenant-relevant kinds.
-	case "ClusterIssuer":
-		return fmt.Sprintf("infrastructure/configs/cluster-issuers/%s.yaml", n.Name)
-	case "StorageClass":
-		return fmt.Sprintf("infrastructure/configs/storage-classes/%s.yaml", n.Name)
-	case "Kafka", "KafkaNodePool", "KafkaTopic", "KafkaUser", "KafkaConnect":
-		return fmt.Sprintf("apps/%s/workloads/strimzi/%s/%s-%s.yaml", env, n.Kind, n.Namespace, n.Name)
-	case "ScaledObject", "ScaledJob", "TriggerAuthentication":
-		return fmt.Sprintf("apps/%s/workloads/keda/%s/%s-%s.yaml", env, n.Kind, n.Namespace, n.Name)
+//   - namespace-flat: the standalone Namespace kind (the one ratified
+//     kind special-case). Routes to apps/<env>/<name>-namespace.yaml.
+//   - infra: cluster-scoped (any kind) OR namespaced in a known
+//     infrastructure namespace. Cluster-scoped → infra reflects the
+//     reality that cluster-scoped CRs are almost always machinery
+//     (CRDs, RBAC, StorageClass, ClusterIssuer, butler-platform
+//     cluster CRs). Operator can move post-export if a specific
+//     cluster-scoped CR belongs elsewhere.
+//   - app: everything else (namespaced in a non-infra namespace).
+//
+// No kind-name table lookups. Scope from DiscoveredNative.IsNamespaced
+// (RESTMapper-derived at fetch time); namespace from the object;
+// one literal kind name ("Namespace") for the ratified special-case.
+func classifyNativeTier(n *DiscoveredNative) string {
+	if n == nil {
+		return nativeTierApp
 	}
-	return ""
+	if n.Kind == "Namespace" {
+		return nativeTierNamespaceFlat
+	}
+	if !n.IsNamespaced {
+		return nativeTierInfra
+	}
+	if n.Namespace != "" && infrastructureNamespaces[n.Namespace] {
+		return nativeTierInfra
+	}
+	return nativeTierApp
 }
 
-// PathForNativeWithDefault returns a path for any DiscoveredNative,
-// using PathForNative's explicit table first, then the ADR-017 D4
-// scope-tiered default placement for kinds with no specific entry.
+// PathForNative returns the layout path for a discovered native
+// resource per the corrected D4 rule. See package-level doc comment
+// for the full rule and rationale.
 //
-// The default placement avoids the single-bucket misplacement ADR-017
-// revision 2 caught: a unified apps/<env>/workloads/ bucket would route
-// capi-steward's CRDs + ClusterRoles + Deployment to apps/workloads,
-// which is wrong — they're infrastructure. Tiered placement:
-//
-//   - Cluster-scoped infra kinds (CRDs, ClusterRole, ClusterRoleBinding,
-//     ValidatingWebhookConfiguration, MutatingWebhookConfiguration,
-//     APIService, PriorityClass, RuntimeClass, IngressClass, StorageClass,
-//     Admission*Policy) → infrastructure/configs/<group>/<kind>/<name>.yaml
-//   - Namespaced infra kinds (Deployment, ServiceAccount, Role,
-//     RoleBinding, Service, ConfigMap, NetworkPolicy) in known infra
-//     namespaces → infrastructure/configs/<group>/<kind>/<ns>-<name>.yaml
-//   - Anything else (namespaced user-workload-shaped) →
-//     apps/<env>/workloads/<group>/<kind>/<ns>-<name>.yaml
-//
-// The capi-steward case (9 raw resources from butler-crop-live-infra's
-// hand-rolled infrastructure/controllers/capi-steward.yaml) lands in
-// infrastructure/configs/<group>/<kind>/... under this rule, not in
-// apps/<env>/workloads/.
+// Returns "" only for nil input. Every non-nil item produces a path.
+func PathForNative(n *DiscoveredNative, env string) string {
+	if n == nil {
+		return ""
+	}
+	tier := classifyNativeTier(n)
+	if tier == nativeTierNamespaceFlat {
+		return fmt.Sprintf("apps/%s/%s-namespace.yaml", env, n.Name)
+	}
+	var base string
+	if tier == nativeTierInfra {
+		base = "infrastructure/configs"
+	} else {
+		base = fmt.Sprintf("apps/%s", env)
+	}
+	groupShort := groupShortFromAPIVersion(n.APIVersion)
+	kindLower := strings.ToLower(n.Kind)
+	var filename string
+	if n.IsNamespaced && n.Namespace != "" {
+		filename = fmt.Sprintf("%s-%s-%s.yaml", kindLower, n.Namespace, n.Name)
+	} else {
+		filename = fmt.Sprintf("%s-%s.yaml", kindLower, n.Name)
+	}
+	// Bare core/v1 objects (Service, ConfigMap, ServiceAccount, etc.)
+	// emit FLAT at the tier base — the live convention places these
+	// flat-by-purpose (often co-located with their app), never under a
+	// generic "core/" wrapper. groupShortFromAPIVersion returns the
+	// "core" sentinel for empty groups; PathForNative branches on it
+	// to drop the subdir, the same way the Namespace special-case
+	// produces a flat path. No kind lookup involved — group-string
+	// signal only.
+	if groupShort == "core" {
+		return fmt.Sprintf("%s/%s", base, filename)
+	}
+	return fmt.Sprintf("%s/%s/%s", base, groupShort, filename)
+}
+
+// PathForNativeWithDefault is preserved as an alias of PathForNative
+// for callers that referenced the previous explicit-table vs
+// default-placement split. The unified rule covers all kinds; there
+// is no longer a meaningful difference between the two functions.
 func PathForNativeWithDefault(n *DiscoveredNative, env string) string {
-	if p := PathForNative(n, env); p != "" {
-		return p
+	return PathForNative(n, env)
+}
+
+// groupShortFromAPIVersion derives the bundle identifier from a
+// Kubernetes apiVersion string. Three classes, each derived from a
+// stable group-string property:
+//
+//  1. Empty/core group (apiVersion="v1"): returns "core" as a
+//     SENTINEL — callers must emit FLAT (no group-short subdir).
+//     The live convention places bare-v1 objects (Service, ConfigMap,
+//     ServiceAccount) flat-by-purpose at the tier base, never under
+//     a generic "core/" bundle. The sentinel lets PathForNative
+//     branch on this without inventing a kind check.
+//
+//  2. Group ends in ".k8s.io" (K8s API-machinery family): returns
+//     the FIRST segment. storage.k8s.io → storage, rbac.authorization.k8s.io
+//     → rbac, apiextensions.k8s.io → apiextensions, networking.k8s.io
+//     → networking. The convention bundles k8s-machinery types by
+//     PURPOSE (the first segment), not by operator — confirmed in the
+//     live observability-pipeline-prd repo (infrastructure/storage/
+//     for StorageClass). Distinct from operator-CR grouping, which
+//     bundles by OPERATOR.
+//
+//  3. Operator/vendor groups (anything else with a dot, not
+//     ".k8s.io"): returns the LAST segment before the TLD.
+//     kafka.strimzi.io → strimzi (operator), keda.sh → keda,
+//     cert-manager.io → cert-manager, butler.butlerlabs.dev →
+//     butlerlabs. The OPERATOR is the bundle, matching how the live
+//     tenant repos group these (apps/<env>/kafka/, apps/<env>/scaledobjects/).
+//
+// Single-segment groups (apps/v1, batch/v1) hit class 3 — last
+// (only) segment returned as-is (apps, batch).
+//
+// The .k8s.io check is a group-STRING classification (stable
+// derivable property of the API group), not a kind-name lookup.
+// Grep-prove: this file has one kind literal ("Namespace" for the
+// flat-path special-case) and zero kind tables. The .k8s.io check
+// reflects the real convention difference between K8s API machinery
+// (grouped by purpose) and operator CRs (grouped by operator), both
+// observable in live repos.
+func groupShortFromAPIVersion(apiVersion string) string {
+	group := apiGroup(apiVersion)
+	if group == "" || group == "core" {
+		return "core"
 	}
-	group := apiGroup(n.APIVersion)
-	groupSeg := sanitizeGroupSegment(group)
-	if clusterScopedInfraKinds[n.Kind] {
-		return fmt.Sprintf("infrastructure/configs/%s/%s/%s.yaml", groupSeg, n.Kind, n.Name)
+	if strings.HasSuffix(group, ".k8s.io") {
+		return strings.SplitN(group, ".", 2)[0]
 	}
-	if n.Namespace != "" && infrastructureNamespaces[n.Namespace] && namespacedInfraKinds[n.Kind] {
-		return fmt.Sprintf("infrastructure/configs/%s/%s/%s-%s.yaml", groupSeg, n.Kind, n.Namespace, n.Name)
+	parts := strings.Split(group, ".")
+	if len(parts) > 1 {
+		parts = parts[:len(parts)-1]
 	}
-	return fmt.Sprintf("apps/%s/workloads/%s/%s/%s-%s.yaml", env, groupSeg, n.Kind, n.Namespace, n.Name)
+	return parts[len(parts)-1]
 }
 
 // apiGroup extracts the API group from an apiVersion string. Returns
-// "core" for core/v1 (no slash). Used by the default-placement segmenter.
+// "core" for core/v1 (no slash). Internal helper.
 func apiGroup(apiVersion string) string {
 	if apiVersion == "" {
 		return "core"
@@ -225,25 +259,4 @@ func apiGroup(apiVersion string) string {
 		return "core"
 	}
 	return apiVersion[:idx]
-}
-
-// sanitizeGroupSegment converts an API group into a path-segment-safe
-// directory name. Replaces dots with hyphens so the path doesn't have
-// hidden filesystem semantics; preserves the group identity so the
-// output is auditable (e.g. "cert-manager.io" → "cert-manager-io",
-// "apiextensions.k8s.io" → "apiextensions-k8s-io").
-func sanitizeGroupSegment(group string) string {
-	if group == "" {
-		return "core"
-	}
-	out := make([]byte, 0, len(group))
-	for i := 0; i < len(group); i++ {
-		c := group[i]
-		if c == '.' {
-			out = append(out, '-')
-			continue
-		}
-		out = append(out, c)
-	}
-	return string(out)
 }
