@@ -97,6 +97,14 @@ type DiscoveredRelease struct {
 	HelmReleaseCRNamespace    string                 `json:"helmReleaseCRNamespace,omitempty"`
 	HelmRepositoryCRName      string                 `json:"helmRepositoryCRName,omitempty"`
 	HelmRepositoryCRNamespace string                 `json:"helmRepositoryCRNamespace,omitempty"`
+	// ChartInstallsCRDs is true when the chart installs CRDs — either via
+	// files in the chart's crds/ directory (helmChartData.CRDs non-empty)
+	// or via any template containing `kind: CustomResourceDefinition`.
+	// Used by classifyUnmatchedRelease (ADR-017 D2) to tier CRD-installing
+	// charts as infrastructure regardless of namespace. Populated by
+	// discovery for every release; unmatched releases consult it before
+	// falling through to the namespace heuristic.
+	ChartInstallsCRDs bool `json:"chartInstallsCRDs,omitempty"`
 }
 
 // DiscoverHelmReleases discovers all Helm releases on a cluster via the
@@ -151,14 +159,15 @@ func DiscoverHelmReleases(ctx context.Context, kubeconfig []byte, addonDefs []bu
 
 	for _, rd := range latestReleases {
 		release := &DiscoveredRelease{
-			Name:         rd.Name,
-			Namespace:    rd.Namespace,
-			Chart:        rd.Chart.Metadata.Name,
-			ChartVersion: rd.Chart.Metadata.Version,
-			AppVersion:   rd.Chart.Metadata.AppVersion,
-			Status:       rd.Info.Status,
-			Revision:     rd.Version,
-			Values:       rd.Config,
+			Name:              rd.Name,
+			Namespace:         rd.Namespace,
+			Chart:             rd.Chart.Metadata.Name,
+			ChartVersion:      rd.Chart.Metadata.Version,
+			AppVersion:        rd.Chart.Metadata.AppVersion,
+			Status:            rd.Info.Status,
+			Revision:          rd.Version,
+			Values:            rd.Config,
+			ChartInstallsCRDs: chartInstallsCRDs(&rd.Chart),
 		}
 
 		if addonDef, found := matchAddonDefinition(release.Chart, addonLookup); found {
@@ -502,6 +511,24 @@ type helmReleaseInfo struct {
 
 type helmChartData struct {
 	Metadata helmChartMetadata `json:"metadata"`
+	// Templates contains every file rendered from the chart's templates/
+	// directory. Used by chart-CRD detection (ADR-017 D2): if any template
+	// has kind: CustomResourceDefinition, the chart installs CRDs and the
+	// release tiers as infrastructure.
+	Templates []helmChartFile `json:"templates"`
+	// CRDs contains files from the chart's crds/ directory. Helm separates
+	// these from templates because they install pre-templating. Any entry
+	// here is by definition a CRD bundle and means the chart installs CRDs
+	// — closes the bundle-vs-reference gap ADR-017 D2 originally deferred.
+	CRDs []helmChartFile `json:"crds"`
+}
+
+// helmChartFile is one file from a Helm chart's templates/ or crds/
+// directory as stored in the release secret. Data is the raw bytes of
+// the rendered manifest content (YAML or templated YAML).
+type helmChartFile struct {
+	Name string `json:"name"`
+	Data []byte `json:"data"`
 }
 
 type helmChartMetadata struct {
@@ -547,6 +574,34 @@ func decodeHelmRelease(data []byte) (*helmReleaseData, error) {
 	}
 
 	return &release, nil
+}
+
+// chartInstallsCRDs returns true when the chart bundles CustomResourceDefinitions
+// — either via files in the chart's crds/ directory (Helm's pre-template
+// CRD bundle path) or via any template containing
+// `kind: CustomResourceDefinition`. ADR-017 D2's classifier uses this to
+// tier CRD-installing charts as infrastructure regardless of namespace.
+//
+// The crds/ check is exact: any entry in chart.CRDs is by definition a
+// CustomResourceDefinition file. The templates/ check is a substring scan
+// for `kind: CustomResourceDefinition` — fast, no YAML parse, accurate
+// for the common case where the kind line appears verbatim. Charts that
+// use Helm template logic to conditionally emit CRDs (e.g.
+// `{{- if .Values.crds.install }}`) are caught when the rendered template
+// contains the kind line.
+func chartInstallsCRDs(chart *helmChartData) bool {
+	if chart == nil {
+		return false
+	}
+	if len(chart.CRDs) > 0 {
+		return true
+	}
+	for _, t := range chart.Templates {
+		if bytes.Contains(t.Data, []byte("kind: CustomResourceDefinition")) {
+			return true
+		}
+	}
+	return false
 }
 
 // AddonDefinition matching

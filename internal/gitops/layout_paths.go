@@ -51,14 +51,36 @@ const (
 )
 
 // classifyUnmatchedRelease decides infrastructure vs apps for a Helm
-// release that has no matching AddonDefinition. The namespace heuristic
-// is intentionally narrow: only the well-known controller namespaces map
-// to infrastructure. A user-installed chart targeting a custom namespace
-// falls to apps and is recoverable on operator review of the export
-// output. See ADR-016 subsection 3.2 for the tradeoff that argued this
-// over a HelmRelease annotation.
-func classifyUnmatchedRelease(targetNamespace string) string {
-	if infrastructureNamespaces[targetNamespace] {
+// release that has no matching AddonDefinition.
+//
+// Order of signals (ADR-017 D2):
+//
+//  1. ChartInstallsCRDs — if the chart bundles CRDs (either in crds/ or
+//     via templates containing kind: CustomResourceDefinition), the
+//     chart is necessarily infrastructure-tier: it provides types other
+//     workloads consume; placing it in apps/base/ breaks Flux dependsOn
+//     ordering. This signal is robust to namespace choice — catches
+//     tenant operators like kube-prometheus-stack, strimzi-kafka-operator,
+//     cert-manager, longhorn whose charts install CRDs in non-heuristic
+//     namespaces.
+//  2. Namespace heuristic (ADR-016 D-A.1) — well-known controller
+//     namespaces map to infrastructure. Catches charts that don't
+//     install CRDs but are placed in known infra namespaces.
+//  3. Default — apps. A user-installed chart targeting a custom
+//     namespace with no CRDs in its chart falls here; recoverable on
+//     operator review of the export output.
+//
+// Takes the full DiscoveredRelease so the chart-CRD signal is available;
+// the previous targetNamespace-only signature is no longer sufficient
+// for the tenant case where namespace alone mis-tiers operators.
+func classifyUnmatchedRelease(rel *DiscoveredRelease) string {
+	if rel == nil {
+		return TierApps
+	}
+	if rel.ChartInstallsCRDs {
+		return TierInfrastructure
+	}
+	if infrastructureNamespaces[rel.Namespace] {
 		return TierInfrastructure
 	}
 	return TierApps

@@ -14,25 +14,47 @@ import "testing"
 
 func TestClassifyUnmatchedRelease(t *testing.T) {
 	cases := []struct {
-		ns   string
-		want string
+		name             string
+		ns               string
+		chartInstallsCRDs bool
+		want             string
 	}{
-		{"flux-system", TierInfrastructure},
-		{"cert-manager", TierInfrastructure},
-		{"longhorn-system", TierInfrastructure},
-		{"metallb-system", TierInfrastructure},
-		{"butler-system", TierInfrastructure},
-		{"steward-system", TierInfrastructure},
-		{"kube-system", TierInfrastructure},
-		{"traefik", TierInfrastructure},
-		{"observability-engineering", TierApps},
-		{"my-team", TierApps},
-		{"", TierApps},
+		// Namespace heuristic (ADR-016 D-A.1): well-known controller
+		// namespaces → infrastructure even when chart doesn't install CRDs.
+		{"flux-system, no CRDs", "flux-system", false, TierInfrastructure},
+		{"cert-manager, no CRDs", "cert-manager", false, TierInfrastructure},
+		{"longhorn-system, no CRDs", "longhorn-system", false, TierInfrastructure},
+		{"metallb-system, no CRDs", "metallb-system", false, TierInfrastructure},
+		{"butler-system, no CRDs", "butler-system", false, TierInfrastructure},
+		{"steward-system, no CRDs", "steward-system", false, TierInfrastructure},
+		{"kube-system, no CRDs", "kube-system", false, TierInfrastructure},
+		{"traefik, no CRDs", "traefik", false, TierInfrastructure},
+		// Chart-CRD signal (ADR-017 D2): infrastructure regardless of
+		// namespace when chart bundles CRDs. Tenant operators land here.
+		{"observability ns, chart installs CRDs (kube-prometheus-stack case)", "observability", true, TierInfrastructure},
+		{"strimzi-system ns, chart installs CRDs", "strimzi-system", true, TierInfrastructure},
+		{"keda-system ns, chart installs CRDs", "keda-system", true, TierInfrastructure},
+		// Apps fallback: not in heuristic, no CRDs.
+		{"observability-engineering ns, no CRDs", "observability-engineering", false, TierApps},
+		{"my-team ns, no CRDs", "my-team", false, TierApps},
+		{"empty ns, no CRDs", "", false, TierApps},
 	}
 	for _, c := range cases {
-		if got := classifyUnmatchedRelease(c.ns); got != c.want {
-			t.Errorf("classifyUnmatchedRelease(%q) = %q, want %q", c.ns, got, c.want)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			rel := &DiscoveredRelease{
+				Namespace:         c.ns,
+				ChartInstallsCRDs: c.chartInstallsCRDs,
+			}
+			if got := classifyUnmatchedRelease(rel); got != c.want {
+				t.Errorf("classifyUnmatchedRelease(ns=%q, installsCRDs=%v) = %q, want %q", c.ns, c.chartInstallsCRDs, got, c.want)
+			}
+		})
+	}
+}
+
+func TestClassifyUnmatchedRelease_NilSafe(t *testing.T) {
+	if got := classifyUnmatchedRelease(nil); got != TierApps {
+		t.Errorf("classifyUnmatchedRelease(nil) = %q, want %q", got, TierApps)
 	}
 }
 

@@ -20,7 +20,15 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-func TestLayoutV2ClusterFiles(t *testing.T) {
+// TestLayoutV2ClusterFiles_EmptyConfigs verifies the conditional
+// infra-configs emission per ADR-017 revision 3: when the tree has no
+// content under infrastructure/configs/, the export emits ONLY
+// infra-controllers (no infra-configs Flux Kustomization), and
+// apps.yaml depends on infra-controllers directly. Matches
+// butler-observability-pipeline-reference's actual pattern — that
+// reference repo has empty infrastructure/configs/ and emits this
+// shape.
+func TestLayoutV2ClusterFiles_EmptyConfigs(t *testing.T) {
 	tree, err := GenerateLayoutV2(ExportInput{
 		ClusterName: "usini2kpbtlrkn",
 		Env:         "prd",
@@ -42,16 +50,62 @@ func TestLayoutV2ClusterFiles(t *testing.T) {
 	}
 
 	infra := tree["clusters/usini2kpbtlrkn/infrastructure.yaml"]
-	if !strings.Contains(string(infra), "name: infra-controllers") ||
-		!strings.Contains(string(infra), "name: infra-configs") ||
-		!strings.Contains(string(infra), "wait: true") {
-		t.Errorf("infrastructure.yaml missing required Kustomization or wait flag: %s", infra)
+	if !strings.Contains(string(infra), "name: infra-controllers") {
+		t.Errorf("infrastructure.yaml missing infra-controllers Kustomization: %s", infra)
+	}
+	if !strings.Contains(string(infra), "wait: true") {
+		t.Errorf("infrastructure.yaml missing wait: true on infra-controllers: %s", infra)
+	}
+	if strings.Contains(string(infra), "name: infra-configs") {
+		t.Errorf("infrastructure.yaml should NOT emit infra-configs when configs/ is empty (conditional emission): %s", infra)
 	}
 
 	apps := tree["clusters/usini2kpbtlrkn/apps.yaml"]
-	if !strings.Contains(string(apps), "name: apps") ||
-		!strings.Contains(string(apps), "name: infra-configs") {
-		t.Errorf("apps.yaml missing required Kustomization or dependsOn: %s", apps)
+	if !strings.Contains(string(apps), "name: apps") {
+		t.Errorf("apps.yaml missing apps Kustomization: %s", apps)
+	}
+	if !strings.Contains(string(apps), "name: infra-controllers") {
+		t.Errorf("apps.yaml must dependsOn: infra-controllers when infra-configs absent: %s", apps)
+	}
+	if strings.Contains(string(apps), "name: infra-configs") {
+		t.Errorf("apps.yaml should NOT dependsOn: infra-configs when configs/ is empty: %s", apps)
+	}
+}
+
+// TestLayoutV2ClusterFiles_WithConfigs verifies the conditional emission
+// fires the OTHER way: when content lands in infrastructure/configs/
+// (here via a SealedSecret), both infra-controllers AND infra-configs
+// are emitted, and apps.yaml depends on infra-configs.
+func TestLayoutV2ClusterFiles_WithConfigs(t *testing.T) {
+	in := ExportInput{
+		ClusterName: "usini2kpbtlrkn",
+		Env:         "prd",
+		Helm:        &DiscoveryResult{},
+		Native: &NativeDiscoveryResult{
+			SealedSecrets: []*DiscoveredNative{
+				wrap("SealedSecret", newUnstructured("bitnami.com/v1alpha1", "SealedSecret", "entra-oidc", "butler-system")),
+			},
+		},
+	}
+	tree, err := GenerateLayoutV2(in)
+	if err != nil {
+		t.Fatalf("GenerateLayoutV2: %v", err)
+	}
+
+	infra := tree["clusters/usini2kpbtlrkn/infrastructure.yaml"]
+	if !strings.Contains(string(infra), "name: infra-controllers") {
+		t.Errorf("infrastructure.yaml missing infra-controllers Kustomization: %s", infra)
+	}
+	if !strings.Contains(string(infra), "name: infra-configs") {
+		t.Errorf("infrastructure.yaml must emit infra-configs when configs/ has content: %s", infra)
+	}
+	if !strings.Contains(string(infra), "wait: true") {
+		t.Errorf("infrastructure.yaml missing wait: true: %s", infra)
+	}
+
+	apps := tree["clusters/usini2kpbtlrkn/apps.yaml"]
+	if !strings.Contains(string(apps), "name: infra-configs") {
+		t.Errorf("apps.yaml must dependsOn: infra-configs when infra-configs is emitted: %s", apps)
 	}
 }
 
@@ -304,7 +358,7 @@ func loadMinimalScenario(t *testing.T) ExportInput {
 func primaryPathForRelease(rel *DiscoveredRelease) string {
 	tier := rel.Category
 	if tier == "" {
-		tier = classifyUnmatchedRelease(rel.Namespace)
+		tier = classifyUnmatchedRelease(rel)
 	}
 	switch tier {
 	case TierInfrastructure:
