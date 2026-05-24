@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed — revision 2 (2026-05-23, post-ratification-gate tightening)
+Proposed — revision 3 (2026-05-23, post-cross-check refinement)
 
 ## Date
 
@@ -543,6 +543,25 @@ runs against both shapes without live-cluster access.
   Mitigation: the coverage report surfaces what's in the bucket so
   operators can request per-kind placement rules be added.
 - Discovery output grows on tenants (more inventory items captured).
+- **Per-env controller value overrides applied as inline patches on
+  Flux Kustomization CRs are not preserved as separate overlays.** The
+  cross-check against butler-observability-pipeline-reference surfaced
+  a convention this ADR does not model: per-env controller tweaks
+  (kube-prometheus-stack replicas / retention / storage / externalLabels
+  / remoteWrite) are applied via `spec.patches` on the per-cluster
+  `clusters/<cluster>/infrastructure.yaml` Flux Kustomization. Per-env
+  *app* values ARE modeled (the `apps/<env>/<name>-values.yaml` files
+  + patches block on `apps/<env>/kustomization.yaml`); per-env
+  *controller* values are not. v1 exports controllers as canonical
+  base with the *effective* (post-patch) values from the live
+  HelmRelease folded in — the base-vs-overlay split is lost. An
+  operator who re-imports a v1 export back onto a cluster running
+  the reference's convention would see the controller's per-env
+  patches replaced by the export's flattened base values. Operators
+  re-add per-env controller patches post-export. Modeling them is
+  deferred (see Deferred). The coverage report (D5) MUST surface
+  observed inline patches so this gap is operator-visible — see
+  Deferred for the implementation note.
 
 ### Deferred
 
@@ -555,6 +574,30 @@ runs against both shapes without live-cluster access.
   ServiceMonitor detection). Add if heuristic misses appear.
 - Helm chart `crds/` directory inspection for charts that bundle CRDs
   separately from `templates/`. v2 enhancement if needed.
+- **Per-env controller value overrides as separate overlay files.**
+  butler-observability-pipeline-reference's convention applies
+  per-env controller values as inline `spec.patches` on the per-cluster
+  `clusters/<cluster>/infrastructure.yaml` Flux Kustomization (see
+  Negative consequences above for the concrete example —
+  kube-prometheus-stack replicas/retention/storage etc.). v2 would
+  add a parallel pattern for controllers:
+  `infrastructure/controllers/<env>/<name>-values.yaml` or inline
+  patches captured directly in the emitted cluster-pointer
+  `infrastructure.yaml`. v1 ships the canonical base only.
+
+  **Visibility implication for the coverage report (D5):** inline
+  patches on a Flux Kustomization's `spec.patches` field are NOT
+  separate inventory items — they live in the Kustomization CR's spec,
+  not in `.status.inventory.entries`. The inventory-walk discovery in
+  D1 will not see them by reading inventory alone. PR 3's coverage
+  report MUST additionally read `spec.patches` on each walked
+  Kustomization and surface observed patches in `coverage.yaml`
+  (e.g. `inlinePatchesObserved: [{kustomization: infra-controllers,
+  target: {kind: HelmRelease, name: kube-prometheus-stack}, patchSize:
+  N}]`) so the limitation is operator-visible per-export rather than
+  silently dropped. Without this, an operator re-importing the export
+  would see controller per-env tweaks flattened into base values with
+  no warning that the source-organization was lost.
 
 ## References
 
@@ -603,3 +646,18 @@ runs against both shapes without live-cluster access.
   that the chart-CRD classifier doesn't transition any mgmt unmatched
   release's tier vs the current namespace heuristic. Original D6 renumbered
   to D7.
+- **Revision 3** (2026-05-23, this revision): cross-check against
+  butler-observability-pipeline-reference's actual on-disk shape held
+  9/10 rows of D4's base table; one minor refinement folded into
+  PR 3 (conditional `infra-configs` emission to match the reference);
+  one new v1-scope limitation captured explicitly in Consequences/
+  Deferred: per-env controller value overrides applied as inline
+  `spec.patches` on the cluster's `infrastructure.yaml` Flux
+  Kustomization are not preserved as separate overlays by v1 (per-env
+  *app* values via `apps/<env>/<name>-values.yaml` ARE preserved;
+  per-env *controller* values are not). The coverage report (D5)
+  gains a requirement to read `spec.patches` on each walked
+  Kustomization and surface observed patches so the limitation is
+  operator-visible rather than silently flattened. Surfaced because
+  butler-observability-pipeline-reference uses this convention for
+  kube-prometheus-stack's per-env replicas/retention/storage.
