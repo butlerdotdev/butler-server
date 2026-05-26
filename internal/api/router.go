@@ -318,9 +318,23 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Use(adminMiddleware)
 				r.Post("/management/gitops/enable", gitopsHandler.EnableManagementGitOps)
 				r.Delete("/management/gitops", gitopsHandler.DisableManagementGitOps)
+				// Deprecated: v1 per-addon export — emits pre-standard tree
+				// shape (clusters/management/<tier>/<addon>/), inconsistent
+				// with /management/gitops/export-cluster. Per-addon
+				// catalog-install alignment onto the v2 emit engine is a
+				// follow-up.
 				r.Post("/management/gitops/export", gitopsHandler.ExportManagementAddon)
 				r.Post("/management/gitops/export-catalog", gitopsHandler.ExportManagementCatalogAddon)
+				// Deprecated: superseded by /management/gitops/export-cluster (v2
+				// preview-first cluster-wide export). Kept for one release cycle
+				// to avoid breaking any non-console caller; remove in a follow-up.
 				r.Post("/management/gitops/migrate", gitopsHandler.ExportAllManagementAddons)
+				// v2 cluster-wide preview + export (mgmt). Symmetric with the
+				// tenant pair below. Preview runs discovery + layout + coverage
+				// with no git interaction; export wraps the same pipeline with
+				// RunExportV2's git push.
+				r.Post("/management/gitops/preview-cluster", gitopsHandler.PreviewManagementCluster)
+				r.Post("/management/gitops/export-cluster", gitopsHandler.ExportManagementCluster)
 			})
 
 			// Steward: TenantControlPlane and DataStore visibility
@@ -376,9 +390,24 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Post("/clusters/{namespace}/{name}/gitops/enable", gitopsHandler.EnableGitOps)
 			r.Delete("/clusters/{namespace}/{name}/gitops", gitopsHandler.DisableGitOps)
 			r.Get("/clusters/{namespace}/{name}/gitops/discover", gitopsHandler.DiscoverReleases)
+			// Deprecated: v1 per-addon export — emits pre-standard tree
+			// shape (clusters/<cluster>/<tier>/<addon>/), inconsistent
+			// with /clusters/{ns}/{name}/gitops/export-cluster. Per-addon
+			// catalog-install alignment onto the v2 emit engine is a
+			// follow-up.
 			r.Post("/clusters/{namespace}/{name}/gitops/export", gitopsHandler.ExportAddon)
 			r.Post("/clusters/{namespace}/{name}/gitops/export-release", gitopsHandler.ExportRelease)
+			// Deprecated: superseded by /clusters/{ns}/{name}/gitops/export-cluster
+			// (v2 preview-first cluster-wide export). Kept for one release cycle
+			// to avoid breaking any non-console caller; remove in a follow-up.
 			r.Post("/clusters/{namespace}/{name}/gitops/migrate", gitopsHandler.ExportAllAddons)
+			// v2 cluster-wide preview + export. Symmetric pair with the
+			// per-addon /export and /export-release routes above; this pair
+			// operates on the full cluster inventory rather than a single
+			// addon. Preview runs discovery + layout + coverage with no git
+			// interaction; export wraps the same pipeline with RunExportV2.
+			r.Post("/clusters/{namespace}/{name}/gitops/preview-cluster", gitopsHandler.PreviewCluster)
+			r.Post("/clusters/{namespace}/{name}/gitops/export-cluster", gitopsHandler.ExportCluster)
 
 			// Cluster certificates
 			r.Get("/clusters/{namespace}/{name}/certificates", certificateHandler.GetCertificates)

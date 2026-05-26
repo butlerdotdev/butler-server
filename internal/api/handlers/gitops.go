@@ -562,6 +562,14 @@ func (h *GitOpsHandler) DisableGitOps(w http.ResponseWriter, r *http.Request) {
 }
 
 // ExportAddon exports an addon to GitOps.
+//
+// Deprecated: emits the pre-standard v1 tree shape
+// (clusters/<cluster>/<tier>/<addon>/) and produces a tree inconsistent
+// with the v2 cluster export. Use /clusters/{ns}/{name}/gitops/export-
+// cluster for standard-aligned exports; per-addon catalog-install
+// alignment onto the v2 emit engine is tracked as a follow-up. Do not
+// mix v1 per-addon output with v2 cluster-export output in the same
+// gitops repo until alignment lands.
 func (h *GitOpsHandler) ExportAddon(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	namespace := chi.URLParam(r, "namespace")
@@ -785,6 +793,14 @@ func (h *GitOpsHandler) ExportAddon(w http.ResponseWriter, r *http.Request) {
 }
 
 // ExportRelease exports a single installed Helm release to GitOps.
+//
+// Deprecated: emits the pre-standard v1 tree shape
+// (clusters/<cluster>/<category>/<release>/) and produces a tree
+// inconsistent with the v2 cluster export. Use /clusters/{ns}/{name}/
+// gitops/export-cluster for standard-aligned exports; per-addon
+// alignment onto the v2 emit engine is tracked as a follow-up. Do not
+// mix v1 per-addon output with v2 cluster-export output in the same
+// gitops repo until alignment lands.
 func (h *GitOpsHandler) ExportRelease(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	namespace := chi.URLParam(r, "namespace")
@@ -1515,6 +1531,14 @@ func (h *GitOpsHandler) DiscoverManagementReleases(w http.ResponseWriter, r *htt
 }
 
 // ExportManagementAddon exports a management addon to GitOps.
+//
+// Deprecated: emits the pre-standard v1 tree shape
+// (clusters/management/<tier>/<addon>/) and produces a tree
+// inconsistent with the v2 cluster export. Use /management/gitops/
+// export-cluster for standard-aligned exports; per-addon alignment
+// onto the v2 emit engine is tracked as a follow-up. Do not mix v1
+// per-addon output with v2 cluster-export output in the same gitops
+// repo until alignment lands.
 func (h *GitOpsHandler) ExportManagementAddon(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -1724,6 +1748,14 @@ func (h *GitOpsHandler) ExportManagementAddon(w http.ResponseWriter, r *http.Req
 }
 
 // ExportManagementCatalogAddon exports an addon from the catalog to GitOps for the management cluster.
+//
+// Deprecated: emits the pre-standard v1 tree shape
+// (clusters/management/<tier>/<addon>/) and produces a tree
+// inconsistent with the v2 cluster export. Use /management/gitops/
+// export-cluster for standard-aligned exports; per-addon catalog-
+// install alignment onto the v2 emit engine is tracked as a follow-up.
+// Do not mix v1 per-addon output with v2 cluster-export output in the
+// same gitops repo until alignment lands.
 func (h *GitOpsHandler) ExportManagementCatalogAddon(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
