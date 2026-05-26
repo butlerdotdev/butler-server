@@ -1,14 +1,4 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-patches:
-- path: loki-values.yaml
-  target:
-    kind: HelmRelease
-    name: loki
 resources:
-- bitnami
-- loki-namespace.yaml
-- observability-namespace.yaml
-- service-loki-loki-gateway-lb.yaml
-- traefik
-- ../base/loki
+- loki
