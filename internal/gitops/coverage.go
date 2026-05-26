@@ -91,6 +91,20 @@ type CoverageReport struct {
 	// loud-on-unknown pattern as DiscoveryFailures. Empty = every
 	// emitted path unique (the good zero).
 	PathCollisions []PathCollisionCoverage `json:"pathCollisions,omitempty" yaml:"pathCollisions,omitempty"`
+
+	// OmittedNamespaces lists Namespace items the inventory walk found
+	// that no HelmRelease claims (no rel.Namespace match). The HR emit
+	// path co-locates owned namespaces; orphans aren't emitted, but
+	// they surface here so the operator can either link them to an
+	// HR's targetNamespace or manage them outside the export.
+	OmittedNamespaces []OmittedNamespace `json:"omittedNamespaces,omitempty" yaml:"omittedNamespaces,omitempty"`
+}
+
+// OmittedNamespace records a discovered Namespace that no HelmRelease
+// claims as targetNamespace.
+type OmittedNamespace struct {
+	Name   string `json:"name" yaml:"name"`
+	Reason string `json:"reason" yaml:"reason"`
 }
 
 // CoverageItem is one resource entry in the coverage report.
@@ -199,7 +213,7 @@ func BuildCoverage(in CoverageInput) *CoverageReport {
 	// what's actually on disk is captured). Closes the previous
 	// drift class where emit's pathOwners and coverage's pathOwners
 	// were separate implementations of the same rule.
-	analysis := AnalyzeNativePathCollisions(in.NativeResults, buildHelmPathOwnedSet(in.Helm), in.Env)
+	analysis := AnalyzeNativePathCollisions(in.NativeResults, buildHelmPathOwnedSet(in.Helm), helmAppsOwnerByNamespace(in.Helm), in.Env)
 	for path, item := range analysis.Owners {
 		src := ""
 		if in.SourceKustomizations != nil {
@@ -218,6 +232,30 @@ func BuildCoverage(in CoverageInput) *CoverageReport {
 	for _, c := range analysis.Collisions {
 		report.PathCollisions = append(report.PathCollisions, *c)
 	}
+
+	// OmittedNamespaces: discovered Namespace items the layout skipped
+	// because no HelmRelease claims them.
+	helmOwnedNS := helmOwnedNamespaces(in.Helm)
+	seen := map[string]bool{}
+	for _, item := range in.NativeResults {
+		if item == nil || item.Kind != "Namespace" {
+			continue
+		}
+		if helmOwnedNS[item.Name] {
+			continue
+		}
+		if seen[item.Name] {
+			continue
+		}
+		seen[item.Name] = true
+		report.OmittedNamespaces = append(report.OmittedNamespaces, OmittedNamespace{
+			Name:   item.Name,
+			Reason: "no owning HelmRelease (targetNamespace) — link it to an owner or manage outside the export",
+		})
+	}
+	sort.Slice(report.OmittedNamespaces, func(i, j int) bool {
+		return report.OmittedNamespaces[i].Name < report.OmittedNamespaces[j].Name
+	})
 	if in.Helm != nil {
 		for _, rel := range append(in.Helm.Matched, in.Helm.Unmatched...) {
 			tier := releaseTier(rel)

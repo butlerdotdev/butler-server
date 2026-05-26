@@ -19,7 +19,6 @@ package gitops
 import (
 	"bytes"
 	"fmt"
-	"sort"
 	"strings"
 
 	"sigs.k8s.io/yaml"
@@ -74,13 +73,20 @@ func GenerateLayoutV2(in ExportInput) (map[string][]byte, error) {
 
 	emitClusterFiles(acc, in.ClusterName, in.Env)
 
-	// Manual kustomization.yaml for apps/<env>/ — it must list each
-	// ../base/<name> referenced app, the teams subdirectory if present,
-	// and a patches block for every <name>-values.yaml emitted. The
-	// DirectoryAccumulator's default resources-list synthesis doesn't know
-	// about cross-directory references or patches.
+	// apps/<env>/ is a pure composer; each apps/<env>/<release>/
+	// kustomization carries the base ref + the values patch.
 	overrides := map[string]func(*KustomizeFile){
 		fmt.Sprintf("apps/%s", in.Env): buildEnvKustomizationOverride(in.Helm, in.Env, acc),
+	}
+	if in.Helm != nil {
+		for _, rel := range append(in.Helm.Matched, in.Helm.Unmatched...) {
+			if releaseTier(rel) != TierApps {
+				continue
+			}
+			name := exportedHRName(rel)
+			path := fmt.Sprintf("apps/%s/%s", in.Env, name)
+			overrides[path] = buildEnvReleaseKustomizationOverride(name)
+		}
 	}
 
 	return acc.FinalizeWithKustomizations(overrides)
@@ -99,7 +105,8 @@ func emitHelmReleases(acc *DirectoryAccumulator, hr *DiscoveryResult, env string
 				return fmt.Errorf("infra release %s: %w", rel.Name, err)
 			}
 		case TierApps:
-			if err := emitAppRelease(acc, rel, env); err != nil {
+			meta := nsMeta[rel.Namespace]
+			if err := emitAppRelease(acc, rel, env, meta); err != nil {
 				return fmt.Errorf("app release %s: %w", rel.Name, err)
 			}
 		default:
@@ -107,6 +114,60 @@ func emitHelmReleases(acc *DirectoryAccumulator, hr *DiscoveryResult, env string
 		}
 	}
 	return nil
+}
+
+// helmOwnedNamespaces returns the set of namespace names claimed by
+// HelmReleases via their rel.Namespace (the release's target
+// namespace). Used by emitNativeResources to skip native Namespace
+// objects whose ownership the HR emit path has already handled.
+func helmOwnedNamespaces(hr *DiscoveryResult) map[string]bool {
+	owned := map[string]bool{}
+	if hr == nil {
+		return owned
+	}
+	add := func(rels []*DiscoveredRelease) {
+		for _, r := range rels {
+			if r != nil && r.Namespace != "" {
+				owned[r.Namespace] = true
+			}
+		}
+	}
+	add(hr.Matched)
+	add(hr.Unmatched)
+	return owned
+}
+
+// helmAppsOwnerByNamespace returns a namespace → owning-HR-name map
+// for apps-tier releases (using exportedHRName). PathForNative
+// consults this for owner-aware placement.
+//
+// Infra-tier releases are excluded; their namespaces' CRs route via
+// classifyNativeTier's infra-namespace check.
+//
+// When multiple apps-tier HRs target the same namespace, first-wins.
+// Multi-owner namespaces appear in the path-collision report.
+func helmAppsOwnerByNamespace(hr *DiscoveryResult) map[string]string {
+	out := map[string]string{}
+	if hr == nil {
+		return out
+	}
+	add := func(rels []*DiscoveredRelease) {
+		for _, r := range rels {
+			if r == nil || r.Namespace == "" {
+				continue
+			}
+			if releaseTier(r) != TierApps {
+				continue
+			}
+			if _, exists := out[r.Namespace]; exists {
+				continue
+			}
+			out[r.Namespace] = exportedHRName(r)
+		}
+	}
+	add(hr.Matched)
+	add(hr.Unmatched)
+	return out
 }
 
 // releaseTier returns the layout tier for a discovered Helm release.
@@ -263,12 +324,23 @@ func exportedHelmRepoNamespace(rel *DiscoveredRelease) string {
 // Directory names, file basenames, and HR/HelmRepository CR names use the
 // HR CR name from discovery (when populated). See emitInfrastructureRelease
 // for the rationale.
-func emitAppRelease(acc *DirectoryAccumulator, rel *DiscoveredRelease, env string) error {
+func emitAppRelease(acc *DirectoryAccumulator, rel *DiscoveredRelease, env string, nsMeta *NamespaceMetadata) error {
 	hrName := exportedHRName(rel)
 	hrNamespace := exportedHRNamespace(rel)
 	repoName := exportedHelmRepoName(rel)
 	repoNamespace := exportedHelmRepoNamespace(rel)
 	baseDir := fmt.Sprintf("apps/base/%s", hrName)
+
+	// Skip flux-system (Flux owns its own namespace via bootstrap) and
+	// the empty case; everything else gets a namespace.yaml.
+	if rel.Namespace != "" && rel.Namespace != "flux-system" {
+		ns := namespaceFromDiscovery(rel.Namespace, nsMeta)
+		nsYAML, err := yaml.Marshal(ns)
+		if err != nil {
+			return fmt.Errorf("marshal namespace: %w", err)
+		}
+		acc.Add(fmt.Sprintf("%s/namespace.yaml", baseDir), nsYAML)
+	}
 
 	helmRepo := NewFluxHelmRepository(repoName, repoNamespace, rel.RepoURL)
 	repoYAML, err := yaml.Marshal(helmRepo)
@@ -277,12 +349,9 @@ func emitAppRelease(acc *DirectoryAccumulator, rel *DiscoveredRelease, env strin
 	}
 	acc.Add(fmt.Sprintf("%s/repository.yaml", baseDir), repoYAML)
 
-	// Base release.yaml: HR SCAFFOLDING only. Chart name + sourceRef +
-	// releaseName + interval + install policy. Version floats ("*");
-	// no spec.values. Matches the canonical convention observed in
-	// butler-observability-pipeline-reference and Flux's
-	// fluxcd/flux2-kustomize-helm-example. Per-env values + actual
-	// version pin live in apps/<env>/<release>-values.yaml below.
+	// Base scaffolding only: HR identity + chart-spec template +
+	// sourceRef + interval + install policy. Version floats ("*"),
+	// no spec.values — both land in the env overlay below.
 	baseHR := buildBaseHelmRelease(rel, hrName, hrNamespace, repoName, repoNamespace)
 	relYAML, err := yaml.Marshal(baseHR)
 	if err != nil {
@@ -290,20 +359,16 @@ func emitAppRelease(acc *DirectoryAccumulator, rel *DiscoveredRelease, env strin
 	}
 	acc.Add(fmt.Sprintf("%s/release.yaml", baseDir), relYAML)
 
-	// Env overlay: strategic-merge patch. metadata.name only (kustomize
-	// matches on name; no namespace needed in the patch). spec.chart.
-	// spec.version is the discovered live version (env pins what's
-	// actually running); spec.values is the full live values block.
-	// Adding a second cluster's overlay later is just another
-	// apps/<other-env>/<release>-values.yaml; base never changes. This
-	// retires the multi-cluster values splitter ADR-016 Decision B
-	// deferred: the layout itself is the splitter.
+	// Env overlay: strategic-merge patch carrying the discovered
+	// version + the full live values block. metadata.name only —
+	// kustomize matches HelmRelease by name. Lands inside the
+	// release's env dir; the per-release env kustomization applies it.
 	envOverlay := buildEnvValuesOverlay(rel, hrName)
 	envValuesYAML, err := yaml.Marshal(envOverlay)
 	if err != nil {
 		return fmt.Errorf("marshal env values: %w", err)
 	}
-	acc.Add(fmt.Sprintf("apps/%s/%s-values.yaml", env, hrName), envValuesYAML)
+	acc.Add(fmt.Sprintf("apps/%s/%s/%s-values.yaml", env, hrName, hrName), envValuesYAML)
 
 	return nil
 }
@@ -372,7 +437,7 @@ func emitNativeResources(acc *DirectoryAccumulator, n *NativeDiscoveryResult, hr
 	if n == nil {
 		return nil
 	}
-	analysis := AnalyzeNativePathCollisions(n.Items, buildHelmPathOwnedSet(hr), env)
+	analysis := AnalyzeNativePathCollisions(n.Items, buildHelmPathOwnedSet(hr), helmAppsOwnerByNamespace(hr), env)
 	// Emit only the items that won their path. Items that lost a
 	// collision are recorded in analysis.Collisions and will surface
 	// in coverage.yaml's pathCollisions list. Keeping the same single
@@ -410,14 +475,24 @@ type NativePathCollisionAnalysis struct {
 // collisions. Items with identical (apiVersion, kind, namespace, name)
 // landing on the same path are NOT a collision — they're the same
 // logical object appearing in the input list twice (defensive).
-func AnalyzeNativePathCollisions(items []*DiscoveredNative, helmOwned map[string]bool, env string) NativePathCollisionAnalysis {
+//
+// Kind=="Namespace" items are skipped — the HR emit path handles
+// namespace emission. Keeping the skip here means emit and coverage
+// agree on what's omitted (no path="" collision recorded).
+func AnalyzeNativePathCollisions(items []*DiscoveredNative, helmOwned map[string]bool, helmAppsOwner map[string]string, env string) NativePathCollisionAnalysis {
 	owners := map[string]*DiscoveredNative{}
 	collisions := map[string]*PathCollisionCoverage{}
 	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		if item.Kind == "Namespace" {
+			continue
+		}
 		if helmOwned[helmOwnedKey(item.Kind, item.Namespace, item.Name)] {
 			continue
 		}
-		path := PathForNative(item, env)
+		path := PathForNative(item, env, helmAppsOwner)
 		prior, claimed := owners[path]
 		if !claimed {
 			owners[path] = item
@@ -591,76 +666,60 @@ func accumulatorHasInfraConfigs(acc *DirectoryAccumulator) bool {
 	return false
 }
 
-// buildEnvKustomizationOverride augments the auto-synthesized
-// apps/<env>/kustomization.yaml with:
-//
-//   - ../base/<name> entries for each apps-tier Helm release (the
-//     accumulator can't infer those — they live OUTSIDE apps/<env>/
-//     at apps/base/<name>/, so subdir-walking doesn't pick them up).
-//
-//   - A patches block listing each <release>-values.yaml as a
-//     strategic-merge patch targeting its HelmRelease. The values
-//     files are emitted as flat files in apps/<env>/; the accumulator
-//     auto-adds them to Resources, but they need to be REMOVED from
-//     Resources and MOVED to Patches because Kustomize will error if
-//     the same file appears in both.
-//
-// Subdirectories (workloads/, etc.) and standalone flat files
-// (<name>-namespace.yaml, etc.) are added to Resources by the
-// accumulator's auto-synthesis; this override just augments.
+// buildEnvKustomizationOverride builds apps/<env>/kustomization.yaml
+// as a pure composer. It lists the per-release env subdirectories
+// (apps/<env>/<release>/) as resources. No ../base/<name> references,
+// no patches block — those live inside each apps/<env>/<release>/
+// kustomization.yaml per buildEnvReleaseKustomizationOverride.
 func buildEnvKustomizationOverride(hr *DiscoveryResult, env string, acc *DirectoryAccumulator) func(*KustomizeFile) {
-	var appReleases []string
-	if hr != nil {
-		for _, rel := range append(hr.Matched, hr.Unmatched...) {
-			if releaseTier(rel) == TierApps {
-				appReleases = append(appReleases, exportedHRName(rel))
-			}
-		}
-	}
-	sort.Strings(appReleases)
-
 	// apps/<env>/ must always have a kustomization.yaml because
 	// clusters/<cluster>/apps.yaml's Flux Kustomization points at this
 	// directory. EnsureDirectory makes the accumulator track it even
-	// when no files exist there yet.
+	// when no apps-tier releases exist for this env.
 	acc.EnsureDirectory(fmt.Sprintf("apps/%s", env))
+	// Accumulator's default synthesis already lists every subdirectory
+	// at apps/<env>/ as a resource (release dirs auto-included). No
+	// override of resources or patches needed.
+	return func(kf *KustomizeFile) {}
+}
 
-	valuesBasenames := make(map[string]bool, len(appReleases))
-	for _, name := range appReleases {
-		valuesBasenames[fmt.Sprintf("%s-values.yaml", name)] = true
-	}
-
+// buildEnvReleaseKustomizationOverride builds the per-release env
+// kustomization at apps/<env>/<release>/kustomization.yaml. It:
+//
+//   - Adds ../../base/<release> to Resources so the base release
+//     (HelmRepository + HelmRelease scaffolding + namespace) is in
+//     scope to be patched.
+//
+//   - Strips <release>-values.yaml from Resources (the accumulator
+//     auto-added it because it's a flat file in this dir) and moves
+//     it to Patches as a strategic-merge patch targeting the
+//     HelmRelease. Same Patches-vs-Resources rule as the prior env-
+//     root pattern, just at the per-release level.
+//
+// App-scoped CRs PathForNative routed here stay in Resources — the
+// accumulator's auto-synthesis lists them; this override doesn't
+// strip them.
+func buildEnvReleaseKustomizationOverride(releaseName string) func(*KustomizeFile) {
+	valuesBasename := fmt.Sprintf("%s-values.yaml", releaseName)
+	baseRef := fmt.Sprintf("../../base/%s", releaseName)
 	return func(kf *KustomizeFile) {
-		// Strip <release>-values.yaml entries from Resources (the
-		// accumulator added them as direct files); they belong to
-		// Patches instead. Allocate a fresh slice rather than reusing
-		// kf.Resources's backing array — the aliased-slice trick
-		// (kf.Resources[:0]) works here because kf is local, but the
-		// explicit allocation reads identically and doesn't lay a
-		// trap for the next reader.
-		filtered := make([]string, 0, len(kf.Resources)+len(appReleases))
+		filtered := make([]string, 0, len(kf.Resources)+1)
 		for _, r := range kf.Resources {
-			if valuesBasenames[r] {
+			if r == valuesBasename {
 				continue
 			}
 			filtered = append(filtered, r)
 		}
-		// Append ../base/<name> for each apps-tier release.
-		for _, name := range appReleases {
-			filtered = append(filtered, fmt.Sprintf("../base/%s", name))
-		}
+		filtered = append(filtered, baseRef)
 		kf.Resources = filtered
 
-		kf.Patches = make([]KustomizePatch, 0, len(appReleases))
-		for _, name := range appReleases {
-			kf.Patches = append(kf.Patches, KustomizePatch{
-				Path: fmt.Sprintf("%s-values.yaml", name),
-				Target: KustomizePatchTarget{
-					Kind: "HelmRelease",
-					Name: name,
-				},
-			})
-		}
+		kf.Patches = []KustomizePatch{{
+			Path: valuesBasename,
+			Target: KustomizePatchTarget{
+				Kind: "HelmRelease",
+				Name: releaseName,
+			},
+		}}
 	}
 }
 

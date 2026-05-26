@@ -14,39 +14,50 @@ import "testing"
 
 func TestClassifyUnmatchedRelease(t *testing.T) {
 	cases := []struct {
-		name             string
-		ns               string
+		name              string
+		releaseName       string
+		ns                string
 		chartInstallsCRDs bool
-		want             string
+		want              string
 	}{
-		// Namespace heuristic (ADR-016 D-A.1): well-known controller
-		// namespaces → infrastructure even when chart doesn't install CRDs.
-		{"flux-system, no CRDs", "flux-system", false, TierInfrastructure},
-		{"cert-manager, no CRDs", "cert-manager", false, TierInfrastructure},
-		{"longhorn-system, no CRDs", "longhorn-system", false, TierInfrastructure},
-		{"metallb-system, no CRDs", "metallb-system", false, TierInfrastructure},
-		{"butler-system, no CRDs", "butler-system", false, TierInfrastructure},
-		{"steward-system, no CRDs", "steward-system", false, TierInfrastructure},
-		{"kube-system, no CRDs", "kube-system", false, TierInfrastructure},
-		{"traefik, no CRDs", "traefik", false, TierInfrastructure},
-		// Chart-CRD signal (ADR-017 D2): infrastructure regardless of
-		// namespace when chart bundles CRDs. Tenant operators land here.
-		{"observability ns, chart installs CRDs (kube-prometheus-stack case)", "observability", true, TierInfrastructure},
-		{"strimzi-system ns, chart installs CRDs", "strimzi-system", true, TierInfrastructure},
-		{"keda-system ns, chart installs CRDs", "keda-system", true, TierInfrastructure},
+		// Namespace heuristic: well-known controller namespaces →
+		// infrastructure even when chart doesn't install CRDs.
+		{"flux-system, no CRDs", "x", "flux-system", false, TierInfrastructure},
+		{"cert-manager, no CRDs", "x", "cert-manager", false, TierInfrastructure},
+		{"longhorn-system, no CRDs", "x", "longhorn-system", false, TierInfrastructure},
+		{"metallb-system, no CRDs", "x", "metallb-system", false, TierInfrastructure},
+		// butler-system is excluded from helmControllerNamespaces because
+		// its Helm releases (butler-console/server/addons) are workloads,
+		// not controllers. butler-controller is caught separately by
+		// controllerReleaseNames (covered below).
+		{"butler-system workload, no CRDs", "butler-console", "butler-system", false, TierApps},
+		{"butler-system another workload", "butler-server", "butler-system", false, TierApps},
+		{"butler-system another workload (addons)", "butler-addons", "butler-system", false, TierApps},
+		// controllerReleaseNames catches controllers regardless of namespace.
+		{"butler-controller in butler-system → infra", "butler-controller", "butler-system", false, TierInfrastructure},
+		{"steward by name → infra", "steward", "steward-system", false, TierInfrastructure},
+		{"steward-system, no CRDs", "x", "steward-system", false, TierInfrastructure},
+		{"kube-system, no CRDs", "x", "kube-system", false, TierInfrastructure},
+		{"traefik, no CRDs", "x", "traefik", false, TierInfrastructure},
+		// Chart-CRD signal: infrastructure regardless of namespace when
+		// chart bundles CRDs. Tenant operators land here.
+		{"observability ns, chart installs CRDs (kube-prometheus-stack case)", "x", "observability", true, TierInfrastructure},
+		{"strimzi-system ns, chart installs CRDs", "x", "strimzi-system", true, TierInfrastructure},
+		{"keda-system ns, chart installs CRDs", "x", "keda-system", true, TierInfrastructure},
 		// Apps fallback: not in heuristic, no CRDs.
-		{"observability-engineering ns, no CRDs", "observability-engineering", false, TierApps},
-		{"my-team ns, no CRDs", "my-team", false, TierApps},
-		{"empty ns, no CRDs", "", false, TierApps},
+		{"observability-engineering ns, no CRDs", "x", "observability-engineering", false, TierApps},
+		{"my-team ns, no CRDs", "x", "my-team", false, TierApps},
+		{"empty ns, no CRDs", "x", "", false, TierApps},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			rel := &DiscoveredRelease{
+				Name:              c.releaseName,
 				Namespace:         c.ns,
 				ChartInstallsCRDs: c.chartInstallsCRDs,
 			}
 			if got := classifyUnmatchedRelease(rel); got != c.want {
-				t.Errorf("classifyUnmatchedRelease(ns=%q, installsCRDs=%v) = %q, want %q", c.ns, c.chartInstallsCRDs, got, c.want)
+				t.Errorf("classifyUnmatchedRelease(name=%q, ns=%q, installsCRDs=%v) = %q, want %q", c.releaseName, c.ns, c.chartInstallsCRDs, got, c.want)
 			}
 		})
 	}
@@ -75,9 +86,10 @@ func TestPathForNative(t *testing.T) {
 		env          string
 		wantPath     string
 	}{
-		// Namespace special-case (flat path) — the one ratified kind exception.
-		{"Namespace flat", "Namespace", "v1", "kafka", "", false, "prd", "apps/prd/kafka-namespace.yaml"},
-		{"Namespace flat dev env", "Namespace", "v1", "perftest", "", false, "dev", "apps/dev/perftest-namespace.yaml"},
+		// Namespace returns empty — the HR emit path co-locates
+		// namespaces; native placement skips Kind=="Namespace".
+		{"Namespace returns empty (handled by HR emit path)", "Namespace", "v1", "kafka", "", false, "prd", ""},
+		{"Namespace returns empty in dev env too", "Namespace", "v1", "perftest", "", false, "dev", ""},
 
 		// Cluster-scoped → infra tier. Filename: <kind-lower>-<name>.yaml.
 		// Group-short via TLD-strip: apiextensions.k8s.io → k8s.
@@ -150,7 +162,7 @@ func TestPathForNative(t *testing.T) {
 					IsNamespaced: c.isNamespaced,
 				}
 			}
-			got := PathForNative(n, c.env)
+			got := PathForNative(n, c.env, nil)
 			if got != c.wantPath {
 				t.Errorf("PathForNative(%s/%s) = %q, want %q", c.kind, c.objName, got, c.wantPath)
 			}

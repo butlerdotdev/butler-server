@@ -169,11 +169,14 @@ func TestLayoutV2AppReleaseMultiFileShape(t *testing.T) {
 		t.Fatalf("GenerateLayoutV2: %v", err)
 	}
 
+	// values patch + base reference live in apps/<env>/<release>/.
+	// The env root kustomization is a pure composer.
 	for _, p := range []string{
 		"apps/base/argocd/repository.yaml",
 		"apps/base/argocd/release.yaml",
 		"apps/base/argocd/kustomization.yaml",
-		"apps/prd/argocd-values.yaml",
+		"apps/prd/argocd/argocd-values.yaml",
+		"apps/prd/argocd/kustomization.yaml",
 		"apps/prd/kustomization.yaml",
 	} {
 		if _, ok := tree[p]; !ok {
@@ -181,12 +184,26 @@ func TestLayoutV2AppReleaseMultiFileShape(t *testing.T) {
 		}
 	}
 
+	// Env root is a pure composer: lists argocd subdir as a resource,
+	// no ../base/<name> reference, no patches block.
 	envKust := mustUnmarshalKust(t, tree["apps/prd/kustomization.yaml"])
-	if !sliceContains(envKust.Resources, "../base/argocd") {
-		t.Errorf("env kustomization should resource ../base/argocd, got %v", envKust.Resources)
+	if !sliceContains(envKust.Resources, "argocd") {
+		t.Errorf("env root kustomization should compose argocd subdir, got %v", envKust.Resources)
 	}
-	if len(envKust.Patches) != 1 || envKust.Patches[0].Path != "argocd-values.yaml" {
-		t.Errorf("env kustomization patches block = %+v", envKust.Patches)
+	if sliceContains(envKust.Resources, "../base/argocd") {
+		t.Errorf("env root kustomization must NOT carry ../base/argocd (lives in apps/prd/argocd/ now); got %v", envKust.Resources)
+	}
+	if len(envKust.Patches) != 0 {
+		t.Errorf("env root kustomization patches must be empty under B2 (patches live in apps/<env>/<release>/), got %+v", envKust.Patches)
+	}
+
+	// Per-release env kustomization carries the base reference + patch.
+	releaseKust := mustUnmarshalKust(t, tree["apps/prd/argocd/kustomization.yaml"])
+	if !sliceContains(releaseKust.Resources, "../../base/argocd") {
+		t.Errorf("apps/prd/argocd/kustomization.yaml must resource ../../base/argocd, got %v", releaseKust.Resources)
+	}
+	if len(releaseKust.Patches) != 1 || releaseKust.Patches[0].Path != "argocd-values.yaml" {
+		t.Errorf("apps/prd/argocd/kustomization.yaml patches block = %+v", releaseKust.Patches)
 	}
 }
 
@@ -268,8 +285,9 @@ func TestPruneSafetyPropertyAgainstSyntheticState(t *testing.T) {
 		}
 	}
 
+	helmAppsOwner := helmAppsOwnerByNamespace(in.Helm)
 	for _, item := range collectNativeItems(in.Native) {
-		expected := PathForNative(item, in.Env)
+		expected := PathForNative(item, in.Env, helmAppsOwner)
 		if expected == "" {
 			continue
 		}
@@ -306,7 +324,7 @@ func TestPruneSafetyAgainstLiveStateSurrogate(t *testing.T) {
 		Kind: "Workspace", Name: "team-a", Namespace: "team-payments",
 		APIVersion:   "butler.butlerlabs.dev/v1alpha1",
 		IsNamespaced: true,
-	}, in.Env)
+	}, in.Env, nil)
 	if got == "" {
 		t.Fatalf("PathForNative should always return a path under the unified rule")
 	}
