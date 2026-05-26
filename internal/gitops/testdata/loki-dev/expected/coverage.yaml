@@ -55,30 +55,22 @@ captured:
   kind: IngressRoute
   name: loki-gateway
   namespace: loki
-  path: apps/dev/traefik/ingressroute-loki-loki-gateway.yaml
-- apiVersion: v1
-  kind: Namespace
-  name: loki
-  path: apps/dev/loki-namespace.yaml
-- apiVersion: v1
-  kind: Namespace
-  name: observability
-  path: apps/dev/observability-namespace.yaml
+  path: apps/dev/loki/ingressroute-loki-loki-gateway.yaml
 - apiVersion: bitnami.com/v1alpha1
   kind: SealedSecret
   name: loki-gateway-tls
   namespace: loki
-  path: apps/dev/bitnami/sealedsecret-loki-loki-gateway-tls.yaml
+  path: apps/dev/loki/sealedsecret-loki-loki-gateway-tls.yaml
 - apiVersion: bitnami.com/v1alpha1
   kind: SealedSecret
   name: seaweedfs-s3-credentials
   namespace: loki
-  path: apps/dev/bitnami/sealedsecret-loki-seaweedfs-s3-credentials.yaml
+  path: apps/dev/loki/sealedsecret-loki-seaweedfs-s3-credentials.yaml
 - apiVersion: v1
   kind: Service
   name: loki-gateway-lb
   namespace: loki
-  path: apps/dev/service-loki-loki-gateway-lb.yaml
+  path: apps/dev/loki/service-loki-loki-gateway-lb.yaml
 clusterName: loki-dev
 env: dev
 fluxSelfManagement: null

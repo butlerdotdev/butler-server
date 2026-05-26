@@ -59,9 +59,16 @@ import (
 // watchAnyNamespace operators with same kind+name in two namespaces
 // no longer silently overwrite to one path.
 
-// infrastructureNamespaces classifies a target namespace as
-// infrastructure-tier. Used by classifyUnmatchedRelease (Helm path)
-// and classifyTier (native path).
+// infrastructureNamespaces is the set classifyNativeTier treats as
+// infrastructure-tier for native CR placement. CRs in any of these
+// land in infrastructure/configs/.
+//
+// Includes butler-system/steward-system/keda-system/etc. — these host
+// platform-level CRs (IdentityProvider, NetworkPool, Kafka,
+// ScaledObject) that route to infra/configs.
+//
+// classifyUnmatchedRelease uses a narrower set — helmControllerNamespaces
+// — because most namespaces here host workloads, not the controller chart.
 var infrastructureNamespaces = map[string]bool{
 	"flux-system":     true,
 	"cert-manager":    true,
@@ -77,6 +84,35 @@ var infrastructureNamespaces = map[string]bool{
 	"observability":   true,
 }
 
+// helmControllerNamespaces is the namespace set classifyUnmatchedRelease
+// treats as infrastructure-tier for an unmatched Helm release.
+//
+// Differs from infrastructureNamespaces only by excluding butler-system —
+// butler-system hosts workloads (butler-console, butler-server,
+// butler-addons), not controllers. butler-controller (the one controller
+// in butler-system) is caught by controllerReleaseNames instead.
+var helmControllerNamespaces = map[string]bool{
+	"flux-system":     true,
+	"cert-manager":    true,
+	"kube-system":     true,
+	"longhorn-system": true,
+	"metallb-system":  true,
+	"traefik":         true,
+	"steward-system":  true,
+	"keda-system":     true,
+	"strimzi-system":  true,
+	"reflector":       true,
+	"observability":   true,
+}
+
+// controllerReleaseNames are unmatched releases routed to infra by
+// name. Used when ChartInstallsCRDs misses and the target namespace
+// isn't in helmControllerNamespaces.
+var controllerReleaseNames = map[string]bool{
+	"butler-controller": true,
+	"steward":           true,
+}
+
 // Tier names used by the Helm path. Native path uses an internal
 // tier classification (see classifyTier).
 const (
@@ -84,9 +120,15 @@ const (
 	TierApps           = "apps"
 )
 
-// classifyUnmatchedRelease decides infrastructure vs apps for an
-// unmatched Helm release (no AddonDefinition). Kept as-is from the
-// Helm path; not affected by the native-path rule rewrite.
+// classifyUnmatchedRelease decides infrastructure vs apps for a Helm
+// release with no AddonDefinition. Three signals, primary-to-fallback:
+//
+//  1. ChartInstallsCRDs — chart bundles CRDs (cert-manager, butler-crds).
+//  2. controllerReleaseNames — known by name (butler-controller, steward).
+//  3. helmControllerNamespaces — target namespace is a controller namespace.
+//
+// Otherwise apps. butler-console, butler-server, butler-addons land
+// here (workloads in butler-system, no controller signal).
 func classifyUnmatchedRelease(rel *DiscoveredRelease) string {
 	if rel == nil {
 		return TierApps
@@ -94,7 +136,10 @@ func classifyUnmatchedRelease(rel *DiscoveredRelease) string {
 	if rel.ChartInstallsCRDs {
 		return TierInfrastructure
 	}
-	if infrastructureNamespaces[rel.Namespace] {
+	if controllerReleaseNames[rel.Name] {
+		return TierInfrastructure
+	}
+	if helmControllerNamespaces[rel.Namespace] {
 		return TierInfrastructure
 	}
 	return TierApps
@@ -103,34 +148,25 @@ func classifyUnmatchedRelease(rel *DiscoveredRelease) string {
 // nativeTier values returned by classifyNativeTier. Internal to
 // layout placement — not exposed.
 const (
-	nativeTierNamespaceFlat = "namespace-flat"
-	nativeTierInfra         = "infra"
-	nativeTierApp           = "app"
+	nativeTierInfra = "infra"
+	nativeTierApp   = "app"
 )
 
-// classifyNativeTier decides which placement tier a native item lands
-// in. Three tiers, all derivable from cluster-resolvable signals
-// (scope + namespace) plus the one ratified kind special-case:
+// classifyNativeTier returns infra or app for a native item. Two
+// signals from the DiscoveredNative: scope (IsNamespaced, RESTMapper-
+// derived) and namespace.
 //
-//   - namespace-flat: the standalone Namespace kind (the one ratified
-//     kind special-case). Routes to apps/<env>/<name>-namespace.yaml.
 //   - infra: cluster-scoped (any kind) OR namespaced in a known
-//     infrastructure namespace. Cluster-scoped → infra reflects the
-//     reality that cluster-scoped CRs are almost always machinery
-//     (CRDs, RBAC, StorageClass, ClusterIssuer, butler-platform
-//     cluster CRs). Operator can move post-export if a specific
-//     cluster-scoped CR belongs elsewhere.
-//   - app: everything else (namespaced in a non-infra namespace).
+//     infrastructure namespace.
+//   - app: everything else.
 //
-// No kind-name table lookups. Scope from DiscoveredNative.IsNamespaced
-// (RESTMapper-derived at fetch time); namespace from the object;
-// one literal kind name ("Namespace") for the ratified special-case.
+// Kind=="Namespace" is NOT classified here — the HR emit path
+// co-locates namespaces with their owning HelmRelease. See
+// emitHelmReleases (apps) / emitInfrastructureRelease (inline) and
+// emitNativeResources for the skip.
 func classifyNativeTier(n *DiscoveredNative) string {
 	if n == nil {
 		return nativeTierApp
-	}
-	if n.Kind == "Namespace" {
-		return nativeTierNamespaceFlat
 	}
 	if !n.IsNamespaced {
 		return nativeTierInfra
@@ -142,24 +178,24 @@ func classifyNativeTier(n *DiscoveredNative) string {
 }
 
 // PathForNative returns the layout path for a discovered native
-// resource per the corrected D4 rule. See package-level doc comment
-// for the full rule and rationale.
+// resource.
 //
-// Returns "" only for nil input. Every non-nil item produces a path.
-func PathForNative(n *DiscoveredNative, env string) string {
+// App-tier CRs whose namespace appears in helmOwnerByNamespace
+// co-locate under apps/<env>/<owner>/<filename>.yaml. No owner →
+// fallback to apps/<env>/<group>/<filename>.yaml. Cluster-wide CRs
+// land in infrastructure/configs/.
+//
+// Returns "" for nil and for Kind=="Namespace" (the HR emit path
+// owns namespace emission; emitNativeResources skips Namespace
+// items).
+func PathForNative(n *DiscoveredNative, env string, helmOwnerByNamespace map[string]string) string {
 	if n == nil {
 		return ""
 	}
+	if n.Kind == "Namespace" {
+		return ""
+	}
 	tier := classifyNativeTier(n)
-	if tier == nativeTierNamespaceFlat {
-		return fmt.Sprintf("apps/%s/%s-namespace.yaml", env, n.Name)
-	}
-	var base string
-	if tier == nativeTierInfra {
-		base = "infrastructure/configs"
-	} else {
-		base = fmt.Sprintf("apps/%s", env)
-	}
 	groupShort := groupShortFromAPIVersion(n.APIVersion)
 	kindLower := strings.ToLower(n.Kind)
 	var filename string
@@ -168,14 +204,24 @@ func PathForNative(n *DiscoveredNative, env string) string {
 	} else {
 		filename = fmt.Sprintf("%s-%s.yaml", kindLower, n.Name)
 	}
-	// Bare core/v1 objects (Service, ConfigMap, ServiceAccount, etc.)
-	// emit FLAT at the tier base — the live convention places these
-	// flat-by-purpose (often co-located with their app), never under a
-	// generic "core/" wrapper. groupShortFromAPIVersion returns the
-	// "core" sentinel for empty groups; PathForNative branches on it
-	// to drop the subdir, the same way the Namespace special-case
-	// produces a flat path. No kind lookup involved — group-string
-	// signal only.
+
+	if tier == nativeTierInfra {
+		// core/v1 bare objects emit flat at the tier base; everything
+		// else nests under its API-group short.
+		if groupShort == "core" {
+			return fmt.Sprintf("infrastructure/configs/%s", filename)
+		}
+		return fmt.Sprintf("infrastructure/configs/%s/%s", groupShort, filename)
+	}
+
+	// app-tier: owner-aware placement when a HelmRelease owns the ns.
+	if owner := helmOwnerByNamespace[n.Namespace]; owner != "" {
+		return fmt.Sprintf("apps/%s/%s/%s", env, owner, filename)
+	}
+
+	// Orphan: no owning HR. Fall back to group-short subdir so prune-
+	// safety holds — dropping the file would let Flux prune live state.
+	base := fmt.Sprintf("apps/%s", env)
 	if groupShort == "core" {
 		return fmt.Sprintf("%s/%s", base, filename)
 	}
@@ -186,8 +232,11 @@ func PathForNative(n *DiscoveredNative, env string) string {
 // for callers that referenced the previous explicit-table vs
 // default-placement split. The unified rule covers all kinds; there
 // is no longer a meaningful difference between the two functions.
+//
+// The owner-map is omitted for backwards compatibility callers; pass
+// the real map via PathForNative when owner-aware routing is needed.
 func PathForNativeWithDefault(n *DiscoveredNative, env string) string {
-	return PathForNative(n, env)
+	return PathForNative(n, env, nil)
 }
 
 // groupShortFromAPIVersion derives the bundle identifier from a

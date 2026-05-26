@@ -125,44 +125,16 @@ captured:
   name: vm-agent-vector
   namespace: kafka
   path: apps/prd/strimzi/kafkauser-kafka-vm-agent-vector.yaml
-- apiVersion: v1
-  kind: Namespace
-  name: kafka
-  path: apps/prd/kafka-namespace.yaml
-- apiVersion: v1
-  kind: Namespace
-  name: keda-system
-  path: apps/prd/keda-system-namespace.yaml
-- apiVersion: v1
-  kind: Namespace
-  name: observability
-  path: apps/prd/observability-namespace.yaml
-- apiVersion: v1
-  kind: Namespace
-  name: perftest
-  path: apps/prd/perftest-namespace.yaml
-- apiVersion: v1
-  kind: Namespace
-  name: reflector
-  path: apps/prd/reflector-namespace.yaml
-- apiVersion: v1
-  kind: Namespace
-  name: strimzi-system
-  path: apps/prd/strimzi-system-namespace.yaml
-- apiVersion: v1
-  kind: Namespace
-  name: vector
-  path: apps/prd/vector-namespace.yaml
 - apiVersion: keda.sh/v1alpha1
   kind: ScaledObject
   name: vector
   namespace: vector
-  path: apps/prd/keda/scaledobject-vector-vector.yaml
+  path: apps/prd/vector/scaledobject-vector-vector.yaml
 - apiVersion: bitnami.com/v1alpha1
   kind: SealedSecret
   name: vector-otlp-tls
   namespace: vector
-  path: apps/prd/bitnami/sealedsecret-vector-vector-otlp-tls.yaml
+  path: apps/prd/vector/sealedsecret-vector-vector-otlp-tls.yaml
 - apiVersion: storage.k8s.io/v1
   kind: StorageClass
   name: longhorn-rf1
@@ -244,3 +216,10 @@ kustomizationObservations:
   name: scaledobjects
   namespace: flux-system
   ready: true
+omittedNamespaces:
+- name: kafka
+  reason: no owning HelmRelease (targetNamespace) — link it to an owner or manage
+    outside the export
+- name: perftest
+  reason: no owning HelmRelease (targetNamespace) — link it to an owner or manage
+    outside the export
