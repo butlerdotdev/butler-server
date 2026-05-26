@@ -20,10 +20,21 @@ secrets labeled `owner=helm,status=deployed`. UI-configurable platform state
 is not snapshotted: `IdentityProvider`, `NetworkPool`, `ProviderConfig`,
 `Team` (multiple per cluster), `ClusterCreationPolicy` (ADR-018), the
 `butler-gitops-config` ConfigMap, SealedSecrets (across all namespaces),
-MetalLB's `IPAddressPool` and `L2Advertisement`, and Steward's CRDs
-(`StewardControlPlane`, `StewardControlPlaneTemplate`). A cluster exported
+and MetalLB's `IPAddressPool` and `L2Advertisement`. A cluster exported
 today is missing every piece of state that a platform admin configured
 through the console.
+
+The discovery set is restricted to kinds that are *declarative
+desired-state* and that Flux is currently observed to reconcile on
+Butler-managed clusters. Controller-owned runtime objects — kinds that
+butler-controller, Steward, or other in-cluster controllers reconcile
+from higher-level resources — are deliberately excluded. The principle
+matters: a gitops export must carry the user's declared configuration,
+not derived state. Exporting a runtime object would put Flux and the
+owning controller in a fight over the same resource, with Flux
+re-asserting the snapshotted desired-state against the controller's
+ongoing reconciliation. See subsection 1 below for the kinds dropped
+under this principle.
 
 The second gap is output layout. `GenerateReleaseManifests()`
 (`provider_flux.go:51-100`) emits a per-release subdirectory shape:
@@ -92,8 +103,6 @@ finds and logs the rest.
 | `SealedSecret` | `bitnami.com/v1alpha1` | namespaced | Enumerate across all namespaces. |
 | `IPAddressPool` | `metallb.io/v1beta1` | `metallb-system` namespace | |
 | `L2Advertisement` | `metallb.io/v1beta1` | `metallb-system` namespace | |
-| `StewardControlPlane` | `controlplane.cluster.x-k8s.io/v1alpha1` | namespaced | Skip if CRD absent. |
-| `StewardControlPlaneTemplate` | `controlplane.cluster.x-k8s.io/v1alpha1` | namespaced | Skip if CRD absent. |
 
 This discovery set is fixed for v1 and is sized to cover what Flux is
 currently observed to manage on Butler-managed clusters (verified by reading
@@ -101,6 +110,22 @@ the cluster's `kustomization` inventories in `flux-system`). Adding a kind
 to Butler that Flux later reconciles requires adding it to this table — see
 the *Discovery completeness and prune safety* subsection below for why this
 is load-bearing rather than incidental.
+
+Kinds deliberately excluded under the declarative-desired-state-only
+principle:
+
+| Kind | Why excluded |
+|---|---|
+| `StewardControlPlane` | Runtime object reconciled by butler-controller from `TenantCluster` CRs. Exporting would put Flux in conflict with butler-controller over 19+ live tenant control planes on the observed mgmt cluster. |
+| `StewardControlPlaneTemplate` | Template instances created by the Steward chart at install time; not user-declared. |
+
+These are dropped on principle, not just by-observation. The principle
+extends to any future kind: if butler-controller, Steward, or another
+in-cluster controller creates and reconciles the resource from a
+higher-level CR, the resource is runtime state and does not belong in the
+export's discovery set. If a future cluster genuinely gitops-manages
+tenant control planes (e.g. multi-cluster control-plane-as-config), the
+v1 ADR is amended to add them under that explicit use case.
 
 New types in `internal/gitops/types.go`:
 
@@ -114,17 +139,15 @@ type DiscoveredNative struct {
 }
 
 type NativeDiscoveryResult struct {
-    IdentityProviders            []*DiscoveredNative
-    NetworkPools                 []*DiscoveredNative
-    ProviderConfigs              []*DiscoveredNative
-    Teams                        []*DiscoveredNative
-    ClusterCreationPolicies      []*DiscoveredNative
-    ButlerGitOpsConfig           *DiscoveredNative
-    SealedSecrets                []*DiscoveredNative
-    MetalLBIPAddressPools        []*DiscoveredNative
-    MetalLBL2Advertisements      []*DiscoveredNative
-    StewardControlPlanes         []*DiscoveredNative
-    StewardControlPlaneTemplates []*DiscoveredNative
+    IdentityProviders       []*DiscoveredNative
+    NetworkPools            []*DiscoveredNative
+    ProviderConfigs         []*DiscoveredNative
+    Teams                   []*DiscoveredNative
+    ClusterCreationPolicies []*DiscoveredNative
+    ButlerGitOpsConfig      *DiscoveredNative
+    SealedSecrets           []*DiscoveredNative
+    MetalLBIPAddressPools   []*DiscoveredNative
+    MetalLBL2Advertisements []*DiscoveredNative
 }
 ```
 
@@ -145,7 +168,6 @@ infrastructure/
     cluster-creation-policies/<name>.yaml
     metallb/<name>.yaml
     sealed-secrets/<namespace>-<name>.yaml
-    steward/<name>.yaml      # only when StewardControlPlane(Template) present
     butler-gitops-config.yaml
     kustomization.yaml       # lists every file in this directory tree
 apps/
@@ -227,7 +249,6 @@ file `internal/gitops/layout_paths.go`:
 | `MetalLB IPAddressPool` + `L2Advertisement` | `infrastructure/configs/metallb/<name>.yaml` |
 | `SealedSecret` | `infrastructure/configs/sealed-secrets/<namespace>-<name>.yaml` |
 | `ConfigMap butler-gitops-config` | `infrastructure/configs/butler-gitops-config.yaml` |
-| `StewardControlPlane`, `StewardControlPlaneTemplate` | `infrastructure/configs/steward/<name>.yaml` |
 | `Team` | `apps/<env>/teams/<name>.yaml` |
 
 Platform configuration objects (identity, network, provider, CCP, metallb,
@@ -252,18 +273,57 @@ ADR will design it. The single-cluster v1 shape is forward-compatible —
 adding per-env values populates the existing `<name>-values.yaml` file
 without restructure.
 
-### 5. CoreProvider
+### 5. CoreProvider, Steward tenant CRs, raw-manifest controllers
 
-Out of scope for v1. `coreproviders.operator.cluster.x-k8s.io` is not
-registered on Butler-managed clusters; Steward is installed as a HelmRelease.
-If a future cluster adopts the CAPI operator pattern, add `CoreProvider` to
-the `NativeDiscoveryResult` table and the layout-paths table.
+Out of scope for v1. Three categories with related rationales:
 
-### 6. Prune-safety mechanism
+- `coreproviders.operator.cluster.x-k8s.io` is not registered on
+  Butler-managed clusters; Steward is installed as a HelmRelease. If a
+  future cluster adopts the CAPI operator pattern, add `CoreProvider` to
+  the discovery and layout-paths tables.
+- `StewardControlPlane` and `StewardControlPlaneTemplate` are runtime
+  objects reconciled by butler-controller from `TenantCluster` CRs. They
+  are excluded from the discovery set on the declarative-desired-state
+  principle stated in Context — a gitops export must carry user-declared
+  configuration, not controller-derived state.
+- **Raw-manifest controllers** — components delivered as hand-rolled
+  Kubernetes manifests (CRDs + RBAC + Deployment) rather than as Helm
+  releases. butler-crop-live-infra's `infrastructure/controllers/capi-steward.yaml`
+  is the canonical instance: 9 raw docs that Flux applies directly. v1
+  discovery only enumerates Helm releases and the named native CRDs, so
+  raw-manifest components are neither captured nor pruned by the export
+  — they persist under their existing management. This is safe (no churn
+  against unmanaged resources) but invisible to an operator reading the
+  exported tree. A separate coverage-report follow-up addresses the
+  visibility gap; see Deferred section.
+
+### 6. HelmRelease CR name preservation
+
+The Helm release name (from the release secret's labels) is the chart's
+installation identity and is what discovery returns as `DiscoveredRelease.Name`.
+The Flux HelmRelease CR that owns the release can have a different
+`metadata.name`: butler-crop-live-infra's `sealed-secrets` HelmRelease
+sets `spec.releaseName: sealed-secrets-controller`, so the Helm release
+name (`sealed-secrets-controller`) and the HR CR name (`sealed-secrets`)
+diverge.
+
+Without enrichment, the export would emit a new HelmRelease CR named
+`sealed-secrets-controller` and prune the existing `sealed-secrets` HR
+on the next reconcile of a Flux-watched target — Helm-controller would
+briefly see two HRs reconciling the same release. To prevent this,
+discovery walks all HelmRelease CRs on the cluster and back-fills each
+`DiscoveredRelease` with its owning HR CR's `metadata.name` and
+`metadata.namespace`. Layout v2 uses the HR CR name for the emitted
+HR's `metadata.name` (and for the file basename / consolidated-file
+name), and `spec.releaseName` carries the Helm release name so the
+chart's installation identity is preserved. See
+`internal/gitops/discovery.go:enrichWithHelmReleaseCRs`.
+
+### 7. Prune-safety mechanism
 
 Prune safety is layered. Three concerns; each closes a different failure mode.
 
-**6.1 DirectoryAccumulator (mechanical, in-tree).** Every directory the
+**7.1 DirectoryAccumulator (mechanical, in-tree).** Every directory the
 export writes contains a `kustomization.yaml` that lists every resource
 file in it. Implementation: a `DirectoryAccumulator` tracks emitted files
 per logical directory. After all layout code runs, the accumulator
@@ -277,7 +337,7 @@ that omits any unlisted file — and prune deletes the corresponding live
 resource. The accumulator closes the in-tree gap by construction: every
 file emitted gets listed.
 
-**6.2 Discovery completeness (load-bearing dependency).** The accumulator
+**7.2 Discovery completeness (load-bearing dependency).** The accumulator
 only guarantees that emitted files appear in their directory's
 `kustomization.yaml`. It does nothing about kinds discovery never finds.
 A kind in Flux's inventory but not in the discovery set produces no file,
@@ -305,7 +365,7 @@ encodes it as:
   Flux later picks up) are acknowledged as un-handled in v1 and listed
   in *Deferred* below.
 
-**6.3 Existing-tree detection and feature-branch flow (human review gate).**
+**7.3 Existing-tree detection and feature-branch flow (human review gate).**
 Before writing, the export reads the target repo's existing tree under
 `clusters/<cluster>` via `GitProvider.GetFileContent()`. The existing
 shape is "v2 target" if both `clusters/<cluster>/apps.yaml` and
@@ -361,7 +421,7 @@ the live mgmt cluster before opening for review.
   A resource found on the cluster but not covered by an emitted
   `kustomization.yaml` fails the test — independent of whether discovery
   produced an entry for it. This catches both in-tree gaps (subsection
-  6.1) and discovery-completeness gaps (subsection 6.2) in the same
+  7.1) and discovery-completeness gaps (subsection 7.2) in the same
   assertion.
 
 The bar for opening PR 2: the export, run from the dev workstation against
@@ -410,6 +470,14 @@ functional.
   shows up.
 - CoreProvider (`operator.cluster.x-k8s.io`) discovery. Not registered on
   Butler-managed clusters today.
+- `StewardControlPlane` and `StewardControlPlaneTemplate` discovery.
+  Excluded on the declarative-desired-state principle: these are runtime
+  objects reconciled by butler-controller from `TenantCluster` CRs.
+  Including them would put Flux and butler-controller in a fight over
+  the same objects on every reconcile. If a future Butler topology
+  declaratively manages tenant control planes through gitops, add them
+  back under that explicit use case (and design a coordination mechanism
+  between Flux and butler-controller for those objects).
 - Namespace metadata preservation. The current export emits a bare
   `Namespace` synthesized from `TargetNamespace`; live labels/annotations
   on the cluster namespace are lost. Flagged for a follow-on; v2 layout
@@ -417,10 +485,20 @@ functional.
 - Migration tooling for previously exported repos in the v1 layout.
 - Any `butler.butlerlabs.dev/v1alpha1` resource not listed in the discovery
   table (subsection 1). New CRDs that Flux reconciles must be added to the
-  table before they can be safely exported (see subsection 6.2). Until
+  table before they can be safely exported (see subsection 7.2). Until
   added, they are treated the same as user-applied CRDs that Flux does not
   manage: they remain on the cluster, but if Flux IS reconciling them via
   some other path, prune deletes them.
+- Raw-manifest controllers (e.g. butler-crop-live-infra's
+  `infrastructure/controllers/capi-steward.yaml`, 9 raw docs delivered
+  without a HelmRelease). v1 discovery only enumerates Helm releases and
+  named native CRDs, so these are out of scope: the export does not
+  capture them, but it also does not prune them — they persist under
+  their existing management. The boundary is correct; the visibility is
+  not (operators reading the exported tree cannot see what the export
+  did not cover). Tracked separately in
+  [butlerdotdev/butler-server#78](https://github.com/butlerdotdev/butler-server/issues/78)
+  as a reporting follow-up; it does not change what v1 exports.
 
 ## References
 

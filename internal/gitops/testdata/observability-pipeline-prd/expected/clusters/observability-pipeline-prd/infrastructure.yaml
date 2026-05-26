@@ -1,0 +1,29 @@
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infra-controllers
+  namespace: flux-system
+spec:
+  interval: 10m
+  path: ./infrastructure/controllers
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  wait: true
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infra-configs
+  namespace: flux-system
+spec:
+  dependsOn:
+  - name: infra-controllers
+  interval: 10m
+  path: ./infrastructure/configs
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: flux-system

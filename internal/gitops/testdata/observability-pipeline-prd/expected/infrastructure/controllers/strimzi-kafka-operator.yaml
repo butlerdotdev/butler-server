@@ -1,0 +1,46 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: strimzi-system
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: strimzi
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://strimzi.io/
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: strimzi-kafka-operator
+  namespace: strimzi-system
+spec:
+  chart:
+    spec:
+      chart: strimzi-kafka-operator
+      interval: 1h
+      sourceRef:
+        kind: HelmRepository
+        name: strimzi
+        namespace: flux-system
+      version: 1.0.0
+  install:
+    createNamespace: true
+  interval: 5m
+  releaseName: strimzi-kafka-operator
+  targetNamespace: strimzi-system
+  values:
+    resources:
+      limits:
+        cpu: 1
+        memory: 1Gi
+      requests:
+        cpu: 200m
+        memory: 512Mi
+    watchAnyNamespace: false
+    watchNamespaces:
+    - kafka

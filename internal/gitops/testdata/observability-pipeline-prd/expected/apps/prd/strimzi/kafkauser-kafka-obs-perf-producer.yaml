@@ -1,0 +1,31 @@
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaUser
+metadata:
+  labels:
+    strimzi.io/cluster: pipeline-kafka
+  name: obs-perf-producer
+  namespace: kafka
+spec:
+  authentication:
+    type: tls
+  authorization:
+    acls:
+    - operations:
+      - Write
+      - Describe
+      resource:
+        name: pipeline.logs.k8s
+        type: topic
+    - operations:
+      - Write
+      - Describe
+      resource:
+        name: pipeline.metrics
+        type: topic
+    - operations:
+      - Write
+      - Describe
+      resource:
+        name: pipeline.traces
+        type: topic
+    type: simple

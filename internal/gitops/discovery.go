@@ -60,19 +60,51 @@ type GitOpsEngineStatus struct {
 }
 
 // DiscoveredRelease represents a Helm release discovered on a cluster.
+//
+// Name is the Helm release name (from the release secret's labels), which
+// is the chart's installation identity. The HelmRelease and HelmRepository
+// CR fields identify the Flux custom resources that own this release on
+// the cluster, when they exist — they are populated by an enrichment pass
+// that walks all HR CRs and reads their metadata.{name,namespace} plus
+// spec.chart.sourceRef.{name,namespace}.
+//
+// These are tracked separately because mgmt and tenant clusters diverge:
+//   - HR CR vs Helm release name diverges when spec.releaseName is set
+//     (mgmt's sealed-secrets HR has releaseName: sealed-secrets-controller).
+//   - HelmRepository CR name diverges when chart publishers use names
+//     differing from the release name (tenant's kube-prometheus-stack HR
+//     references HelmRepository "prometheus-community", reflector references
+//     "emberstack", strimzi-kafka-operator references "strimzi", etc.).
+//
+// Layout v2 sources its emitted CR names/namespaces from these fields so
+// the export round-trips against the existing tree without collision.
+// When unset (release has no Flux HR CR — e.g. helm-installed directly),
+// layout v2 falls back to sanitized release-name reconstruction.
 type DiscoveredRelease struct {
-	Name            string                 `json:"name"`
-	Namespace       string                 `json:"namespace"`
-	Chart           string                 `json:"chart"`
-	ChartVersion    string                 `json:"chartVersion"`
-	AppVersion      string                 `json:"appVersion,omitempty"`
-	Status          string                 `json:"status"`
-	Revision        int                    `json:"revision"`
-	Values          map[string]interface{} `json:"values,omitempty"`
-	RepoURL         string                 `json:"repoUrl,omitempty"`
-	Category        string                 `json:"category,omitempty"`
-	AddonDefinition string                 `json:"addonDefinition,omitempty"`
-	Platform        bool                   `json:"platform,omitempty"`
+	Name                      string                 `json:"name"`
+	Namespace                 string                 `json:"namespace"`
+	Chart                     string                 `json:"chart"`
+	ChartVersion              string                 `json:"chartVersion"`
+	AppVersion                string                 `json:"appVersion,omitempty"`
+	Status                    string                 `json:"status"`
+	Revision                  int                    `json:"revision"`
+	Values                    map[string]interface{} `json:"values,omitempty"`
+	RepoURL                   string                 `json:"repoUrl,omitempty"`
+	Category                  string                 `json:"category,omitempty"`
+	AddonDefinition           string                 `json:"addonDefinition,omitempty"`
+	Platform                  bool                   `json:"platform,omitempty"`
+	HelmReleaseCRName         string                 `json:"helmReleaseCRName,omitempty"`
+	HelmReleaseCRNamespace    string                 `json:"helmReleaseCRNamespace,omitempty"`
+	HelmRepositoryCRName      string                 `json:"helmRepositoryCRName,omitempty"`
+	HelmRepositoryCRNamespace string                 `json:"helmRepositoryCRNamespace,omitempty"`
+	// ChartInstallsCRDs is true when the chart installs CRDs — either via
+	// files in the chart's crds/ directory (helmChartData.CRDs non-empty)
+	// or via any template containing `kind: CustomResourceDefinition`.
+	// Used by classifyUnmatchedRelease (ADR-017 D2) to tier CRD-installing
+	// charts as infrastructure regardless of namespace. Populated by
+	// discovery for every release; unmatched releases consult it before
+	// falling through to the namespace heuristic.
+	ChartInstallsCRDs bool `json:"chartInstallsCRDs,omitempty"`
 }
 
 // DiscoverHelmReleases discovers all Helm releases on a cluster via the
@@ -127,14 +159,15 @@ func DiscoverHelmReleases(ctx context.Context, kubeconfig []byte, addonDefs []bu
 
 	for _, rd := range latestReleases {
 		release := &DiscoveredRelease{
-			Name:         rd.Name,
-			Namespace:    rd.Namespace,
-			Chart:        rd.Chart.Metadata.Name,
-			ChartVersion: rd.Chart.Metadata.Version,
-			AppVersion:   rd.Chart.Metadata.AppVersion,
-			Status:       rd.Info.Status,
-			Revision:     rd.Version,
-			Values:       rd.Config,
+			Name:              rd.Name,
+			Namespace:         rd.Namespace,
+			Chart:             rd.Chart.Metadata.Name,
+			ChartVersion:      rd.Chart.Metadata.Version,
+			AppVersion:        rd.Chart.Metadata.AppVersion,
+			Status:            rd.Info.Status,
+			Revision:          rd.Version,
+			Values:            rd.Config,
+			ChartInstallsCRDs: chartInstallsCRDs(&rd.Chart),
 		}
 
 		if addonDef, found := matchAddonDefinition(release.Chart, addonLookup); found {
@@ -152,7 +185,103 @@ func DiscoverHelmReleases(ctx context.Context, kubeconfig []byte, addonDefs []bu
 
 	result.GitOpsEngine = detectGitOpsEngine(ctx, clientset, dynClient)
 
+	enrichWithHelmReleaseCRs(ctx, dynClient, result)
+
 	return result, nil
+}
+
+// enrichWithHelmReleaseCRs walks all Flux HelmRelease custom resources on
+// the cluster and back-fills HelmReleaseCRName / HelmReleaseCRNamespace
+// on every DiscoveredRelease whose Helm release name matches an HR CR's
+// spec.releaseName (or metadata.name when releaseName is unset).
+//
+// Required because Helm-release-secret-based discovery loses the Flux HR
+// CR's identity: a HR CR named X with spec.releaseName=Y produces a Helm
+// secret labeled name=Y. Without this enrichment, the export emits a new
+// HR CR named Y, colliding with the existing HR CR named X.
+//
+// Read-only: List only. Failures degrade gracefully — when the CRD is
+// not registered (no Flux) or the call fails, releases stay with empty
+// HR CR fields and layout v2 falls back to using the Helm release name.
+func enrichWithHelmReleaseCRs(ctx context.Context, dynClient dynamic.Interface, result *DiscoveryResult) {
+	hrGVR := schema.GroupVersionResource{
+		Group:    "helm.toolkit.fluxcd.io",
+		Version:  "v2",
+		Resource: "helmreleases",
+	}
+	list, err := dynClient.Resource(hrGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		slog.Debug("HR CR enrichment skipped", "error", err)
+		return
+	}
+
+	type hrCRRef struct {
+		name             string
+		namespace        string
+		sourceRefName    string
+		sourceRefNS      string
+	}
+	byReleaseName := map[string]hrCRRef{}
+	for _, item := range list.Items {
+		crName := item.GetName()
+		crNS := item.GetNamespace()
+		releaseName := crName
+		var srcName, srcNS string
+		if spec, ok := item.Object["spec"].(map[string]interface{}); ok {
+			if rn, ok := spec["releaseName"].(string); ok && rn != "" {
+				releaseName = rn
+			}
+			// spec.chart.spec.sourceRef.{name,namespace} identifies the
+			// HelmRepository this release points at. Sourcing the
+			// HelmRepository CR name from here (rather than reconstructing
+			// from the release name) is required for charts whose publisher
+			// name differs from the release name — tenant clusters expose
+			// this routinely (kedacore, prometheus-community, emberstack,
+			// strimzi, vector-repo all diverge from their HR's name).
+			if chart, ok := spec["chart"].(map[string]interface{}); ok {
+				if chartSpec, ok := chart["spec"].(map[string]interface{}); ok {
+					if srcRef, ok := chartSpec["sourceRef"].(map[string]interface{}); ok {
+						if n, ok := srcRef["name"].(string); ok {
+							srcName = n
+						}
+						if ns, ok := srcRef["namespace"].(string); ok {
+							srcNS = ns
+						}
+					}
+				}
+			}
+		}
+		byReleaseName[releaseName] = hrCRRef{
+			name:          crName,
+			namespace:     crNS,
+			sourceRefName: srcName,
+			sourceRefNS:   srcNS,
+		}
+	}
+
+	apply := func(rel *DiscoveredRelease) {
+		ref, ok := byReleaseName[rel.Name]
+		if !ok {
+			return
+		}
+		rel.HelmReleaseCRName = ref.name
+		rel.HelmReleaseCRNamespace = ref.namespace
+		rel.HelmRepositoryCRName = ref.sourceRefName
+		// Flux defaults sourceRef.namespace to the HR CR's namespace when
+		// unspecified — match that behavior so the export emits a
+		// non-empty namespace consistently.
+		if ref.sourceRefNS != "" {
+			rel.HelmRepositoryCRNamespace = ref.sourceRefNS
+		} else {
+			rel.HelmRepositoryCRNamespace = ref.namespace
+		}
+	}
+	for _, rel := range result.Matched {
+		apply(rel)
+	}
+	for _, rel := range result.Unmatched {
+		apply(rel)
+	}
 }
 
 func detectGitOpsEngine(ctx context.Context, clientset kubernetes.Interface, dynClient dynamic.Interface) *GitOpsEngineStatus {
@@ -382,6 +511,24 @@ type helmReleaseInfo struct {
 
 type helmChartData struct {
 	Metadata helmChartMetadata `json:"metadata"`
+	// Templates contains every file rendered from the chart's templates/
+	// directory. Used by chart-CRD detection (ADR-017 D2): if any template
+	// has kind: CustomResourceDefinition, the chart installs CRDs and the
+	// release tiers as infrastructure.
+	Templates []helmChartFile `json:"templates"`
+	// CRDs contains files from the chart's crds/ directory. Helm separates
+	// these from templates because they install pre-templating. Any entry
+	// here is by definition a CRD bundle and means the chart installs CRDs
+	// — closes the bundle-vs-reference gap ADR-017 D2 originally deferred.
+	CRDs []helmChartFile `json:"crds"`
+}
+
+// helmChartFile is one file from a Helm chart's templates/ or crds/
+// directory as stored in the release secret. Data is the raw bytes of
+// the rendered manifest content (YAML or templated YAML).
+type helmChartFile struct {
+	Name string `json:"name"`
+	Data []byte `json:"data"`
 }
 
 type helmChartMetadata struct {
@@ -427,6 +574,34 @@ func decodeHelmRelease(data []byte) (*helmReleaseData, error) {
 	}
 
 	return &release, nil
+}
+
+// chartInstallsCRDs returns true when the chart bundles CustomResourceDefinitions
+// — either via files in the chart's crds/ directory (Helm's pre-template
+// CRD bundle path) or via any template containing
+// `kind: CustomResourceDefinition`. ADR-017 D2's classifier uses this to
+// tier CRD-installing charts as infrastructure regardless of namespace.
+//
+// The crds/ check is exact: any entry in chart.CRDs is by definition a
+// CustomResourceDefinition file. The templates/ check is a substring scan
+// for `kind: CustomResourceDefinition` — fast, no YAML parse, accurate
+// for the common case where the kind line appears verbatim. Charts that
+// use Helm template logic to conditionally emit CRDs (e.g.
+// `{{- if .Values.crds.install }}`) are caught when the rendered template
+// contains the kind line.
+func chartInstallsCRDs(chart *helmChartData) bool {
+	if chart == nil {
+		return false
+	}
+	if len(chart.CRDs) > 0 {
+		return true
+	}
+	for _, t := range chart.Templates {
+		if bytes.Contains(t.Data, []byte("kind: CustomResourceDefinition")) {
+			return true
+		}
+	}
+	return false
 }
 
 // AddonDefinition matching

@@ -1,0 +1,68 @@
+cert-manager:
+  Annotations: null
+  Labels:
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/warn-version: latest
+flux-system:
+  Annotations: null
+  Labels:
+    app.kubernetes.io/instance: flux-system
+    app.kubernetes.io/part-of: flux
+    app.kubernetes.io/version: v2.4.0
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+keda-system:
+  Annotations: null
+  Labels: null
+kube-system:
+  Annotations: null
+  Labels:
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/warn-version: latest
+longhorn-system:
+  Annotations: null
+  Labels:
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/warn-version: latest
+metallb-system:
+  Annotations: null
+  Labels:
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/warn-version: latest
+observability:
+  Annotations: null
+  Labels: null
+reflector:
+  Annotations: null
+  Labels: null
+strimzi-system:
+  Annotations: null
+  Labels: null
+traefik:
+  Annotations: null
+  Labels:
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/warn-version: latest
+vector:
+  Annotations: null
+  Labels: null

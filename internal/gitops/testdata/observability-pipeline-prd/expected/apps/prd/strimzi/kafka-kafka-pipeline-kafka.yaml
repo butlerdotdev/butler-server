@@ -1,0 +1,42 @@
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  annotations:
+    strimzi.io/kraft: enabled
+    strimzi.io/node-pools: enabled
+  name: pipeline-kafka
+  namespace: kafka
+spec:
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}
+  kafka:
+    authorization:
+      superUsers:
+      - CN=cluster-operator,O=io.strimzi
+      - CN=pipeline-kafka-entity-topic-operator,O=io.strimzi
+      - CN=pipeline-kafka-entity-user-operator,O=io.strimzi
+      type: simple
+    config:
+      auto.create.topics.enable: false
+      default.replication.factor: 3
+      min.insync.replicas: 2
+      num.partitions: 32
+      offsets.topic.replication.factor: 3
+      transaction.state.log.min.isr: 2
+      transaction.state.log.replication.factor: 3
+    listeners:
+    - authentication:
+        type: tls
+      name: internal
+      port: 9092
+      tls: true
+      type: internal
+    - authentication:
+        type: tls
+      name: external
+      port: 9094
+      tls: true
+      type: loadbalancer
+    metadataVersion: 4.1-IV0
+    version: 4.1.2

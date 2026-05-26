@@ -1,0 +1,31 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  labels:
+    scaledobject.keda.sh/name: vector
+  name: vector
+  namespace: vector
+spec:
+  cooldownPeriod: 300
+  maxReplicaCount: 20
+  minReplicaCount: 5
+  pollingInterval: 30
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: vector
+  triggers:
+  - metadata:
+      metricName: vector_receive_rate
+      query: |
+        sum(rate(vector_obsrvpipe_self_metrics_component_received_events_total{component_kind="source"}[5m]))
+      serverAddress: http://kube-prometheus-stack-prometheus.observability.svc.cluster.local:9090
+      threshold: "25000"
+    type: prometheus
+  - metadata:
+      metricName: vector_buffer_fill_ratio
+      query: |
+        max(vector_obsrvpipe_self_metrics_buffer_byte_size / vector_obsrvpipe_self_metrics_buffer_max_size_bytes)
+      serverAddress: http://kube-prometheus-stack-prometheus.observability.svc.cluster.local:9090
+      threshold: "0.5"
+    type: prometheus

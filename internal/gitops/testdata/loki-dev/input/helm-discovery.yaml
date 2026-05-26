@@ -1,0 +1,877 @@
+gitopsEngine:
+  branch: main
+  components:
+  - helm-controller
+  - image-automation-controller
+  - image-reflector-controller
+  - kustomize-controller
+  - notification-controller
+  - sealed-secrets-controller
+  - source-controller
+  installed: true
+  path: ./clusters/loki-dev
+  provider: flux
+  ready: true
+  repository: iocs-compute/loki/crop/live-infrastructure
+  version: v1.1.0
+matched: []
+unmatched:
+- appVersion: v1.7.2
+  category: apps
+  chart: longhorn
+  chartInstallsCRDs: true
+  chartVersion: 1.7.2
+  name: longhorn
+  namespace: longhorn-system
+  repoUrl: https://github.com/longhorn/longhorn
+  revision: 5
+  status: deployed
+  values:
+    defaultSettings:
+      defaultDataPath: /var/lib/longhorn
+      defaultReplicaCount: 2
+- appVersion: v0.14.9
+  category: apps
+  chart: metallb
+  chartVersion: 0.14.9
+  name: metallb
+  namespace: metallb-system
+  repoUrl: https://metallb.universe.tf
+  revision: 5
+  status: deployed
+- appVersion: v0.79.0
+  category: apps
+  chart: kube-prometheus-stack
+  chartVersion: 67.0.0
+  helmReleaseCRName: kube-prometheus-stack
+  helmReleaseCRNamespace: observability
+  helmRepositoryCRName: prometheus-community
+  helmRepositoryCRNamespace: flux-system
+  name: kube-prometheus-stack
+  namespace: observability
+  repoUrl: https://github.com/prometheus-community/helm-charts
+  revision: 2
+  status: deployed
+  values:
+    alertmanager:
+      enabled: false
+    grafana:
+      enabled: false
+    kube-state-metrics:
+      customResourceState:
+        config:
+          spec:
+            resources:
+            - groupVersionKind:
+                group: kustomize.toolkit.fluxcd.io
+                kind: Kustomization
+                version: v1
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux Kustomization resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  revision:
+                  - status
+                  - lastAppliedRevision
+                  source_name:
+                  - spec
+                  - sourceRef
+                  - name
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+            - groupVersionKind:
+                group: helm.toolkit.fluxcd.io
+                kind: HelmRelease
+                version: v2
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux HelmRelease resource.
+                labelsFromPath:
+                  chart_app_version:
+                  - status
+                  - history
+                  - "0"
+                  - appVersion
+                  chart_name:
+                  - status
+                  - history
+                  - "0"
+                  - chartName
+                  chart_ref_name:
+                  - spec
+                  - chartRef
+                  - name
+                  chart_source_name:
+                  - spec
+                  - chart
+                  - spec
+                  - sourceRef
+                  - name
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  revision:
+                  - status
+                  - history
+                  - "0"
+                  - chartVersion
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+            - groupVersionKind:
+                group: source.toolkit.fluxcd.io
+                kind: GitRepository
+                version: v1
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux GitRepository resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  revision:
+                  - status
+                  - artifact
+                  - revision
+                  suspended:
+                  - spec
+                  - suspend
+                  url:
+                  - spec
+                  - url
+                name: resource_info
+            - groupVersionKind:
+                group: source.toolkit.fluxcd.io
+                kind: HelmRepository
+                version: v1
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux HelmRepository resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  revision:
+                  - status
+                  - artifact
+                  - revision
+                  suspended:
+                  - spec
+                  - suspend
+                  url:
+                  - spec
+                  - url
+                name: resource_info
+            - groupVersionKind:
+                group: source.toolkit.fluxcd.io
+                kind: HelmChart
+                version: v1
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux HelmChart resource.
+                labelsFromPath:
+                  chart_name:
+                  - spec
+                  - chart
+                  chart_version:
+                  - spec
+                  - version
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  revision:
+                  - status
+                  - artifact
+                  - revision
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+            - groupVersionKind:
+                group: source.toolkit.fluxcd.io
+                kind: OCIRepository
+                version: v1beta2
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux OCIRepository resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  revision:
+                  - status
+                  - artifact
+                  - revision
+                  suspended:
+                  - spec
+                  - suspend
+                  url:
+                  - spec
+                  - url
+                name: resource_info
+            - groupVersionKind:
+                group: notification.toolkit.fluxcd.io
+                kind: Alert
+                version: v1beta3
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux Alert resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+            - groupVersionKind:
+                group: notification.toolkit.fluxcd.io
+                kind: Provider
+                version: v1beta3
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux Provider resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+            - groupVersionKind:
+                group: notification.toolkit.fluxcd.io
+                kind: Receiver
+                version: v1
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux Receiver resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  suspended:
+                  - spec
+                  - suspend
+                  webhook_path:
+                  - status
+                  - webhookPath
+                name: resource_info
+            - groupVersionKind:
+                group: image.toolkit.fluxcd.io
+                kind: ImageRepository
+                version: v1beta2
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux ImageRepository resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  image:
+                  - spec
+                  - image
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+            - groupVersionKind:
+                group: image.toolkit.fluxcd.io
+                kind: ImagePolicy
+                version: v1beta2
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux ImagePolicy resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  source_name:
+                  - spec
+                  - imageRepositoryRef
+                  - name
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+            - groupVersionKind:
+                group: image.toolkit.fluxcd.io
+                kind: ImageUpdateAutomation
+                version: v1beta2
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux ImageUpdateAutomation resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  source_name:
+                  - spec
+                  - sourceRef
+                  - name
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+        enabled: true
+      rbac:
+        extraRules:
+        - apiGroups:
+          - source.toolkit.fluxcd.io
+          - kustomize.toolkit.fluxcd.io
+          - helm.toolkit.fluxcd.io
+          - notification.toolkit.fluxcd.io
+          - image.toolkit.fluxcd.io
+          resources:
+          - gitrepositories
+          - buckets
+          - helmrepositories
+          - helmcharts
+          - ocirepositories
+          - kustomizations
+          - helmreleases
+          - alerts
+          - providers
+          - receivers
+          - imagerepositories
+          - imagepolicies
+          - imageupdateautomations
+          verbs:
+          - list
+          - watch
+    kubeStateMetrics:
+      enabled: true
+    nodeExporter:
+      enabled: true
+    prometheus:
+      enabled: true
+      prometheusSpec:
+        externalLabels:
+          cluster: loki-dev
+        podMonitorSelectorNilUsesHelmValues: false
+        remoteWrite:
+        - name: vector-pipeline-dev
+          url: http://10.92.90.38:9000
+        replicas: 1
+        resources:
+          limits:
+            cpu: 500m
+            memory: 2Gi
+          requests:
+            cpu: 250m
+            memory: 1Gi
+        retention: 2h
+        securityContext:
+          fsGroup: 65534
+          runAsNonRoot: true
+          runAsUser: 65534
+        serviceMonitorSelectorNilUsesHelmValues: false
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              accessModes:
+              - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 10Gi
+              storageClassName: longhorn
+        walCompression: true
+    prometheusOperator:
+      admissionWebhooks:
+        enabled: false
+      resources:
+        limits:
+          cpu: 250m
+          memory: 256Mi
+        requests:
+          cpu: 100m
+          memory: 128Mi
+      tls:
+        enabled: false
+- appVersion: v3.3.3
+  category: apps
+  chart: traefik
+  chartVersion: 34.3.0
+  name: traefik
+  namespace: traefik
+  repoUrl: https://github.com/traefik/traefik-helm-chart
+  revision: 5
+  status: deployed
+  values:
+    commonLabels:
+      butler.butlerlabs.dev/platform-lb: "true"
+    ingressClass:
+      enabled: true
+      isDefaultClass: true
+    service:
+      type: LoadBalancer
+- appVersion: v1.16.2
+  category: apps
+  chart: cert-manager
+  chartInstallsCRDs: true
+  chartVersion: v1.16.2
+  name: cert-manager
+  namespace: cert-manager
+  repoUrl: https://cert-manager.io
+  revision: 5
+  status: deployed
+  values:
+    crds:
+      enabled: true
+- appVersion: 0.37.0
+  category: apps
+  chart: sealed-secrets
+  chartVersion: 2.18.6
+  helmReleaseCRName: sealed-secrets
+  helmReleaseCRNamespace: flux-system
+  helmRepositoryCRName: sealed-secrets
+  helmRepositoryCRNamespace: flux-system
+  name: sealed-secrets-controller
+  namespace: flux-system
+  repoUrl: https://github.com/bitnami-labs/sealed-secrets
+  revision: 2
+  status: deployed
+- appVersion: 1.17.0
+  category: apps
+  chart: cilium
+  chartVersion: 1.17.0
+  name: cilium
+  namespace: kube-system
+  repoUrl: https://cilium.io/
+  revision: 5
+  status: deployed
+  values:
+    cgroup:
+      autoMount:
+        enabled: false
+      hostRoot: /sys/fs/cgroup
+    hubble:
+      relay:
+        enabled: true
+      ui:
+        enabled: true
+    ipam:
+      mode: kubernetes
+    k8sServiceHost: 10.92.90.18
+    k8sServicePort: 6443
+    kubeProxyReplacement: true
+    securityContext:
+      capabilities:
+        ciliumAgent:
+        - CHOWN
+        - KILL
+        - NET_ADMIN
+        - NET_RAW
+        - IPC_LOCK
+        - SYS_ADMIN
+        - SYS_RESOURCE
+        - DAC_OVERRIDE
+        - FOWNER
+        - SETGID
+        - SETUID
+        cleanCiliumState:
+        - NET_ADMIN
+        - SYS_ADMIN
+        - SYS_RESOURCE
+- appVersion: 3.3.2
+  category: apps
+  chart: loki
+  chartVersion: 6.24.1
+  helmReleaseCRName: loki
+  helmReleaseCRNamespace: loki
+  helmRepositoryCRName: grafana
+  helmRepositoryCRNamespace: flux-system
+  name: loki
+  namespace: loki
+  repoUrl: https://grafana.github.io/helm-charts
+  revision: 222
+  status: deployed
+  values:
+    backend:
+      replicas: 0
+    chunksCache:
+      allocatedMemory: 8192
+      enabled: true
+      replicas: 3
+      resources:
+        limits:
+          cpu: "1"
+          memory: 12Gi
+        requests:
+          cpu: 250m
+          memory: 2Gi
+    compactor:
+      extraArgs:
+      - -config.expand-env=true
+      extraEnvFrom:
+      - secretRef:
+          name: seaweedfs-s3-credentials
+      persistence:
+        claims:
+        - name: data
+          size: 10Gi
+          storageClass: longhorn
+        enabled: true
+      replicas: 1
+      resources:
+        limits:
+          cpu: "2"
+          memory: 8Gi
+        requests:
+          cpu: 500m
+          memory: 2Gi
+    deploymentMode: Distributed
+    distributor:
+      extraArgs:
+      - -config.expand-env=true
+      extraEnvFrom:
+      - secretRef:
+          name: seaweedfs-s3-credentials
+      maxUnavailable: 1
+      replicas: 4
+      resources:
+        limits:
+          cpu: "2"
+          memory: 4Gi
+        requests:
+          cpu: 500m
+          memory: 1Gi
+    gateway:
+      maxUnavailable: 1
+      replicas: 2
+      resources:
+        limits:
+          cpu: 500m
+          memory: 512Mi
+        requests:
+          cpu: 250m
+          memory: 256Mi
+    indexGateway:
+      extraArgs:
+      - -config.expand-env=true
+      extraEnvFrom:
+      - secretRef:
+          name: seaweedfs-s3-credentials
+      maxUnavailable: 1
+      persistence:
+        enabled: true
+        size: 10Gi
+        storageClass: longhorn
+      replicas: 2
+      resources:
+        limits:
+          cpu: "1"
+          memory: 4Gi
+        requests:
+          cpu: 500m
+          memory: 2Gi
+    ingester:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app.kubernetes.io/component
+                  operator: In
+                  values:
+                  - ingester
+              topologyKey: kubernetes.io/hostname
+            weight: 100
+      extraArgs:
+      - -config.expand-env=true
+      extraEnvFrom:
+      - secretRef:
+          name: seaweedfs-s3-credentials
+      maxUnavailable: 1
+      persistence:
+        claims:
+        - name: data
+          size: 10Gi
+          storageClass: longhorn
+        enabled: true
+      replicas: 3
+      resources:
+        limits:
+          cpu: "4"
+          memory: 16Gi
+        requests:
+          cpu: 2000m
+          memory: 8Gi
+      zoneAwareReplication:
+        enabled: false
+    loki:
+      auth_enabled: true
+      commonConfig:
+        compactor_address: '{{ include "loki.compactorAddress" . }}'
+        path_prefix: /var/loki
+        replication_factor: 3
+      compactor:
+        compaction_interval: 10m
+        delete_request_store: s3
+        retention_delete_delay: 2h
+        retention_delete_worker_count: 150
+        retention_enabled: true
+        working_directory: /var/loki/compactor
+      ingester:
+        chunk_encoding: snappy
+        chunk_target_size: 1572864
+        concurrent_flushes: 64
+        max_chunk_age: 2h
+      limits_config:
+        ingestion_burst_size_mb: 75
+        ingestion_rate_mb: 50
+        max_cache_freshness_per_query: 10m
+        max_query_parallelism: 64
+        max_streams_per_user: 50000
+        per_stream_rate_limit: 25MB
+        per_stream_rate_limit_burst: 50MB
+        query_timeout: 300s
+        reject_old_samples: true
+        reject_old_samples_max_age: 168h
+        retention_period: 168h
+        split_queries_by_interval: 15m
+        tsdb_max_query_parallelism: 128
+        volume_enabled: true
+      pattern_ingester:
+        enabled: false
+      querier:
+        max_concurrent: 16
+      schemaConfig:
+        configs:
+        - from: "2024-04-01"
+          index:
+            period: 24h
+            prefix: loki_index_
+          object_store: s3
+          schema: v13
+          store: tsdb
+      server:
+        grpc_listen_port: 9095
+        http_listen_port: 3100
+        http_server_read_timeout: 600s
+        http_server_write_timeout: 600s
+      storage:
+        bucketNames:
+          admin: loki-admin
+          chunks: loki-chunks
+          ruler: loki-ruler
+        s3:
+          accessKeyId: ${S3_ACCESS_KEY_ID}
+          endpoint: https://s3-crop-dev.phibred.com
+          http_config:
+            insecure_skip_verify: true
+          insecure: false
+          region: us-east-1
+          s3ForcePathStyle: true
+          secretAccessKey: ${S3_SECRET_ACCESS_KEY}
+        type: s3
+    lokiCanary:
+      enabled: false
+    querier:
+      extraArgs:
+      - -config.expand-env=true
+      extraEnvFrom:
+      - secretRef:
+          name: seaweedfs-s3-credentials
+      maxUnavailable: 1
+      replicas: 3
+      resources:
+        limits:
+          cpu: "2"
+          memory: 8Gi
+        requests:
+          cpu: 500m
+          memory: 2Gi
+    queryFrontend:
+      extraArgs:
+      - -config.expand-env=true
+      extraEnvFrom:
+      - secretRef:
+          name: seaweedfs-s3-credentials
+      maxUnavailable: 1
+      replicas: 2
+      resources:
+        limits:
+          cpu: "1"
+          memory: 4Gi
+        requests:
+          cpu: 500m
+          memory: 2Gi
+    queryScheduler:
+      extraArgs:
+      - -config.expand-env=true
+      extraEnvFrom:
+      - secretRef:
+          name: seaweedfs-s3-credentials
+      maxUnavailable: 1
+      replicas: 2
+      resources:
+        limits:
+          cpu: 500m
+          memory: 2Gi
+        requests:
+          cpu: 250m
+          memory: 1Gi
+    read:
+      replicas: 0
+    resultsCache:
+      allocatedMemory: 4096
+      defaultValidity: 12h
+      enabled: true
+      replicas: 2
+      resources:
+        limits:
+          cpu: "1"
+          memory: 6Gi
+        requests:
+          cpu: 500m
+          memory: 2Gi
+    ruler:
+      enabled: false
+    singleBinary:
+      replicas: 0
+    test:
+      enabled: false
+    write:
+      replicas: 0
