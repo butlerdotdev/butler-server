@@ -118,6 +118,13 @@ func NewSessionService(secret string, expiry time.Duration) *SessionService {
 	}
 }
 
+// Expiry returns the session JWT lifetime configured at construction time.
+// Used by the CLI device flow handler to compute an absolute expiry to return
+// to the client alongside the freshly issued session JWT.
+func (s *SessionService) Expiry() time.Duration {
+	return s.expiry
+}
+
 // CreateSession creates a new session token for a user.
 func (s *SessionService) CreateSession(user *UserSession) (string, error) {
 	now := time.Now()

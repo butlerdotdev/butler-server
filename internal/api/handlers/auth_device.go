@@ -306,10 +306,20 @@ func (h *DeviceFlowHandler) DeviceRefresh(w http.ResponseWriter, r *http.Request
 }
 
 // cliTokenResponse is the shape returned by both the token and refresh endpoints.
+//
+// The kubeconfig embeds a Kubernetes ServiceAccount token used to talk to the
+// K8s API directly (ADR-002). SessionToken is a butler-server session JWT used
+// when the CLI calls protected butler-server HTTP endpoints (cert rotation,
+// GitOps lifecycle, provider image/network discovery, etc.) that go through
+// SessionMiddleware. The two tokens authenticate the same identity to
+// different APIs; they expire independently. ADR-016 amendment for the
+// rationale.
 type cliTokenResponse struct {
 	User              cliUserResponse `json:"user"`
 	Kubeconfig        string          `json:"kubeconfig"`
 	ExpiresAt         string          `json:"expires_at"`
+	SessionToken      string          `json:"session_token"`
+	SessionExpiresAt  string          `json:"session_expires_at"`
 	RefreshToken      string          `json:"refresh_token"`
 	RefreshExpiresAt  string          `json:"refresh_expires_at"`
 }
@@ -349,6 +359,18 @@ func (h *DeviceFlowHandler) provisionCLIAccess(r *http.Request, session *auth.Us
 		return nil, fmt.Errorf("build kubeconfig: %w", err)
 	}
 
+	// Issue a butler-server session JWT for protected HTTP endpoints
+	// (SessionMiddleware-gated routes the CLI calls beyond the K8s API).
+	// CreateSession canonicalizes session.Email; subsequent reads in this
+	// function get the canonical form. The SA above was provisioned with
+	// the same (already-canonical) email coming from upstream identity
+	// flows (DeviceApprove or refresh-token lookup).
+	sessionToken, err := h.sessionService.CreateSession(session)
+	if err != nil {
+		return nil, fmt.Errorf("create session token: %w", err)
+	}
+	sessionExpiresAt := time.Now().Add(h.sessionService.Expiry())
+
 	// Generate refresh token
 	refreshToken, err := auth.GenerateRefreshToken()
 	if err != nil {
@@ -367,6 +389,8 @@ func (h *DeviceFlowHandler) provisionCLIAccess(r *http.Request, session *auth.Us
 		},
 		Kubeconfig:       base64.StdEncoding.EncodeToString(kubeconfigBytes),
 		ExpiresAt:        expiresAt.Format(time.RFC3339),
+		SessionToken:     sessionToken,
+		SessionExpiresAt: sessionExpiresAt.Format(time.RFC3339),
 		RefreshToken:     refreshToken,
 		RefreshExpiresAt: refreshExpiresAt.Format(time.RFC3339),
 	}, nil
