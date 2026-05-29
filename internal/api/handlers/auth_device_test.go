@@ -114,6 +114,58 @@ func TestDeviceAuthorize_IgnoresForwardedHeadersWithoutTrust(t *testing.T) {
 	}
 }
 
+// TestCLITokenResponse_IncludesSessionTokenFields locks in the contract
+// surface the CLI consumes: the device-flow token response carries a
+// session_token (butler-server JWT for protected HTTP endpoints) and
+// session_expires_at alongside the existing kubeconfig + SA token expiry.
+// The provisionCLIAccess wiring is not unit-tested directly because it
+// depends on a real K8s client to mint SA tokens; that path is exercised
+// by the manual curl + K8s integration check documented in the commit
+// notes. This test guards the JSON shape so the CLI side and the server
+// side cannot silently drift.
+func TestCLITokenResponse_IncludesSessionTokenFields(t *testing.T) {
+	resp := cliTokenResponse{
+		User: cliUserResponse{
+			Email: "alice@example.com",
+			Name:  "Alice",
+		},
+		Kubeconfig:       "base64-kubeconfig",
+		ExpiresAt:        "2026-05-29T00:00:00Z",
+		SessionToken:     "eyJhbGc.test.signature",
+		SessionExpiresAt: "2026-05-29T00:00:00Z",
+		RefreshToken:     "refresh-token-value",
+		RefreshExpiresAt: "2026-06-27T00:00:00Z",
+	}
+
+	body, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	requiredKeys := []string{
+		"user", "kubeconfig", "expires_at",
+		"session_token", "session_expires_at",
+		"refresh_token", "refresh_expires_at",
+	}
+	for _, k := range requiredKeys {
+		if _, ok := decoded[k]; !ok {
+			t.Errorf("response missing required key %q (body=%s)", k, string(body))
+		}
+	}
+
+	if got := decoded["session_token"]; got != "eyJhbGc.test.signature" {
+		t.Errorf("session_token = %v, want round-trip of input", got)
+	}
+	if got := decoded["session_expires_at"]; got != "2026-05-29T00:00:00Z" {
+		t.Errorf("session_expires_at = %v, want round-trip of input", got)
+	}
+}
+
 // TestDeviceAuthorize_ErrorsWhenNoPublicURLDerivable closes the last
 // coverage gap: with config at defaults and an empty Host on the
 // request, the helper returns an empty string and the handler must
