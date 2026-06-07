@@ -381,6 +381,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Group(func(r chi.Router) {
 					r.Use(adminMiddleware)
 					r.Post("/config", gitopsHandler.SaveConfig)
+					r.Delete("/config", gitopsHandler.ClearConfig)
 					r.Post("/preview", gitopsHandler.PreviewManifest)
 				})
 			})

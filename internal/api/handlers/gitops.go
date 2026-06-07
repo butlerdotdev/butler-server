@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -33,8 +34,60 @@ import (
 	"github.com/butlerdotdev/butler-server/internal/gitops"
 	"github.com/butlerdotdev/butler-server/internal/k8s"
 	"github.com/go-chi/chi/v5"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
+
+// Git provider configuration is stored as a ConfigMap plus a credential Secret
+// in the system namespace. These names mirror what SaveConfig writes.
+const (
+	gitOpsConfigMapName = "butler-gitops-config"
+	gitOpsSecretName    = "butler-gitops-credentials"
+)
+
+// gitConfigDeleter is the minimal slice of the k8s client that ClearConfig
+// needs. Defined as an interface so the clear logic can be unit-tested with a
+// fake; the concrete *k8s.Client satisfies it. butler-server's k8s client is
+// not fake-injectable (it holds a concrete *kubernetes.Clientset), so the
+// testable seam is this interface rather than a fake clientset.
+type gitConfigDeleter interface {
+	DeleteConfigMap(ctx context.Context, namespace, name string) error
+	DeleteSecret(ctx context.Context, namespace, name string) error
+}
+
+// clearGitProviderConfig deletes the GitOps ConfigMap and credential Secret.
+// It reports whether anything was actually deleted (false means both were
+// already absent). A NotFound on either resource is treated as "already gone",
+// not an error, so the operation is idempotent at the storage layer.
+//
+// Both deletes are attempted regardless of an intermediate error (best-effort
+// cleanup): a failure deleting the ConfigMap must not strand the credential
+// Secret. Non-NotFound errors are aggregated and returned together. The
+// ConfigMap is deleted first so that a partial failure leaves an inert orphan
+// rather than a ConfigMap pointing at a deleted Secret (which would make
+// GetConfig falsely report a working configuration).
+func clearGitProviderConfig(ctx context.Context, d gitConfigDeleter, namespace string) (bool, error) {
+	deleted := false
+	var errs []error
+
+	if err := d.DeleteConfigMap(ctx, namespace, gitOpsConfigMapName); err != nil {
+		if !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("deleting configmap %s: %w", gitOpsConfigMapName, err))
+		}
+	} else {
+		deleted = true
+	}
+
+	if err := d.DeleteSecret(ctx, namespace, gitOpsSecretName); err != nil {
+		if !apierrors.IsNotFound(err) {
+			errs = append(errs, fmt.Errorf("deleting secret %s: %w", gitOpsSecretName, err))
+		}
+	} else {
+		deleted = true
+	}
+
+	return deleted, errors.Join(errs...)
+}
 
 // GitOpsHandler handles GitOps-related API requests.
 type GitOpsHandler struct {
@@ -180,6 +233,32 @@ func (h *GitOpsHandler) SaveConfig(w http.ResponseWriter, r *http.Request) {
 		Organization: req.Organization,
 		Username:     validation.Username,
 	})
+}
+
+// ClearConfig removes the platform Git provider configuration by deleting the
+// GitOps ConfigMap and credential Secret. Returns 204 when something was
+// deleted, 404 when nothing was configured, and 500 on a Kubernetes API error.
+func (h *GitOpsHandler) ClearConfig(w http.ResponseWriter, r *http.Request) {
+	clearConfigResponse(w, r.Context(), h.k8sClient, h.config.SystemNamespace, h.logger)
+}
+
+// clearConfigResponse runs the clear and writes the HTTP response. Split from
+// the handler method so the status mapping (204/404/500) is unit-testable with
+// a fake gitConfigDeleter, without a fake Kubernetes clientset.
+func clearConfigResponse(w http.ResponseWriter, ctx context.Context, d gitConfigDeleter, namespace string, logger *slog.Logger) {
+	deleted, err := clearGitProviderConfig(ctx, d, namespace)
+	if err != nil {
+		logger.Error("Failed to clear Git provider config", "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to clear Git provider configuration")
+		return
+	}
+	if !deleted {
+		writeError(w, http.StatusNotFound, "no Git provider configured")
+		return
+	}
+
+	logger.Info("Git provider configuration cleared")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ListRepositories lists repositories from the configured provider.
