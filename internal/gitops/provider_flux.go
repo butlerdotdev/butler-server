@@ -186,20 +186,42 @@ func (p *FluxProvider) GenerateBootstrapStructure(cfg BootstrapConfig) (map[stri
 	return files, nil
 }
 
+// fluxControllerNames are the gotk controller Deployments a Flux install
+// creates in flux-system. Their presence is the positive signal that Flux is
+// actually installed; the namespace existing on its own is not (a prior
+// bootstrap or uninstall can leave an empty flux-system namespace behind).
+var fluxControllerNames = map[string]bool{
+	"source-controller":       true,
+	"kustomize-controller":    true,
+	"helm-controller":         true,
+	"notification-controller": true,
+}
+
 // CheckInstalled verifies Flux is installed on the cluster.
 func (p *FluxProvider) CheckInstalled(ctx context.Context, kubeconfig []byte) (*ProviderStatus, error) {
 	clientset, err := createClientset(kubeconfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create clientset: %w", err)
 	}
+	return detectFluxStatus(ctx, clientset)
+}
 
+// detectFluxStatus reports whether Flux is installed and ready in flux-system.
+// It takes a kubernetes.Interface so the detection is unit-testable with a fake
+// clientset.
+//
+// Installed requires at least one recognized Flux controller Deployment to be
+// present: an existing flux-system namespace alone is not proof of an install,
+// and treating it as such reported an empty leftover namespace as healthy.
+// Installed and Ready stay distinct so an installed-but-not-all-ready Flux is
+// Installed=true, Ready=false rather than reported as absent.
+func detectFluxStatus(ctx context.Context, clientset kubernetes.Interface) (*ProviderStatus, error) {
 	status := &ProviderStatus{
 		Installed: false,
 		Ready:     false,
 	}
 
-	_, err = clientset.CoreV1().Namespaces().Get(ctx, "flux-system", metav1.GetOptions{})
-	if err != nil {
+	if _, err := clientset.CoreV1().Namespaces().Get(ctx, "flux-system", metav1.GetOptions{}); err != nil {
 		status.Message = "flux-system namespace not found"
 		return status, nil
 	}
@@ -211,8 +233,13 @@ func (p *FluxProvider) CheckInstalled(ctx context.Context, kubeconfig []byte) (*
 
 	status.Components = make([]ComponentStatus, 0, len(deployments.Items))
 	allReady := true
+	fluxControllers := 0
 
 	for _, deployment := range deployments.Items {
+		if !fluxControllerNames[deployment.Name] {
+			continue
+		}
+		fluxControllers++
 		compStatus := ComponentStatus{
 			Name:  deployment.Name,
 			Ready: deployment.Status.ReadyReplicas > 0,
@@ -224,6 +251,11 @@ func (p *FluxProvider) CheckInstalled(ctx context.Context, kubeconfig []byte) (*
 			allReady = false
 		}
 		status.Components = append(status.Components, compStatus)
+	}
+
+	if fluxControllers == 0 {
+		status.Message = "flux-system namespace exists but no Flux controllers are installed"
+		return status, nil
 	}
 
 	status.Installed = true
