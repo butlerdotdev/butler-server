@@ -186,61 +186,33 @@ func (p *FluxProvider) GenerateBootstrapStructure(cfg BootstrapConfig) (map[stri
 	return files, nil
 }
 
-// CheckInstalled verifies Flux is installed on the cluster.
+// CheckInstalled verifies Flux is installed on the cluster. It delegates to the
+// shared detectFluxEngine so the CLI status verb, the export/preview gate, and
+// the console banner all answer "is Flux installed/ready" from one primitive.
 func (p *FluxProvider) CheckInstalled(ctx context.Context, kubeconfig []byte) (*ProviderStatus, error) {
 	clientset, err := createClientset(kubeconfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create clientset: %w", err)
 	}
 
+	engine, err := detectFluxEngine(ctx, clientset)
+	if err != nil {
+		return nil, err
+	}
+
 	status := &ProviderStatus{
-		Installed: false,
-		Ready:     false,
+		Installed:  engine.Installed,
+		Ready:      engine.Ready,
+		Version:    engine.Version,
+		Components: engine.Components,
 	}
-
-	_, err = clientset.CoreV1().Namespaces().Get(ctx, "flux-system", metav1.GetOptions{})
-	if err != nil {
-		status.Message = "flux-system namespace not found"
-		return status, nil
-	}
-
-	deployments, err := clientset.AppsV1().Deployments("flux-system").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list flux-system deployments: %w", err)
-	}
-
-	status.Components = make([]ComponentStatus, 0, len(deployments.Items))
-	allReady := true
-
-	for _, deployment := range deployments.Items {
-		compStatus := ComponentStatus{
-			Name:  deployment.Name,
-			Ready: deployment.Status.ReadyReplicas > 0,
-		}
-		if compStatus.Ready {
-			compStatus.Message = "ready"
-		} else {
-			compStatus.Message = "not ready"
-			allReady = false
-		}
-		status.Components = append(status.Components, compStatus)
-	}
-
-	status.Installed = true
-	status.Ready = allReady
-
-	if allReady {
+	switch {
+	case !engine.Installed:
+		status.Message = "Flux is not installed (no Flux controllers in flux-system)"
+	case engine.Ready:
 		status.Message = "Flux is installed and healthy"
-	} else {
+	default:
 		status.Message = "Flux is installed but some components are not ready"
-	}
-
-	deployment, err := clientset.AppsV1().Deployments("flux-system").Get(ctx, "source-controller", metav1.GetOptions{})
-	if err == nil && len(deployment.Spec.Template.Spec.Containers) > 0 {
-		image := deployment.Spec.Template.Spec.Containers[0].Image
-		if parts := strings.Split(image, ":"); len(parts) > 1 {
-			status.Version = parts[len(parts)-1]
-		}
 	}
 
 	return status, nil
