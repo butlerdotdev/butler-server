@@ -297,37 +297,22 @@ func detectGitOpsEngine(ctx context.Context, clientset kubernetes.Interface, dyn
 }
 
 func detectFlux(ctx context.Context, clientset kubernetes.Interface, dynClient dynamic.Interface) *GitOpsEngineStatus {
-	deployments, err := clientset.AppsV1().Deployments("flux-system").List(ctx, metav1.ListOptions{})
-	if err != nil || len(deployments.Items) == 0 {
-		return nil
-	}
-
-	var readyComponents []string
-	var version string
-
-	for _, deployment := range deployments.Items {
-		if deployment.Status.ReadyReplicas > 0 {
-			readyComponents = append(readyComponents, deployment.Name)
-
-			if version == "" && len(deployment.Spec.Template.Spec.Containers) > 0 {
-				image := deployment.Spec.Template.Spec.Containers[0].Image
-				if parts := strings.Split(image, ":"); len(parts) > 1 {
-					version = parts[len(parts)-1]
-				}
-			}
-		}
-	}
-
-	if len(readyComponents) < 2 {
+	// Shared detector: Installed = >=1 recognized gotk controller present;
+	// Ready = all present controllers ready. Returning nil only when the engine
+	// is absent keeps the export/preview gate (GitOpsEngine == nil || !Installed)
+	// gating on engine presence, not on readiness -- a partial-but-installed
+	// Flux is exportable because the export path reads API data, not controllers.
+	engine, err := detectFluxEngine(ctx, clientset)
+	if err != nil || !engine.Installed {
 		return nil
 	}
 
 	status := &GitOpsEngineStatus{
 		Provider:   "flux",
 		Installed:  true,
-		Ready:      len(readyComponents) >= 3,
-		Version:    version,
-		Components: readyComponents,
+		Ready:      engine.Ready,
+		Version:    engine.Version,
+		Components: engine.readyComponentNames(),
 	}
 
 	// Populate Repository/Branch/Path from the Flux bootstrap CRs when
