@@ -28,9 +28,16 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// HostnameFromURL extracts the hostname from a URL string.
-// Returns empty string for empty input or the well-known defaults
-// (github.com, gitlab.com) since flux uses those by default.
+// HostnameFromURL extracts the flux-bootstrap hostname from a git provider URL.
+// It returns "" for the public SaaS hosts so flux uses its built-in defaults,
+// and the real hostname only for genuine self-hosted/Enterprise installs.
+//
+// api.github.com is included because the GitHub gitops config URL is set to the
+// API host (to avoid being treated as GitHub Enterprise), but flux bootstrap
+// needs the git host, not the API host -- passing api.github.com as --hostname
+// makes flux build the remote against api.github.com/owner/repo and fail owner
+// lookup. The match is exact equality, so an Enterprise host that merely
+// contains "github" (e.g. github.mycorp.com) is preserved, not collapsed to "".
 func HostnameFromURL(rawURL string) string {
 	if rawURL == "" {
 		return ""
@@ -40,7 +47,10 @@ func HostnameFromURL(rawURL string) string {
 		return ""
 	}
 	host := u.Hostname()
-	if strings.EqualFold(host, "github.com") || strings.EqualFold(host, "gitlab.com") {
+	switch {
+	case strings.EqualFold(host, "github.com"),
+		strings.EqualFold(host, "api.github.com"),
+		strings.EqualFold(host, "gitlab.com"):
 		return ""
 	}
 	return host
