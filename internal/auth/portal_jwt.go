@@ -48,6 +48,10 @@ type PortalUserResolver interface {
 	GetUserByEmail(ctx context.Context, email string) (*UserInfo, error)
 }
 
+// Compile-time assertion that *PortalJWTVerifier satisfies the
+// PortalProofVerifier interface SessionMiddleware depends on.
+var _ PortalProofVerifier = (*PortalJWTVerifier)(nil)
+
 // PortalJWTVerifier verifies portal-issued Ed25519 JWTs and resolves them
 // to a per-request UserSession backed by the User CRD.
 //
@@ -131,8 +135,7 @@ func ParsePortalPublicKeysPEM(pemData string) (map[string]ed25519.PublicKey, err
 
 // fingerprintKid derives a short stable kid from the public key bytes when
 // no kid header is supplied in the PEM block. Hex-encoded first 8 bytes of
-// the raw public key; collision-resistant enough for at most a few rotation
-// generations.
+// the raw public key.
 func fingerprintKid(pk ed25519.PublicKey) string {
 	const hex = "0123456789abcdef"
 	out := make([]byte, 16)

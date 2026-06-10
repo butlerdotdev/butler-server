@@ -420,3 +420,43 @@ func TestSessionMiddleware_AllowHeaderImpersonationFalse_HeaderIgnored(t *testin
 		t.Errorf("downstream saw email=%q want %q (override must NOT fire with flag false)", got, adminMail)
 	}
 }
+
+// stubVerifier returns prescribed (session, claimed, err) shapes to exercise
+// SessionMiddleware's claimed-is-terminal invariant directly. It does not
+// look at the token bytes; the test injects the desired return shape and
+// drives the middleware with arbitrary Bearer content.
+type stubVerifier struct {
+	session *UserSession
+	claimed bool
+	err     error
+}
+
+func (s *stubVerifier) MaybeVerify(_ context.Context, _ string) (*UserSession, bool, error) {
+	return s.session, s.claimed, s.err
+}
+
+func TestSessionMiddleware_ClaimedWithNilSession_RejectsTerminal(t *testing.T) {
+	// Claimed-is-terminal invariant. If a verifier ever returns (nil, true,
+	// nil) the middleware MUST reject rather than fall through to
+	// ValidateSession. The fall-through would give a portal-claimed token a
+	// second chance at HMAC auth, which is the bypass shape this guard
+	// backstops. The body-string assertion is what makes this test non-
+	// vacuous: both the guard path and the ValidateSession path return 401,
+	// but only the guard returns "invalid portal proof".
+	cfg := SessionMiddlewareConfig{
+		SessionService:           NewSessionService("test-secret", time.Hour),
+		PortalVerifier:           &stubVerifier{session: nil, claimed: true, err: nil},
+		AllowHeaderImpersonation: true,
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/clusters", nil)
+	req.Header.Set("Authorization", "Bearer arbitrary-token-bytes")
+	rec := runMiddleware(t, cfg, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status=%d want 401 (claimed without session must be terminal)", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "invalid portal proof") {
+		t.Errorf("body=%q want 'invalid portal proof' response, not the fall-through 'invalid session' from ValidateSession", body)
+	}
+}

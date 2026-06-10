@@ -33,6 +33,17 @@ func UserFromContext(ctx context.Context) *UserSession {
 	return user
 }
 
+// PortalProofVerifier is the minimum interface SessionMiddleware needs from
+// a portal-proof validator. The interface seam exists so the claimed-is-
+// terminal guard inside SessionMiddleware has a testable boundary: a stub
+// verifier returning (nil, true, nil) lets the test assert the middleware
+// rejects rather than falls through, without depending on internal details
+// of any concrete verifier implementation. *PortalJWTVerifier satisfies
+// this interface.
+type PortalProofVerifier interface {
+	MaybeVerify(ctx context.Context, token string) (*UserSession, bool, error)
+}
+
 // SessionMiddlewareConfig holds dependencies for the session middleware.
 type SessionMiddlewareConfig struct {
 	SessionService *SessionService
@@ -45,7 +56,7 @@ type SessionMiddlewareConfig struct {
 	// verification; all other tokens fall through to SessionService.
 	// Stage 1 default: nil (path dormant). Stage 2 onward sets this in
 	// production so portal-mediated requests authenticate via signed proofs.
-	PortalVerifier *PortalJWTVerifier
+	PortalVerifier PortalProofVerifier
 
 	// AllowHeaderImpersonation gates the legacy X-Butler-User-Email override
 	// inside the platform-admin branch. true preserves the pre-Stage-1
@@ -105,6 +116,24 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 					return
 				}
 				if claimed {
+					if portalSess == nil {
+						// Claimed-is-terminal invariant. When MaybeVerify
+						// reports claimed=true the session must be non-nil
+						// OR the perr branch above must have returned.
+						// Honoring claimed=true with a nil session here
+						// would let a portal-claimed token fall through to
+						// ValidateSession and get a second chance at HMAC
+						// auth, which is the bypass shape this guard
+						// backstops. Enforce the invariant at the
+						// middleware boundary so a future refactor of the
+						// verifier internals cannot open that path
+						// silently.
+						if cfg.Logger != nil {
+							cfg.Logger.Warn("Portal proof verifier returned claimed without session")
+						}
+						http.Error(w, `{"error":"invalid portal proof"}`, http.StatusUnauthorized)
+						return
+					}
 					user = portalSess
 				}
 			}
