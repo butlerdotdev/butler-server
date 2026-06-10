@@ -98,6 +98,20 @@ type AuthConfig struct {
 	// Legacy basic auth (deprecated, will be removed)
 	AdminUsername string
 	AdminPassword string
+
+	// PortalPubKey is the PEM-encoded Ed25519 public key(s) used to verify
+	// portal-issued identity proofs. Empty disables the portal-proof path.
+	// Stage 1 default: empty (path dormant). Stage 2 onward sets this in
+	// production so the portal's signed proofs are accepted by SessionMiddleware.
+	// Multiple keys (kid-indexed) may be concatenated for rotation; see
+	// auth.ParsePortalPublicKeysPEM.
+	PortalPubKey string
+
+	// AllowHeaderImpersonation gates the legacy X-Butler-User-Email override
+	// inside the platform-admin branch of SessionMiddleware. true preserves
+	// pre-Stage-1 behavior (the portal proxy's current carrier). Stage 4
+	// flips this to false ahead of the cleanup PR that deletes the block.
+	AllowHeaderImpersonation bool
 }
 
 // OIDCConfig holds OIDC provider configuration.
@@ -152,8 +166,10 @@ func Load() *Config {
 			SessionExpiry: getDurationEnv("BUTLER_SESSION_EXPIRY", 24*time.Hour),
 			SecureCookies: getBoolEnv("BUTLER_SECURE_COOKIES", false),
 			// Legacy - deprecated
-			AdminUsername: getEnv("BUTLER_ADMIN_USERNAME", "admin"),
-			AdminPassword: getEnv("BUTLER_ADMIN_PASSWORD", ""),
+			AdminUsername:            getEnv("BUTLER_ADMIN_USERNAME", "admin"),
+			AdminPassword:            getEnv("BUTLER_ADMIN_PASSWORD", ""),
+			PortalPubKey:             getEnv("BUTLER_PORTAL_PUBKEY", ""),
+			AllowHeaderImpersonation: getBoolEnv("BUTLER_ALLOW_HEADER_IMPERSONATION", true),
 		},
 		OIDC: OIDCConfig{
 			Enabled:                  getBoolEnv("BUTLER_OIDC_ENABLED", false),
@@ -173,7 +189,7 @@ func Load() *Config {
 			RefreshExpiry:    getDurationEnv("BUTLER_CLI_REFRESH_EXPIRY", 7*24*time.Hour),
 			SACleanupTTL:     getDurationEnv("BUTLER_CLI_SA_TTL", 30*24*time.Hour),
 			DeviceCodeExpiry: getDurationEnv("BUTLER_CLI_DEVICE_CODE_EXPIRY", 15*time.Minute),
-			ExternalAPIURL:  getEnv("BUTLER_CLI_EXTERNAL_API_URL", ""),
+			ExternalAPIURL:   getEnv("BUTLER_CLI_EXTERNAL_API_URL", ""),
 		},
 		TenantNamespace: getEnv("BUTLER_TENANT_NAMESPACE", "butler-tenants"),
 		SystemNamespace: getEnv("BUTLER_SYSTEM_NAMESPACE", "butler-system"),

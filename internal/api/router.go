@@ -235,12 +235,34 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 	stewardHandler := handlers.NewStewardHandler(cfg.K8sClient, cfg.Config)
 	auditHandler := handlers.NewAuditHandler(auditEmitter)
 
+	// Portal verifier is constructed only when an Ed25519 public key is
+	// configured. Stage 1 default ships with BUTLER_PORTAL_PUBKEY unset, so
+	// the verifier is nil and SessionMiddleware's portal branch stays
+	// dormant. Stage 2 onward sets the pubkey via the same env var.
+	var portalVerifier *auth.PortalJWTVerifier
+	if pemData := cfg.Config.Auth.PortalPubKey; pemData != "" {
+		keys, err := auth.ParsePortalPublicKeysPEM(pemData)
+		if err != nil {
+			cfg.Logger.Error("BUTLER_PORTAL_PUBKEY parse failed", "error", err)
+		} else {
+			verifier, err := auth.NewPortalJWTVerifier(keys, userService)
+			if err != nil {
+				cfg.Logger.Error("portal verifier construction failed", "error", err)
+			} else {
+				portalVerifier = verifier
+				cfg.Logger.Info("Portal JWT verifier ready", "keys", len(keys))
+			}
+		}
+	}
+
 	// Auth middleware - SECURITY: Now re-validates team membership on every request
 	authMiddleware := auth.SessionMiddleware(auth.SessionMiddlewareConfig{
-		SessionService: sessionService,
-		TeamResolver:   teamResolver,
-		UserService:    userService,
-		Logger:         cfg.Logger.With("component", "auth-middleware"),
+		SessionService:           sessionService,
+		TeamResolver:             teamResolver,
+		UserService:              userService,
+		Logger:                   cfg.Logger.With("component", "auth-middleware"),
+		PortalVerifier:           portalVerifier,
+		AllowHeaderImpersonation: cfg.Config.Auth.AllowHeaderImpersonation,
 	})
 	adminMiddleware := auth.AdminMiddleware()
 
