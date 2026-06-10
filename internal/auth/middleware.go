@@ -39,6 +39,20 @@ type SessionMiddlewareConfig struct {
 	TeamResolver   *TeamResolver
 	UserService    *UserService // Added: for checking disabled status
 	Logger         *slog.Logger
+
+	// PortalVerifier is the Ed25519 portal-proof validator. When non-nil it
+	// routes tokens whose iss claim is PortalJWTIssuer to portal-JWT
+	// verification; all other tokens fall through to SessionService.
+	// Stage 1 default: nil (path dormant). Stage 2 onward sets this in
+	// production so portal-mediated requests authenticate via signed proofs.
+	PortalVerifier *PortalJWTVerifier
+
+	// AllowHeaderImpersonation gates the legacy X-Butler-User-Email override
+	// inside the platform-admin branch. true preserves the pre-Stage-1
+	// behavior (the portal proxy's current carrier). Stage 4 flips this to
+	// false; the impersonation sub-block is removed entirely in the
+	// follow-up cleanup PR after soak.
+	AllowHeaderImpersonation bool
 }
 
 // SessionMiddleware validates the session token and re-resolves team membership on every request.
@@ -69,11 +83,38 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 				return
 			}
 
-			// Validate session
-			user, err := cfg.SessionService.ValidateSession(token)
-			if err != nil {
-				http.Error(w, `{"error":"invalid session"}`, http.StatusUnauthorized)
-				return
+			// Validate session. Route portal-issued Ed25519 proofs (iss=
+			// PortalJWTIssuer) to the portal verifier; every other token
+			// shape (console HMAC sessions, CLI device-flow sessions,
+			// legacy admin sessions) falls through to SessionService
+			// UNCHANGED. The iss-gate inside MaybeVerify is what keeps
+			// non-portal callers byte-identical under this branch.
+			var user *UserSession
+			if cfg.PortalVerifier != nil {
+				portalSess, claimed, perr := cfg.PortalVerifier.MaybeVerify(r.Context(), token)
+				if perr != nil {
+					// Token claimed the portal-proof shape (iss=
+					// PortalJWTIssuer) but failed verification. Reject
+					// the request rather than fall through: handing the
+					// same bytes to SessionService would re-reject under
+					// a misleading reason and obscure the failure.
+					if cfg.Logger != nil {
+						cfg.Logger.Warn("Portal proof rejected", "error", perr)
+					}
+					http.Error(w, `{"error":"invalid portal proof"}`, http.StatusUnauthorized)
+					return
+				}
+				if claimed {
+					user = portalSess
+				}
+			}
+			if user == nil {
+				sess, err := cfg.SessionService.ValidateSession(token)
+				if err != nil {
+					http.Error(w, `{"error":"invalid session"}`, http.StatusUnauthorized)
+					return
+				}
+				user = sess
 			}
 
 			// Read team context from header (sent by frontend when scoped to a team)
@@ -93,14 +134,20 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 				// server can use it as the effective identity (e.g., workspace
 				// ownership, SSH key resolution). Only trust this header for
 				// platform admin sessions to prevent unprivileged impersonation.
-				if impersonateEmail := r.Header.Get("X-Butler-User-Email"); impersonateEmail != "" {
-					if cfg.Logger != nil {
-						cfg.Logger.Debug("Platform admin impersonating user via X-Butler-User-Email",
-							"sessionEmail", user.Email,
-							"effectiveEmail", impersonateEmail,
-						)
+				//
+				// AllowHeaderImpersonation is the Stage 1 back-compat flag:
+				// default true preserves the current behavior; Stage 4 flips
+				// to false ahead of the cleanup PR that deletes this block.
+				if cfg.AllowHeaderImpersonation {
+					if impersonateEmail := r.Header.Get("X-Butler-User-Email"); impersonateEmail != "" {
+						if cfg.Logger != nil {
+							cfg.Logger.Debug("Platform admin impersonating user via X-Butler-User-Email",
+								"sessionEmail", user.Email,
+								"effectiveEmail", impersonateEmail,
+							)
+						}
+						user.Email = impersonateEmail
 					}
-					user.Email = impersonateEmail
 				}
 
 				// Set team context if provided - this enables team-scoped authorization
