@@ -17,8 +17,10 @@ limitations under the License.
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -330,6 +332,61 @@ func TestSessionMiddleware_PortalProofValid_AuthsAsSub(t *testing.T) {
 	}
 	if got := rec.Body.String(); got != portalEmail {
 		t.Errorf("downstream saw email=%q want %q", got, portalEmail)
+	}
+}
+
+func TestSessionMiddleware_PortalProofValid_LogsSuccessAtInfo(t *testing.T) {
+	// Operators need a positive log signal that the proof path is winning in
+	// production, especially before Stage 4 removes the legacy header-trust
+	// fallback. The rejected path already logs at Warn; the success path
+	// should log at Info so the trail is symmetric and visible without
+	// raising the global log level.
+	const portalEmail = "portal-user@example.com"
+	kid, pub, priv := testKeyPair(t)
+	users := &fakeUserResolver{
+		byEmail: map[string]*UserInfo{
+			portalEmail: {
+				Name:         "portal-user",
+				Email:        portalEmail,
+				DisplayName:  "Portal User",
+				PlatformRole: RoleAdmin,
+			},
+		},
+	}
+	verifier, _ := NewPortalJWTVerifier(map[string]ed25519.PublicKey{kid: pub}, users)
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	cfg := SessionMiddlewareConfig{
+		SessionService:           NewSessionService("unused", time.Hour),
+		PortalVerifier:           verifier,
+		AllowHeaderImpersonation: true,
+		Logger:                   logger,
+	}
+
+	proof := signProof(t, priv, kid, func(c *jwt.RegisteredClaims, _ *jwt.Token) {
+		c.Subject = portalEmail
+		c.ID = "jti-portal-mw-log"
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/clusters", nil)
+	req.Header.Set("Authorization", "Bearer "+proof)
+	rec := runMiddleware(t, cfg, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q want 200", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(buf.String(), `"msg":"Portal proof verified"`) {
+		t.Errorf("expected Info log %q in middleware output, got: %s", "Portal proof verified", buf.String())
+	}
+	if !strings.Contains(buf.String(), `"sub":"`+portalEmail+`"`) {
+		t.Errorf("expected sub=%q in success log, got: %s", portalEmail, buf.String())
+	}
+	if !strings.Contains(buf.String(), `"level":"INFO"`) {
+		t.Errorf("expected level=INFO on success log, got: %s", buf.String())
+	}
+	if strings.Contains(buf.String(), `"msg":"Portal proof rejected"`) {
+		t.Errorf("success path must not emit the rejected log, got: %s", buf.String())
 	}
 }
 
