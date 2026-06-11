@@ -134,6 +134,16 @@ func SessionMiddleware(cfg SessionMiddlewareConfig) func(http.Handler) http.Hand
 						http.Error(w, `{"error":"invalid portal proof"}`, http.StatusUnauthorized)
 						return
 					}
+					if cfg.Logger != nil {
+						// Symmetric with the rejected/invariant-fail Warn lines
+						// above. Without this success line, the proof path is
+						// silent at every level and operators cannot confirm
+						// that portal-mediated traffic is taking the proof
+						// branch in production. That confirmation is needed
+						// before Stage 4 removes the legacy header-trust
+						// fallback.
+						cfg.Logger.Info("Portal proof verified", "sub", portalSess.Email)
+					}
 					user = portalSess
 				}
 			}
