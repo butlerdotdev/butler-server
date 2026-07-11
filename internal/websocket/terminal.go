@@ -41,6 +41,16 @@ type TerminalConfig struct {
 	Cluster   string
 	Pod       string
 	Container string
+
+	// ReadOnly drops all client input; the session streams output only.
+	ReadOnly bool
+
+	// Identity of the Butler user the session runs for, used for audit logging.
+	// The session runs under a shared cluster credential, so these fields are the
+	// only attribution of an action to an individual user.
+	UserEmail string
+	Role      string
+	Team      string
 }
 
 // TerminalSession manages a single terminal WebSocket connection.
@@ -155,6 +165,12 @@ func (t *TerminalSession) Run(conn *websocket.Conn) {
 				case "data":
 					data = []byte(msg.Data)
 				}
+			}
+
+			// Read-only sessions honor resize (handled above) but never write
+			// client input to the shell.
+			if t.config.ReadOnly {
+				continue
 			}
 
 			if _, err := t.pty.Write(data); err != nil {

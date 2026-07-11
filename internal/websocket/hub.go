@@ -506,7 +506,18 @@ func (h *Hub) HandleTerminal(w http.ResponseWriter, r *http.Request) {
 	if userSession == nil {
 		return
 	}
-	if !requireTeamAccess(w, r, userSession, namespace, h.log) {
+
+	access, role := resolveTerminalAccess(userSession, namespace)
+	if access == terminalRefused {
+		h.log.Warn("WebSocket upgrade rejected",
+			"path", r.URL.Path,
+			"remote", r.RemoteAddr,
+			"reason", "forbidden",
+			"user", userSession.Email,
+			"team", namespace,
+			"detail", "team access required",
+		)
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
 		return
 	}
 
@@ -522,6 +533,10 @@ func (h *Hub) HandleTerminal(w http.ResponseWriter, r *http.Request) {
 		Cluster:   cluster,
 		Pod:       pod,
 		Container: container,
+		ReadOnly:  access != terminalWrite,
+		UserEmail: userSession.Email,
+		Role:      role,
+		Team:      namespace,
 	})
 
 	termSession.Run(conn)
