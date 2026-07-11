@@ -164,8 +164,20 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			IsPlatformAdmin: session.IsPlatformAdmin,
 			PlatformRole:    session.PlatformRole,
 		}
-		for _, tm := range session.Teams {
-			info.Teams = append(info.Teams, websocket.TeamInfo{Name: tm.Name})
+		// Re-resolve team memberships from Team CRDs rather than trusting the
+		// JWT claims, mirroring SessionMiddleware. This keeps membership and
+		// role current for the terminal authorization gate and for per-client
+		// notification filtering. On resolver error, proceed with no teams:
+		// platform admins still authorize via PlatformRole, team members fail
+		// closed.
+		teams, err := teamResolver.ResolveTeams(r.Context(), session.Email, session.Groups)
+		if err != nil {
+			cfg.Logger.Warn("Failed to re-resolve teams for WebSocket session",
+				"email", session.Email, "error", err)
+			teams = nil
+		}
+		for _, tm := range teams {
+			info.Teams = append(info.Teams, websocket.TeamInfo{Name: tm.Name, Role: tm.Role})
 		}
 		return info, nil
 	})

@@ -105,6 +105,7 @@ type SessionInfo struct {
 // TeamInfo contains team membership data.
 type TeamInfo struct {
 	Name string
+	Role string
 }
 
 // SessionResolverFunc resolves user session from an HTTP request.
