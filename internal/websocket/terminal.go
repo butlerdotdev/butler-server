@@ -222,13 +222,12 @@ func (t *TerminalSession) setupKubeconfig() (string, error) {
 	}
 
 	ctx := context.Background()
-	kubeconfig, err := t.k8sClient.GetClusterKubeconfig(
-		ctx,
-		t.config.Namespace,
-		t.config.Cluster,
-	)
+	kubeconfig, err := t.tenantKubeconfig(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get tenant kubeconfig: %w", err)
+	}
+	if kubeconfig == "" {
+		return "", nil
 	}
 
 	tmpFile, err := os.CreateTemp("", fmt.Sprintf("kubeconfig-%s-*.yaml", t.config.Cluster))
@@ -244,6 +243,21 @@ func (t *TerminalSession) setupKubeconfig() (string, error) {
 	tmpFile.Close()
 
 	return tmpFile.Name(), nil
+}
+
+// tenantKubeconfig selects the credential the tenant terminal shell runs under,
+// keyed on the session's capability. Write-capable sessions get the cluster's
+// admin kubeconfig; read-only sessions get none, since they cannot send input
+// and withholding the credential keeps it out of a session the user cannot drive.
+//
+// This is the single seam for per-role credential scoping. Granting a narrower
+// identity to a role later (for example, a scoped kubeconfig for operators)
+// changes only this function.
+func (t *TerminalSession) tenantKubeconfig(ctx context.Context) (string, error) {
+	if t.config.ReadOnly {
+		return "", nil
+	}
+	return t.k8sClient.GetClusterKubeconfig(ctx, t.config.Namespace, t.config.Cluster)
 }
 
 func (t *TerminalSession) startShell() error {
