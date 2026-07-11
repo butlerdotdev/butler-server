@@ -89,7 +89,24 @@ func (t *TerminalSession) Run(conn *websocket.Conn) {
 	t.conn = conn
 	defer conn.Close()
 
-	t.log.Info("Starting terminal session")
+	// The session runs under a shared cluster credential, so the tenant audit
+	// log cannot attribute actions to an individual user. These open and close
+	// records are the server-side attribution to the Butler user and role.
+	start := time.Now()
+	t.log.Info("terminal session opened",
+		"user", t.config.UserEmail,
+		"role", t.config.Role,
+		"team", t.config.Team,
+		"readOnly", t.config.ReadOnly,
+	)
+	defer func() {
+		t.log.Info("terminal session closed",
+			"user", t.config.UserEmail,
+			"role", t.config.Role,
+			"team", t.config.Team,
+			"durationMs", time.Since(start).Milliseconds(),
+		)
+	}()
 
 	kubeconfigPath, err := t.setupKubeconfig()
 	if err != nil {
@@ -198,7 +215,6 @@ func (t *TerminalSession) Run(conn *websocket.Conn) {
 	}()
 
 	<-done
-	t.log.Info("Terminal session ended")
 }
 
 func (t *TerminalSession) setupKubeconfig() (string, error) {

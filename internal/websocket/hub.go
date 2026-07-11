@@ -566,6 +566,9 @@ func (h *Hub) HandleManagementTerminal(w http.ResponseWriter, r *http.Request) {
 		Type:      "management",
 		Namespace: "",
 		Cluster:   "management",
+		UserEmail: userSession.Email,
+		Role:      "platform-admin",
+		Team:      "management",
 	})
 
 	termSession.Run(conn)
