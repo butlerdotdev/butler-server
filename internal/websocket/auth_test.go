@@ -124,53 +124,6 @@ func TestRequirePlatformAdmin_Admin_Pass(t *testing.T) {
 	}
 }
 
-func TestRequireTeamAccess_PlatformAdminBypasses(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/tenant/acme/c1", nil)
-	ok := requireTeamAccess(rec, req, &SessionInfo{PlatformRole: "admin"}, "acme", newTestLogger())
-	if !ok {
-		t.Fatal("platform admin should bypass team check")
-	}
-}
-
-func TestRequireTeamAccess_MemberPass(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/tenant/acme/c1", nil)
-	session := &SessionInfo{Teams: []TeamInfo{{Name: "acme"}, {Name: "other"}}}
-	ok := requireTeamAccess(rec, req, session, "acme", newTestLogger())
-	if !ok {
-		t.Fatal("team member should pass")
-	}
-}
-
-func TestRequireTeamAccess_NonMember_403(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/tenant/acme/c1", nil)
-	session := &SessionInfo{Teams: []TeamInfo{{Name: "other"}}}
-	ok := requireTeamAccess(rec, req, session, "acme", newTestLogger())
-	if ok {
-		t.Fatal("non-team-member should be rejected")
-	}
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", rec.Code)
-	}
-}
-
-func TestRequireTeamAccess_EmptyTeams_403(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/tenant/acme/c1", nil)
-	session := &SessionInfo{Teams: nil}
-	ok := requireTeamAccess(rec, req, session, "acme", newTestLogger())
-	if ok {
-		t.Fatal("session with no teams should be rejected on team endpoints")
-	}
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("status = %d, want 403", rec.Code)
-	}
-}
-
-// Platform viewer tests for WebSocket auth gates.
-
 func TestRequirePlatformAdmin_Viewer_403(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/management", nil)
@@ -183,23 +136,113 @@ func TestRequirePlatformAdmin_Viewer_403(t *testing.T) {
 	}
 }
 
-func TestRequireTeamAccess_ViewerBypasses(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/tenant/acme/c1", nil)
-	session := &SessionInfo{PlatformRole: "viewer", Email: "viewer@co.com"}
-	ok := requireTeamAccess(rec, req, session, "acme", newTestLogger())
-	if !ok {
-		t.Fatal("platform viewer should bypass team access check")
+// resolveTerminalAccess is the tenant terminal authorization gate. It is
+// allowlist-write: a permissive default on this path is a tenant cluster-admin
+// shell, so every case that is not an explicit write-capable match must resolve
+// to read-only or refused. The unknown/empty/nil rows below pin that.
+func TestResolveTerminalAccess(t *testing.T) {
+	cases := []struct {
+		name       string
+		session    *SessionInfo
+		team       string
+		wantAccess terminalAccess
+		wantRole   string
+	}{
+		{
+			name:       "platform admin writes",
+			session:    &SessionInfo{PlatformRole: "admin", Email: "a@co.com"},
+			team:       "acme",
+			wantAccess: terminalWrite,
+			wantRole:   "platform-admin",
+		},
+		{
+			name:       "team admin writes",
+			session:    &SessionInfo{Teams: []TeamInfo{{Name: "acme", Role: "admin"}}},
+			team:       "acme",
+			wantAccess: terminalWrite,
+			wantRole:   "admin",
+		},
+		{
+			name:       "operator writes",
+			session:    &SessionInfo{Teams: []TeamInfo{{Name: "acme", Role: "operator"}}},
+			team:       "acme",
+			wantAccess: terminalWrite,
+			wantRole:   "operator",
+		},
+		{
+			name:       "team viewer read-only",
+			session:    &SessionInfo{Teams: []TeamInfo{{Name: "acme", Role: "viewer"}}},
+			team:       "acme",
+			wantAccess: terminalReadOnly,
+			wantRole:   "viewer",
+		},
+		{
+			name:       "platform viewer non-member read-only",
+			session:    &SessionInfo{PlatformRole: "viewer", Email: "v@co.com"},
+			team:       "acme",
+			wantAccess: terminalReadOnly,
+			wantRole:   "platform-viewer",
+		},
+		{
+			name:       "non-member refused",
+			session:    &SessionInfo{Teams: []TeamInfo{{Name: "other", Role: "admin"}}},
+			team:       "acme",
+			wantAccess: terminalRefused,
+			wantRole:   "",
+		},
+		{
+			name:       "unknown role on membership is not write",
+			session:    &SessionInfo{Teams: []TeamInfo{{Name: "acme", Role: "superuser"}}},
+			team:       "acme",
+			wantAccess: terminalReadOnly,
+			wantRole:   "superuser",
+		},
+		{
+			name:       "empty role on membership is not write",
+			session:    &SessionInfo{Teams: []TeamInfo{{Name: "acme", Role: ""}}},
+			team:       "acme",
+			wantAccess: terminalReadOnly,
+			wantRole:   "",
+		},
+		{
+			name:       "nil session refused",
+			session:    nil,
+			team:       "acme",
+			wantAccess: terminalRefused,
+			wantRole:   "",
+		},
+		{
+			name:       "nil teams non-platform refused",
+			session:    &SessionInfo{Teams: nil},
+			team:       "acme",
+			wantAccess: terminalRefused,
+			wantRole:   "",
+		},
+		{
+			name:       "empty team argument refused",
+			session:    &SessionInfo{Teams: []TeamInfo{{Name: "acme", Role: "admin"}}},
+			team:       "",
+			wantAccess: terminalRefused,
+			wantRole:   "",
+		},
+		{
+			name:       "cross-team operator refused for other team",
+			session:    &SessionInfo{Teams: []TeamInfo{{Name: "team-a", Role: "operator"}}},
+			team:       "team-b",
+			wantAccess: terminalRefused,
+			wantRole:   "",
+		},
 	}
-}
-
-func TestRequireTeamAccess_ViewerBypassesWithNoTeams(t *testing.T) {
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/tenant/acme/c1", nil)
-	session := &SessionInfo{PlatformRole: "viewer", Email: "viewer@co.com", Teams: nil}
-	ok := requireTeamAccess(rec, req, session, "acme", newTestLogger())
-	if !ok {
-		t.Fatal("platform viewer with empty teams list should still bypass team access check")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotAccess, gotRole := resolveTerminalAccess(tc.session, tc.team)
+			if gotAccess != tc.wantAccess {
+				t.Errorf("access = %d, want %d", gotAccess, tc.wantAccess)
+			}
+			if gotRole != tc.wantRole {
+				t.Errorf("role = %q, want %q", gotRole, tc.wantRole)
+			}
+		})
 	}
 }
 
@@ -243,19 +286,5 @@ func TestRequirePlatformAdmin_NonAdmin_LogsEmail(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), `reason=forbidden`) {
 		t.Errorf("expected reason=forbidden in log, got: %s", buf.String())
-	}
-}
-
-func TestRequireTeamAccess_NonMember_LogsEmailAndTeam(t *testing.T) {
-	var buf bytes.Buffer
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/ws/terminal/tenant/acme/c1", nil)
-	session := &SessionInfo{Email: "carol@example.com", Teams: []TeamInfo{{Name: "other"}}}
-	requireTeamAccess(rec, req, session, "acme", captureLogger(&buf))
-	if !strings.Contains(buf.String(), `user=carol@example.com`) {
-		t.Errorf("expected user=carol@example.com in log, got: %s", buf.String())
-	}
-	if !strings.Contains(buf.String(), `team=acme`) {
-		t.Errorf("expected team=acme in log, got: %s", buf.String())
 	}
 }

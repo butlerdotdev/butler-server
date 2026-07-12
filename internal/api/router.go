@@ -155,19 +155,11 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 		if token == "" {
 			return nil, http.ErrNoCookie
 		}
-		session, err := sessionService.ValidateSession(token)
-		if err != nil {
-			return nil, err
-		}
-		info := &websocket.SessionInfo{
-			Email:           session.Email,
-			IsPlatformAdmin: session.IsPlatformAdmin,
-			PlatformRole:    session.PlatformRole,
-		}
-		for _, tm := range session.Teams {
-			info.Teams = append(info.Teams, websocket.TeamInfo{Name: tm.Name})
-		}
-		return info, nil
+		// resolveWSSession re-resolves team memberships and roles from Team CRDs
+		// rather than trusting the JWT claims, mirroring SessionMiddleware. This
+		// keeps membership and role current for the terminal authorization gate
+		// and for per-client notification filtering.
+		return resolveWSSession(r.Context(), token, sessionService, teamResolver, cfg.Logger)
 	})
 
 	// Initialize device flow for CLI authentication

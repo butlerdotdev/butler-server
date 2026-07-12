@@ -41,6 +41,16 @@ type TerminalConfig struct {
 	Cluster   string
 	Pod       string
 	Container string
+
+	// ReadOnly drops all client input; the session streams output only.
+	ReadOnly bool
+
+	// Identity of the Butler user the session runs for, used for audit logging.
+	// The session runs under a shared cluster credential, so these fields are the
+	// only attribution of an action to an individual user.
+	UserEmail string
+	Role      string
+	Team      string
 }
 
 // TerminalSession manages a single terminal WebSocket connection.
@@ -79,7 +89,24 @@ func (t *TerminalSession) Run(conn *websocket.Conn) {
 	t.conn = conn
 	defer conn.Close()
 
-	t.log.Info("Starting terminal session")
+	// The session runs under a shared cluster credential, so the tenant audit
+	// log cannot attribute actions to an individual user. These open and close
+	// records are the server-side attribution to the Butler user and role.
+	start := time.Now()
+	t.log.Info("terminal session opened",
+		"user", t.config.UserEmail,
+		"role", t.config.Role,
+		"team", t.config.Team,
+		"readOnly", t.config.ReadOnly,
+	)
+	defer func() {
+		t.log.Info("terminal session closed",
+			"user", t.config.UserEmail,
+			"role", t.config.Role,
+			"team", t.config.Team,
+			"durationMs", time.Since(start).Milliseconds(),
+		)
+	}()
 
 	kubeconfigPath, err := t.setupKubeconfig()
 	if err != nil {
@@ -157,6 +184,12 @@ func (t *TerminalSession) Run(conn *websocket.Conn) {
 				}
 			}
 
+			// Read-only sessions honor resize (handled above) but never write
+			// client input to the shell.
+			if t.config.ReadOnly {
+				continue
+			}
+
 			if _, err := t.pty.Write(data); err != nil {
 				t.log.Debug("PTY write error", "error", err)
 				return
@@ -182,7 +215,6 @@ func (t *TerminalSession) Run(conn *websocket.Conn) {
 	}()
 
 	<-done
-	t.log.Info("Terminal session ended")
 }
 
 func (t *TerminalSession) setupKubeconfig() (string, error) {
@@ -206,13 +238,12 @@ func (t *TerminalSession) setupKubeconfig() (string, error) {
 	}
 
 	ctx := context.Background()
-	kubeconfig, err := t.k8sClient.GetClusterKubeconfig(
-		ctx,
-		t.config.Namespace,
-		t.config.Cluster,
-	)
+	kubeconfig, err := t.tenantKubeconfig(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get tenant kubeconfig: %w", err)
+	}
+	if kubeconfig == "" {
+		return "", nil
 	}
 
 	tmpFile, err := os.CreateTemp("", fmt.Sprintf("kubeconfig-%s-*.yaml", t.config.Cluster))
@@ -228,6 +259,21 @@ func (t *TerminalSession) setupKubeconfig() (string, error) {
 	tmpFile.Close()
 
 	return tmpFile.Name(), nil
+}
+
+// tenantKubeconfig selects the credential the tenant terminal shell runs under,
+// keyed on the session's capability. Write-capable sessions get the cluster's
+// admin kubeconfig; read-only sessions get none, since they cannot send input
+// and withholding the credential keeps it out of a session the user cannot drive.
+//
+// This is the single seam for per-role credential scoping. Granting a narrower
+// identity to a role later (for example, a scoped kubeconfig for operators)
+// changes only this function.
+func (t *TerminalSession) tenantKubeconfig(ctx context.Context) (string, error) {
+	if t.config.ReadOnly {
+		return "", nil
+	}
+	return t.k8sClient.GetClusterKubeconfig(ctx, t.config.Namespace, t.config.Cluster)
 }
 
 func (t *TerminalSession) startShell() error {

@@ -75,29 +75,62 @@ func requirePlatformAdmin(w http.ResponseWriter, r *http.Request, session *Sessi
 	return false
 }
 
-// requireTeamAccess gates the caller on membership of the given team.
-// Platform admins bypass the team check. Returns true when the caller has
-// access; otherwise writes HTTP 403 and returns false. Matching is by
-// exact team name. The caller passes the team name from the request (URL
-// path param on tenant-terminal endpoints), which in butler-server's
-// model equals the team namespace that the controller reconciles.
-func requireTeamAccess(w http.ResponseWriter, r *http.Request, session *SessionInfo, team string, log *slog.Logger) bool {
-	if session.PlatformRole == "admin" || session.PlatformRole == "viewer" {
-		return true
+// terminalAccess is the authorization outcome for a tenant terminal request.
+type terminalAccess int
+
+const (
+	// terminalRefused denies the connection before upgrade.
+	terminalRefused terminalAccess = iota
+	// terminalReadOnly permits the connection to stream shell output but
+	// drops all client input.
+	terminalReadOnly
+	// terminalWrite permits a fully interactive shell.
+	terminalWrite
+)
+
+// Butler role names. This package matches roles as bare strings rather than
+// importing the auth package's constants, keeping this authorization path
+// self-contained by choice. These values mirror auth.Role* and are the stable
+// Team CRD and JWT wire contract.
+const (
+	roleAdmin    = "admin"
+	roleOperator = "operator"
+	roleViewer   = "viewer"
+)
+
+// resolveTerminalAccess decides whether a session may open a tenant terminal for
+// the given team and at what capability, and returns a role label for audit logs.
+// The team argument is the cluster's namespace, which in butler-server's model
+// equals the owning team name.
+//
+// It is allowlist-write: terminalWrite is returned only for an explicit
+// write-capable match (platform admin, or a team admin or operator membership).
+// Every other case, including a membership carrying an unknown or empty role,
+// falls through to read-only or refused, never write. The failure mode of a
+// permissive default on this path is a tenant cluster-admin shell, so the
+// default is deny.
+func resolveTerminalAccess(session *SessionInfo, team string) (terminalAccess, string) {
+	if session == nil {
+		return terminalRefused, ""
+	}
+	if session.PlatformRole == roleAdmin {
+		return terminalWrite, "platform-admin"
 	}
 	for _, tm := range session.Teams {
-		if tm.Name == team {
-			return true
+		if tm.Name != team {
+			continue
+		}
+		switch tm.Role {
+		case roleAdmin, roleOperator:
+			return terminalWrite, tm.Role
+		default:
+			// A real membership carrying viewer, an unrecognized role, or an
+			// empty role is never write-capable; the most it grants is read-only.
+			return terminalReadOnly, tm.Role
 		}
 	}
-	log.Warn("WebSocket upgrade rejected",
-		"path", r.URL.Path,
-		"remote", r.RemoteAddr,
-		"reason", "forbidden",
-		"user", session.Email,
-		"team", team,
-		"detail", "team access required",
-	)
-	http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
-	return false
+	if session.PlatformRole == roleViewer {
+		return terminalReadOnly, "platform-viewer"
+	}
+	return terminalRefused, ""
 }
