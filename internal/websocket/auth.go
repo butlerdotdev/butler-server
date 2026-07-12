@@ -88,8 +88,10 @@ const (
 	terminalWrite
 )
 
-// Butler role names, kept local to the websocket package so the upgrade path
-// does not depend on the auth package. These mirror auth.Role* constants.
+// Butler role names. This package matches roles as bare strings rather than
+// importing the auth package's constants, keeping this authorization path
+// self-contained by choice. These values mirror auth.Role* and are the stable
+// Team CRD and JWT wire contract.
 const (
 	roleAdmin    = "admin"
 	roleOperator = "operator"
