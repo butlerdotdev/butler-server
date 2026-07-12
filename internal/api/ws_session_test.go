@@ -38,9 +38,14 @@ func (f fakeValidator) ValidateSession(string) (*auth.UserSession, error) {
 type fakeResolver struct {
 	teams []auth.TeamMembership
 	err   error
+
+	gotEmail  string
+	gotGroups []string
 }
 
-func (f fakeResolver) ResolveTeams(context.Context, string, []string) ([]auth.TeamMembership, error) {
+func (f *fakeResolver) ResolveTeams(_ context.Context, email string, groups []string) ([]auth.TeamMembership, error) {
+	f.gotEmail = email
+	f.gotGroups = groups
 	return f.teams, f.err
 }
 
@@ -52,14 +57,17 @@ func discardLogger() *slog.Logger {
 // resolver copies name and role from the resolved membership onto SessionInfo,
 // so the extracted function survives a refactor of the router closure.
 func TestResolveWSSession_PopulatesRolesFromResolver(t *testing.T) {
-	v := fakeValidator{session: &auth.UserSession{Email: "op@co.com"}}
-	r := fakeResolver{teams: []auth.TeamMembership{
+	v := fakeValidator{session: &auth.UserSession{Email: "op@co.com", Groups: []string{"eng"}}}
+	r := &fakeResolver{teams: []auth.TeamMembership{
 		{Name: "team-a", Role: "operator"},
 		{Name: "team-b", Role: "viewer"},
 	}}
 	info, err := resolveWSSession(context.Background(), "tok", v, r, discardLogger())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if r.gotEmail != "op@co.com" || len(r.gotGroups) != 1 || r.gotGroups[0] != "eng" {
+		t.Errorf("resolver got (%q, %v), want (op@co.com, [eng])", r.gotEmail, r.gotGroups)
 	}
 	if len(info.Teams) != 2 {
 		t.Fatalf("teams = %d, want 2", len(info.Teams))
@@ -74,7 +82,7 @@ func TestResolveWSSession_PopulatesRolesFromResolver(t *testing.T) {
 
 func TestResolveWSSession_ValidateError_Propagates(t *testing.T) {
 	v := fakeValidator{err: errors.New("bad token")}
-	_, err := resolveWSSession(context.Background(), "tok", v, fakeResolver{}, discardLogger())
+	_, err := resolveWSSession(context.Background(), "tok", v, &fakeResolver{}, discardLogger())
 	if err == nil {
 		t.Fatal("expected the validate error to propagate")
 	}
@@ -85,7 +93,7 @@ func TestResolveWSSession_ValidateError_Propagates(t *testing.T) {
 // so platform admins can still authorize via PlatformRole.
 func TestResolveWSSession_ResolveError_FailsClosedNoTeams(t *testing.T) {
 	v := fakeValidator{session: &auth.UserSession{Email: "op@co.com"}}
-	r := fakeResolver{err: errors.New("apiserver unavailable")}
+	r := &fakeResolver{err: errors.New("apiserver unavailable")}
 	info, err := resolveWSSession(context.Background(), "tok", v, r, discardLogger())
 	if err != nil {
 		t.Fatalf("resolver error must not fail the session build: %v", err)
