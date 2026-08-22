@@ -36,11 +36,11 @@ func NewAuditHandler(emitter *audit.Emitter) *AuditHandler {
 	return &AuditHandler{emitter: emitter}
 }
 
-// ListAll returns audit entries across all teams. Platform admin only.
+// ListAll returns audit entries across all teams. Platform viewer or above.
 func (h *AuditHandler) ListAll(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
-	if user == nil || !user.IsPlatformAdmin {
-		writeError(w, http.StatusForbidden, "platform admin access required")
+	if user == nil || !user.IsPlatformViewerOrAbove() {
+		writeError(w, http.StatusForbidden, "platform viewer or admin access required")
 		return
 	}
 
