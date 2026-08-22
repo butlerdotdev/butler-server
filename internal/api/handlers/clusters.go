@@ -127,6 +127,33 @@ func (h *ClusterHandler) checkOperatePermission(user *auth.UserSession, teamRef 
 	return nil
 }
 
+// checkKubeconfigAccess decides whether a user may download a cluster's
+// admin kubeconfig. Membership alone is not enough: the credential is
+// write access to the tenant, so the caller needs an operate-capable
+// role (admin or operator) on the cluster's team, the same bar as
+// scale, edit and delete. Platform admins always pass; platform
+// viewers pass only through an explicit team grant. With a team (and
+// optionally an environment) selected, the ADR-009 effective role is
+// used because SessionMiddleware already confirmed membership.
+func checkKubeconfigAccess(user *auth.UserSession, clusterTeam string) error {
+	if user.PlatformRole == auth.RoleAdmin {
+		return nil
+	}
+	if user.SelectedTeam != "" {
+		if user.CanOperateInSelectedEnvironment() {
+			return nil
+		}
+		return fmt.Errorf("operator or admin role on team '%s' required to download kubeconfigs", user.SelectedTeam)
+	}
+	if clusterTeam == "" {
+		return fmt.Errorf("platform admin required to download kubeconfigs of team-less clusters")
+	}
+	if !user.CanOperateTeam(clusterTeam) {
+		return fmt.Errorf("operator or admin role on team '%s' required to download kubeconfigs", clusterTeam)
+	}
+	return nil
+}
+
 // List returns all tenant clusters.
 // Query params:
 //   - namespace: filter by namespace
@@ -952,9 +979,16 @@ func (h *ClusterHandler) GetKubeconfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SECURITY: Check team access before returning kubeconfig
+	// The kubeconfig is a cluster-admin credential. Membership alone is
+	// not enough: the caller must hold an operate-capable role on the
+	// cluster's team, the same bar as scale, edit and delete.
 	if user != nil {
 		if err := h.checkClusterAccess(user, cluster); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		clusterTeam, _, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+		if err := checkKubeconfigAccess(user, clusterTeam); err != nil {
 			writeError(w, http.StatusForbidden, err.Error())
 			return
 		}
