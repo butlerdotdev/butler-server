@@ -300,13 +300,8 @@ func (h *CertificateHandler) GetCertificatesByCategory(w http.ResponseWriter, r 
 
 // checkClusterAccess verifies the user has access to a cluster based on its teamRef.
 func (h *CertificateHandler) checkClusterAccess(user *auth.UserSession, cluster *unstructured.Unstructured) error {
-	// Platform admins can access all clusters
-	if user.IsPlatformAdmin {
-		return nil
-	}
-
-	// Admins can access all clusters
-	if user.IsAdmin() {
+	// Platform roles can read certificates of all clusters
+	if user.IsPlatformViewerOrAbove() {
 		return nil
 	}
 
@@ -329,12 +324,7 @@ func (h *CertificateHandler) checkClusterAccess(user *auth.UserSession, cluster 
 // canRotateCertificates checks if the user has operator role for the cluster's team.
 func (h *CertificateHandler) canRotateCertificates(user *auth.UserSession, cluster *unstructured.Unstructured) bool {
 	// Platform admins can rotate any certificates
-	if user.IsPlatformAdmin {
-		return true
-	}
-
-	// Admins can rotate any certificates
-	if user.IsAdmin() {
+	if user.PlatformRole == auth.RoleAdmin {
 		return true
 	}
 
@@ -350,7 +340,7 @@ func (h *CertificateHandler) canRotateCertificates(user *auth.UserSession, clust
 // canRotateCA checks if the user has admin role for CA rotation.
 func (h *CertificateHandler) canRotateCA(user *auth.UserSession, cluster *unstructured.Unstructured) bool {
 	// Platform admins can rotate CA
-	if user.IsPlatformAdmin {
+	if user.PlatformRole == auth.RoleAdmin {
 		return true
 	}
 
