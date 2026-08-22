@@ -28,6 +28,7 @@ import (
 	"github.com/butlerdotdev/butler-server/internal/k8s"
 
 	"github.com/go-chi/chi/v5"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -560,6 +561,11 @@ func (h *TeamHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			writeError(w, http.StatusNotFound, "Team not found")
+			return
+		}
+		if apierrors.IsForbidden(err) {
+			h.logger.Warn("Team delete forbidden by apiserver", "name", name, "user", user.Email, "error", err)
+			writeError(w, http.StatusForbidden, "Forbidden: the platform does not allow this identity to delete teams")
 			return
 		}
 		h.logger.Error("Failed to delete team", "name", name, "error", err)
