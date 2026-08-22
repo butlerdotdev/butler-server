@@ -19,6 +19,7 @@ package handlers
 import (
 	"net/http"
 
+	"github.com/butlerdotdev/butler-server/internal/auth"
 	"github.com/butlerdotdev/butler-server/internal/config"
 	"github.com/butlerdotdev/butler-server/internal/k8s"
 	"github.com/go-chi/chi/v5"
@@ -80,6 +81,13 @@ func (h *StewardHandler) GetClusterTenantControlPlane(w http.ResponseWriter, r *
 	if err != nil {
 		writeError(w, http.StatusNotFound, "TenantCluster not found")
 		return
+	}
+
+	if user := auth.UserFromContext(r.Context()); user != nil {
+		if err := checkClusterVisibility(user, tc); err != nil {
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
 	}
 
 	tenantNS, _, _ := unstructured.NestedString(tc.Object, "status", "tenantNamespace")

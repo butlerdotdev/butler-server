@@ -61,6 +61,12 @@ type ClusterListResponse struct {
 // Returns nil if access is granted, or an error message if denied.
 // When team context is set, only allows access to clusters in that team.
 func (h *ClusterHandler) checkClusterAccess(user *auth.UserSession, cluster *unstructured.Unstructured) error {
+	return checkClusterVisibility(user, cluster)
+}
+
+// checkClusterVisibility is the cluster read rule shared by every
+// handler that serves data derived from a TenantCluster.
+func checkClusterVisibility(user *auth.UserSession, cluster *unstructured.Unstructured) error {
 	// Get the cluster's team reference
 	clusterTeam, found, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
 
