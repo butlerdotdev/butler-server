@@ -457,6 +457,23 @@ func (s *UserService) ValidateInviteToken(ctx context.Context, token string) (*U
 	return nil, ErrInvalidInviteToken
 }
 
+// activeUserStatus is the status written once a user has set a password.
+// Replacing the whole status map drops inviteTokenHash and
+// inviteExpiresAt, which clears the invite. inviteExpiresAt has format
+// date-time in the CRD, so it must be absent rather than an empty string
+// or the apiserver rejects the status update.
+func activeUserStatus(secretName, secretNamespace string, now metav1.Time) map[string]interface{} {
+	return map[string]interface{}{
+		"phase": "Active",
+		"passwordSecretRef": map[string]interface{}{
+			"name":      secretName,
+			"namespace": secretNamespace,
+			"key":       "password",
+		},
+		"passwordChangedAt": now.Format(time.RFC3339),
+	}
+}
+
 // SetPassword sets the password for an internal user.
 func (s *UserService) SetPassword(ctx context.Context, token, password string) (*UserInfo, error) {
 	// Validate token first
@@ -524,20 +541,7 @@ func (s *UserService) SetPassword(ctx context.Context, token, password string) (
 	}
 
 	// Update user status
-	now := metav1.Now()
-	status := map[string]interface{}{
-		"phase": "Active",
-		"passwordSecretRef": map[string]interface{}{
-			"name":      secret.Name,
-			"namespace": secret.Namespace,
-			"key":       "password",
-		},
-		"passwordChangedAt": now.Format(time.RFC3339),
-		// Clear invite token
-		"inviteTokenHash": "",
-		"inviteExpiresAt": "",
-	}
-
+	status := activeUserStatus(secret.Name, secret.Namespace, metav1.Now())
 	if err := unstructured.SetNestedMap(targetUser.Object, status, "status"); err != nil {
 		return nil, fmt.Errorf("failed to set status: %w", err)
 	}
