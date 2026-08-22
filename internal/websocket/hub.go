@@ -60,6 +60,12 @@ const (
 type Message struct {
 	Type    MessageType `json:"type"`
 	Payload interface{} `json:"payload,omitempty"`
+
+	// team is the owning team of a cluster_update or cluster_delete
+	// message, used to route the message to clients that may see it.
+	// Empty for team-less clusters and for message types that are
+	// routed by other means (notifications carry their own ResourceRef).
+	team string
 }
 
 // ClusterUpdatePayload is sent when a cluster is created or updated.
@@ -71,6 +77,7 @@ type ClusterUpdatePayload struct {
 type ClusterDeletePayload struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
+	Team      string `json:"team,omitempty"`
 }
 
 // NotificationPayload is sent for real-time notifications.
@@ -134,6 +141,10 @@ type Client struct {
 	send            chan Message
 	teams           []string
 	isPlatformAdmin bool
+	// seesAllClusters is true for platform admins and platform viewers;
+	// both may read every TenantCluster through the REST API, so they
+	// receive every cluster_update and cluster_delete too.
+	seesAllClusters bool
 }
 
 // NewHub creates a new WebSocket hub.
@@ -183,6 +194,9 @@ func (h *Hub) Run() {
 		case message := <-h.broadcast:
 			h.mu.RLock()
 			for client := range h.clients {
+				if !clientCanReceiveCluster(client, message) {
+					continue
+				}
 				select {
 				case client.send <- message:
 				default:
@@ -250,6 +264,30 @@ func (h *Hub) sendNotificationWebhook(n NotificationPayload) {
 	}
 }
 
+// clientCanReceiveCluster decides whether a cluster_update or
+// cluster_delete message may be delivered to a client. It mirrors the
+// REST visibility rule in ClusterHandler.checkClusterAccess: platform
+// admins and viewers see every cluster, members see their own teams'
+// clusters, and team-less clusters are visible only to platform roles.
+// Other message types pass through unchanged.
+func clientCanReceiveCluster(c *Client, m Message) bool {
+	if m.Type != MessageTypeClusterUpdate && m.Type != MessageTypeClusterDelete {
+		return true
+	}
+	if c.seesAllClusters {
+		return true
+	}
+	if m.team == "" {
+		return false
+	}
+	for _, team := range c.teams {
+		if team == m.team {
+			return true
+		}
+	}
+	return false
+}
+
 func clientCanReceive(c *Client, n NotificationPayload) bool {
 	if c.isPlatformAdmin {
 		return true
@@ -287,6 +325,7 @@ func (h *Hub) watchClusters() {
 				h.broadcast <- Message{
 					Type:    MessageTypeClusterUpdate,
 					Payload: ClusterUpdatePayload{Cluster: event.Object},
+					team:    clusterTeam(event.Object),
 				}
 
 				// Detect phase transitions and emit notifications
@@ -311,12 +350,15 @@ func (h *Hub) watchClusters() {
 					// Clean up phase tracking
 					delete(previousPhases, obj.GetNamespace()+"/"+obj.GetName())
 
+					team := clusterTeam(event.Object)
 					h.broadcast <- Message{
 						Type: MessageTypeClusterDelete,
 						Payload: ClusterDeletePayload{
 							Name:      obj.GetName(),
 							Namespace: obj.GetNamespace(),
+							Team:      team,
 						},
+						team: team,
 					}
 
 					h.BroadcastNotification(NotificationPayload{
@@ -340,6 +382,18 @@ func (h *Hub) watchClusters() {
 		h.log.Info("TenantCluster watch ended, restarting")
 		time.Sleep(time.Second)
 	}
+}
+
+// clusterTeam returns spec.teamRef.name of a watched TenantCluster, or
+// an empty string when the object is not an unstructured cluster or
+// has no team reference.
+func clusterTeam(obj interface{}) string {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return ""
+	}
+	team, _, _ := unstructured.NestedString(u.Object, "spec", "teamRef", "name")
+	return team
 }
 
 func (h *Hub) clusterPhaseNotification(obj *unstructured.Unstructured, oldPhase, newPhase string) *NotificationPayload {
@@ -416,6 +470,7 @@ func (h *Hub) HandleClusterWatch(w http.ResponseWriter, r *http.Request) {
 		send:            make(chan Message, 256),
 		teams:           teams,
 		isPlatformAdmin: session.PlatformRole == "admin",
+		seesAllClusters: session.PlatformRole == "admin" || session.PlatformRole == "viewer",
 	}
 
 	h.register <- client
