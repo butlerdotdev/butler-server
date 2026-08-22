@@ -28,6 +28,7 @@ import (
 	"github.com/butlerdotdev/butler-server/internal/k8s"
 
 	"github.com/go-chi/chi/v5"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -48,6 +49,56 @@ func NewTeamHandler(k8sClient *k8s.Client, teamResolver *auth.TeamResolver, user
 		userService:  userService,
 		logger:       logger,
 	}
+}
+
+// Team lifecycle authorization. The Team admission webhook (ADR-009)
+// only guards spec.resourceLimits and spec.environments[].limits; team
+// existence, naming, description and cluster defaults are unguarded
+// there, so the server decides who may create, update and delete a
+// Team before any write reaches the apiserver. The decision functions
+// return a zero status when the caller is allowed.
+
+// authorizeTeamCreate allows platform admins only. Teams are the
+// tenancy boundary; creating one is a platform operation.
+func authorizeTeamCreate(user *auth.UserSession) (int, string) {
+	if user == nil {
+		return http.StatusUnauthorized, "Unauthorized"
+	}
+	if user.PlatformRole != auth.RoleAdmin {
+		return http.StatusForbidden, "Platform admin required to create teams"
+	}
+	return 0, ""
+}
+
+// authorizeTeamUpdate allows platform admins, and team admins of the
+// named team for everything except spec.resourceLimits, which is the
+// team's ceiling and stays platform-admin only (mirrors the webhook).
+func authorizeTeamUpdate(user *auth.UserSession, teamName string, req *UpdateTeamRequest) (int, string) {
+	if user == nil {
+		return http.StatusUnauthorized, "Unauthorized"
+	}
+	if user.PlatformRole == auth.RoleAdmin {
+		return 0, ""
+	}
+	if !user.IsAdminOfTeam(teamName) {
+		return http.StatusForbidden, "Team admin of " + teamName + " or platform admin required"
+	}
+	if req != nil && req.ResourceLimits != nil {
+		return http.StatusForbidden, "Platform admin required to change resourceLimits"
+	}
+	return 0, ""
+}
+
+// authorizeTeamDelete allows platform admins only. Deleting a Team
+// cascades to its namespace and clusters.
+func authorizeTeamDelete(user *auth.UserSession) (int, string) {
+	if user == nil {
+		return http.StatusUnauthorized, "Unauthorized"
+	}
+	if user.PlatformRole != auth.RoleAdmin {
+		return http.StatusForbidden, "Platform admin required to delete teams"
+	}
+	return 0, ""
 }
 
 // TeamResponse represents a team in API responses.
@@ -253,7 +304,6 @@ func getTeamGroups(team *unstructured.Unstructured) []TeamGroupAccessResponse {
 	return groups
 }
 
-
 // List returns all teams.
 // GET /api/teams
 func (h *TeamHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -329,6 +379,10 @@ type CreateTeamRequest struct {
 // POST /api/teams
 func (h *TeamHandler) Create(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
+	if status, msg := authorizeTeamCreate(user); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
 	var req CreateTeamRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request body")
@@ -417,6 +471,11 @@ func (h *TeamHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if status, msg := authorizeTeamUpdate(user, name, &req); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
+
 	team, err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Get(r.Context(), name, metav1.GetOptions{})
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
@@ -484,11 +543,29 @@ func (h *TeamHandler) Update(w http.ResponseWriter, r *http.Request) {
 // DELETE /api/teams/{name}
 func (h *TeamHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
+	user := auth.UserFromContext(r.Context())
+	if status, msg := authorizeTeamDelete(user); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
 
-	err := h.k8sClient.Dynamic().Resource(auth.TeamGVR).Delete(r.Context(), name, metav1.DeleteOptions{})
+	// Impersonate on delete as on create and update so the apiserver
+	// audit trail carries the caller, not the server service account.
+	impClient, impErr := h.k8sClient.AsUser(user.Email)
+	if impErr != nil {
+		h.logger.Error("Failed to build impersonating client", "email", user.Email, "error", impErr)
+		writeError(w, http.StatusInternalServerError, "Failed to authorize delete")
+		return
+	}
+	err := impClient.Dynamic().Resource(auth.TeamGVR).Delete(r.Context(), name, metav1.DeleteOptions{})
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			writeError(w, http.StatusNotFound, "Team not found")
+			return
+		}
+		if apierrors.IsForbidden(err) {
+			h.logger.Warn("Team delete forbidden by apiserver", "name", name, "user", user.Email, "error", err)
+			writeError(w, http.StatusForbidden, "Forbidden: the platform does not allow this identity to delete teams")
 			return
 		}
 		h.logger.Error("Failed to delete team", "name", name, "error", err)
@@ -496,7 +573,7 @@ func (h *TeamHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.logger.Info("Team deleted", "name", name)
+	h.logger.Info("Team deleted", "name", name, "user", user.Email)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
