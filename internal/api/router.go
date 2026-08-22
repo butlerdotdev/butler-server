@@ -306,14 +306,23 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Post("/auth/cli/approve", deviceFlowHandler.DeviceApprove)
 			}
 
-			// Management cluster
-			r.Get("/management", clusterHandler.GetManagement)
-			r.Get("/management/nodes", clusterHandler.GetManagementNodes)
-			r.Get("/management/pods/{namespace}", clusterHandler.GetManagementPods)
-
-			// Management addons (reads)
-			r.Get("/management/addons", addonsHandler.ListManagementAddons)
-			r.Get("/management/addons/{name}", addonsHandler.GetManagementAddon)
+			// Management cluster reads (platform viewer or above). These
+			// expose management-cluster nodes, pods in any namespace and
+			// platform addon state, none of which is team-scoped.
+			r.Group(func(r chi.Router) {
+				r.Use(auth.RequirePlatformViewer())
+				r.Get("/management", clusterHandler.GetManagement)
+				r.Get("/management/nodes", clusterHandler.GetManagementNodes)
+				r.Get("/management/pods/{namespace}", clusterHandler.GetManagementPods)
+				r.Get("/management/addons", addonsHandler.ListManagementAddons)
+				r.Get("/management/addons/{name}", addonsHandler.GetManagementAddon)
+				r.Get("/management/gitops/status", gitopsHandler.GetManagementStatus)
+				r.Get("/management/gitops/discover", gitopsHandler.DiscoverManagementReleases)
+				r.Get("/management/tenantcontrolplanes", stewardHandler.ListTenantControlPlanes)
+				r.Get("/management/tenantcontrolplanes/{namespace}/{name}", stewardHandler.GetTenantControlPlane)
+				r.Get("/management/datastores", stewardHandler.ListDataStores)
+				r.Get("/management/datastores/{name}", stewardHandler.GetDataStore)
+			})
 
 			// Management addons (mutations - admin only)
 			r.Group(func(r chi.Router) {
@@ -322,10 +331,6 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Put("/management/addons/{name}", addonsHandler.UpdateManagementAddon)
 				r.Delete("/management/addons/{name}", addonsHandler.UninstallManagementAddon)
 			})
-
-			// Management GitOps (reads)
-			r.Get("/management/gitops/status", gitopsHandler.GetManagementStatus)
-			r.Get("/management/gitops/discover", gitopsHandler.DiscoverManagementReleases)
 
 			// Management GitOps (mutations - admin only)
 			r.Group(func(r chi.Router) {
@@ -350,12 +355,6 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Post("/management/gitops/preview-cluster", gitopsHandler.PreviewManagementCluster)
 				r.Post("/management/gitops/export-cluster", gitopsHandler.ExportManagementCluster)
 			})
-
-			// Steward: TenantControlPlane and DataStore visibility
-			r.Get("/management/tenantcontrolplanes", stewardHandler.ListTenantControlPlanes)
-			r.Get("/management/tenantcontrolplanes/{namespace}/{name}", stewardHandler.GetTenantControlPlane)
-			r.Get("/management/datastores", stewardHandler.ListDataStores)
-			r.Get("/management/datastores/{name}", stewardHandler.GetDataStore)
 
 			// Addon catalog
 			r.Get("/addons/catalog", addonsHandler.GetCatalog)
