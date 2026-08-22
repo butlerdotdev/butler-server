@@ -256,7 +256,11 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 		PortalVerifier:           portalVerifier,
 		AllowHeaderImpersonation: cfg.Config.Auth.AllowHeaderImpersonation,
 	})
+	// adminMiddleware passes admins of any team; it stays on the team
+	// member and group-sync routes, whose handlers narrow it to the
+	// named team. Platform-level mutations use RequirePlatformAdmin.
 	adminMiddleware := auth.AdminMiddleware()
+	platformAdminMiddleware := auth.RequirePlatformAdmin()
 
 	r.Route("/api", func(r chi.Router) {
 		// Public auth routes (no authentication required)
@@ -315,9 +319,9 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Get("/management/addons", addonsHandler.ListManagementAddons)
 			r.Get("/management/addons/{name}", addonsHandler.GetManagementAddon)
 
-			// Management addons (mutations - admin only)
+			// Management addons (mutations - platform admin only)
 			r.Group(func(r chi.Router) {
-				r.Use(adminMiddleware)
+				r.Use(platformAdminMiddleware)
 				r.Post("/management/addons", addonsHandler.InstallManagementAddon)
 				r.Put("/management/addons/{name}", addonsHandler.UpdateManagementAddon)
 				r.Delete("/management/addons/{name}", addonsHandler.UninstallManagementAddon)
@@ -327,9 +331,9 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Get("/management/gitops/status", gitopsHandler.GetManagementStatus)
 			r.Get("/management/gitops/discover", gitopsHandler.DiscoverManagementReleases)
 
-			// Management GitOps (mutations - admin only)
+			// Management GitOps (mutations - platform admin only)
 			r.Group(func(r chi.Router) {
-				r.Use(adminMiddleware)
+				r.Use(platformAdminMiddleware)
 				r.Post("/management/gitops/enable", gitopsHandler.EnableManagementGitOps)
 				r.Delete("/management/gitops", gitopsHandler.DisableManagementGitOps)
 				// Deprecated: v1 per-addon export — emits pre-standard tree
@@ -391,9 +395,9 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Get("/repos", gitopsHandler.ListRepositories)
 				r.Get("/repos/branches", gitopsHandler.ListBranches)
 
-				// Mutations require admin (credentials and manifest generation)
+				// Mutations require platform admin (credentials and manifest generation)
 				r.Group(func(r chi.Router) {
-					r.Use(adminMiddleware)
+					r.Use(platformAdminMiddleware)
 					r.Post("/config", gitopsHandler.SaveConfig)
 					r.Delete("/config", gitopsHandler.ClearConfig)
 					r.Post("/preview", gitopsHandler.PreviewManifest)
@@ -480,9 +484,9 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Get("/providers/{namespace}/{name}", providerHandler.Get)
 			r.Get("/providers/{namespace}/{name}/ca-info", providerHandler.GetCAInfo)
 
-			// Provider mutations (admin only - credentials are sensitive)
+			// Provider mutations (platform admin only - credentials are sensitive)
 			r.Group(func(r chi.Router) {
-				r.Use(adminMiddleware)
+				r.Use(platformAdminMiddleware)
 				r.Post("/providers", providerHandler.Create)
 				r.Post("/providers/test", providerHandler.TestConnection)
 				r.Put("/providers/{namespace}/{name}", providerHandler.Update)
@@ -537,11 +541,28 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Get("/networks/{namespace}/{name}/allocations", networksHandler.ListAllocations)
 				r.Get("/ipallocations", networksHandler.ListAllAllocations)
 
-				// Admin-only mutations
+				// Audit log (read-only for viewers). Platform config stays
+				// admin-only below: it carries audit and notification
+				// webhook URLs.
+				r.Get("/audit", auditHandler.ListAll)
+
+				// Team membership and group sync (platform admin, or admin of
+				// the named team; the handlers enforce the team scope)
 				r.Group(func(r chi.Router) {
 					r.Use(adminMiddleware)
+					r.Post("/teams/{name}/members", teamHandler.AddMember)
+					r.Patch("/teams/{name}/members/{email}", teamHandler.UpdateMemberRole)
+					r.Delete("/teams/{name}/members/{email}", teamHandler.RemoveMember)
+					r.Post("/teams/{name}/groups", teamHandler.AddGroupSync)
+					r.Patch("/teams/{name}/groups/{groupName}", teamHandler.UpdateGroupSyncRole)
+					r.Delete("/teams/{name}/groups/{groupName}", teamHandler.RemoveGroupSync)
+				})
 
-					// User management (admin only)
+				// Platform-admin-only mutations
+				r.Group(func(r chi.Router) {
+					r.Use(platformAdminMiddleware)
+
+					// User management
 					r.Post("/users", userHandler.CreateUser)
 					r.Get("/users/{username}", userHandler.GetUser)
 					r.Delete("/users/{username}", userHandler.DeleteUser)
@@ -549,49 +570,38 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 					r.Post("/users/{username}/enable", userHandler.EnableUser)
 					r.Post("/users/{username}/invite", userHandler.RegenerateInvite)
 
-					// Team management (admin only)
+					// Team lifecycle
 					r.Post("/teams", teamHandler.Create)
 					r.Delete("/teams/{name}", teamHandler.Delete)
-					r.Post("/teams/{name}/members", teamHandler.AddMember)
-					r.Patch("/teams/{name}/members/{email}", teamHandler.UpdateMemberRole)
-					r.Delete("/teams/{name}/members/{email}", teamHandler.RemoveMember)
 
-					// Team group sync management (admin only)
-					r.Post("/teams/{name}/groups", teamHandler.AddGroupSync)
-					r.Patch("/teams/{name}/groups/{groupName}", teamHandler.UpdateGroupSyncRole)
-					r.Delete("/teams/{name}/groups/{groupName}", teamHandler.RemoveGroupSync)
-
-					// Identity provider mutations (admin only)
+					// Identity provider mutations
 					r.Post("/identity-providers", identityProviderHandler.Create)
 					r.Post("/identity-providers/test", identityProviderHandler.TestDiscovery)
 					r.Put("/identity-providers/{name}", identityProviderHandler.Update)
 					r.Delete("/identity-providers/{name}", identityProviderHandler.Delete)
 					r.Post("/identity-providers/{name}/validate", identityProviderHandler.Validate)
 
-					// ClusterCreationPolicy mutations (admin only, ADR-018)
+					// ClusterCreationPolicy mutations (ADR-018)
 					r.Post("/policies", adminPoliciesHandler.Create)
 					r.Put("/policies/{name}", adminPoliciesHandler.Update)
 					r.Delete("/policies/{name}", adminPoliciesHandler.Delete)
 
-					// Addon catalog management (admin only)
+					// Addon catalog management
 					r.Post("/addons/catalog", addonsHandler.CreateAddonDefinition)
 					r.Put("/addons/catalog/{name}", addonsHandler.UpdateAddonDefinition)
 					r.Delete("/addons/catalog/{name}", addonsHandler.DeleteAddonDefinition)
 
-					// Network pool mutations (admin only)
+					// Network pool mutations
 					r.Post("/networks", networksHandler.CreateNetworkPool)
 					r.Put("/networks/{namespace}/{name}", networksHandler.UpdateNetworkPool)
 					r.Delete("/networks/{namespace}/{name}", networksHandler.DeleteNetworkPool)
 					r.Delete("/ipallocations/{namespace}/{name}", networksHandler.ReleaseAllocation)
 
-					// Platform configuration (admin only)
+					// Platform configuration
 					r.Get("/config", configHandler.GetConfig)
 					r.Put("/config", configHandler.UpdateConfig)
 
-					// Audit log (admin only)
-					r.Get("/audit", auditHandler.ListAll)
-
-					// Observability management (admin only)
+					// Observability management
 					r.Put("/observability/config", observabilityHandler.UpdateConfig)
 					r.Get("/observability/status", observabilityHandler.GetStatus)
 					r.Post("/observability/pipeline/setup", observabilityHandler.SetupPipeline)
