@@ -541,8 +541,9 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				r.Get("/networks/{namespace}/{name}/allocations", networksHandler.ListAllocations)
 				r.Get("/ipallocations", networksHandler.ListAllAllocations)
 
-				// Platform configuration and audit log (read-only for viewers)
-				r.Get("/config", configHandler.GetConfig)
+				// Audit log (read-only for viewers). Platform config stays
+				// admin-only below: it carries audit and notification
+				// webhook URLs.
 				r.Get("/audit", auditHandler.ListAll)
 
 				// Team membership and group sync (platform admin, or admin of
@@ -597,6 +598,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 					r.Delete("/ipallocations/{namespace}/{name}", networksHandler.ReleaseAllocation)
 
 					// Platform configuration
+					r.Get("/config", configHandler.GetConfig)
 					r.Put("/config", configHandler.UpdateConfig)
 
 					// Observability management

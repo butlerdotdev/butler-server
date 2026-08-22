@@ -55,7 +55,8 @@ func (h *AuditHandler) ListAll(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListTeam returns audit entries for a specific team. Team admin only.
+// ListTeam returns audit entries for a specific team. Platform viewer
+// or above, or an admin of that team.
 func (h *AuditHandler) ListTeam(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	teamName := chi.URLParam(r, "name")
@@ -65,7 +66,7 @@ func (h *AuditHandler) ListTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !user.IsPlatformAdmin && !user.IsAdminOfTeam(teamName) {
+	if !user.IsPlatformViewerOrAbove() && !user.IsAdminOfTeam(teamName) {
 		writeError(w, http.StatusForbidden, "team admin access required")
 		return
 	}
