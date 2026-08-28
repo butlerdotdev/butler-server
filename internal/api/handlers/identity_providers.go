@@ -234,7 +234,7 @@ func (h *IdentityProvidersHandler) Create(w http.ResponseWriter, r *http.Request
 	}
 
 	if len(req.Scopes) > 0 {
-		oidcConfig["scopes"] = req.Scopes
+		oidcConfig["scopes"] = toUnstructuredStrings(req.Scopes)
 	}
 	if req.HostedDomain != "" {
 		oidcConfig["hostedDomain"] = req.HostedDomain
@@ -457,7 +457,7 @@ func (h *IdentityProvidersHandler) Update(w http.ResponseWriter, r *http.Request
 		oidcConfig["redirectURL"] = req.RedirectURL
 	}
 	if len(req.Scopes) > 0 {
-		oidcConfig["scopes"] = req.Scopes
+		oidcConfig["scopes"] = toUnstructuredStrings(req.Scopes)
 	}
 	if req.HostedDomain != "" {
 		oidcConfig["hostedDomain"] = req.HostedDomain
@@ -583,4 +583,17 @@ func testOIDCDiscovery(ctx context.Context, issuerURL string) TestDiscoveryRespo
 	_ = claims // Silence unused warning
 
 	return response
+}
+
+// toUnstructuredStrings converts a string slice into the []interface{} form
+// that unstructured objects require. SetNestedMap deep-copies the value it
+// is given, and the deep copy only accepts JSON-shaped values; a Go
+// []string makes it panic, which surfaced as an empty 500 on every update
+// that carried scopes.
+func toUnstructuredStrings(values []string) []interface{} {
+	out := make([]interface{}, 0, len(values))
+	for _, v := range values {
+		out = append(out, v)
+	}
+	return out
 }
