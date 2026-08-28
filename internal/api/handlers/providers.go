@@ -978,8 +978,25 @@ func (h *ProvidersHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 // ListTeamProviders returns providers available to a specific team.
 // This includes all platform-scoped providers and team-scoped providers belonging to the team.
+//
+// The read is gated on team visibility. Without it any authenticated
+// user could enumerate another team's team-scoped providers by naming
+// that team in the path, which is the one thing the team scope exists
+// to prevent. The mutations on this route already gate on
+// CanOperateTeam; the read gates on the weaker CanViewTeam so every team
+// member, and any platform role, can still see what their team may use.
 func (h *ProvidersHandler) ListTeamProviders(w http.ResponseWriter, r *http.Request) {
 	teamName := chi.URLParam(r, "name")
+
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !user.CanViewTeam(teamName) {
+		writeError(w, http.StatusForbidden, fmt.Sprintf("you don't have permission to view providers for team '%s'", teamName))
+		return
+	}
 
 	providers, err := h.k8sClient.ListProviderConfigs(r.Context(), "")
 	if err != nil {
@@ -987,8 +1004,17 @@ func (h *ProvidersHandler) ListTeamProviders(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	filtered := make([]map[string]interface{}, 0)
-	for _, provider := range providers.Items {
+	writeJSON(w, http.StatusOK, ProviderListResponse{Providers: providersVisibleToTeam(providers.Items, teamName)})
+}
+
+// providersVisibleToTeam keeps the providers a team may create clusters
+// against: every platform-scoped provider, which is also the default when
+// no scope is set, plus the providers scoped to this team by name. A
+// provider scoped to any other team is dropped; the TenantCluster
+// admission webhook would refuse a cluster that referenced it anyway.
+func providersVisibleToTeam(items []unstructured.Unstructured, teamName string) []map[string]interface{} {
+	filtered := make([]map[string]interface{}, 0, len(items))
+	for _, provider := range items {
 		spec, _ := provider.Object["spec"].(map[string]interface{})
 		scope, _ := spec["scope"].(map[string]interface{})
 
@@ -997,9 +1023,10 @@ func (h *ProvidersHandler) ListTeamProviders(w http.ResponseWriter, r *http.Requ
 			scopeType = "platform" // default
 		}
 
-		if scopeType == "platform" {
+		switch scopeType {
+		case "platform":
 			filtered = append(filtered, provider.Object)
-		} else if scopeType == "team" {
+		case "team":
 			teamRef, _ := scope["teamRef"].(map[string]interface{})
 			refName, _ := teamRef["name"].(string)
 			if refName == teamName {
@@ -1007,8 +1034,7 @@ func (h *ProvidersHandler) ListTeamProviders(w http.ResponseWriter, r *http.Requ
 			}
 		}
 	}
-
-	writeJSON(w, http.StatusOK, ProviderListResponse{Providers: filtered})
+	return filtered
 }
 
 // CreateTeamProvider creates a provider config scoped to a specific team.
