@@ -55,11 +55,12 @@ func Middleware(emitter *Emitter) func(http.Handler) http.Handler {
 				const maxBodyRead = 10 << 20 // 10 MB
 				bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, maxBodyRead))
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-				summary := bodyBytes
-				if len(summary) > 2048 {
-					summary = summary[:2048]
-				}
-				bodySummary = ScrubRequestBody(summary)
+				// Hand the whole body to the scrubber. Pre-truncating here
+				// once produced invalid JSON, which fell through to the raw
+				// path and could store an unredacted credential; the
+				// scrubber now bounds its own input and never returns a raw
+				// body.
+				bodySummary = ScrubRequestBody(bodyBytes)
 			}
 
 			// Wrap response writer to capture status code
