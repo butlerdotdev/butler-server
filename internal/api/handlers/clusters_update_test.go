@@ -133,11 +133,29 @@ func TestValidateUpdateRequest(t *testing.T) {
 			wantErrors: 1,
 		},
 		{
-			name:    "CP replicas must be odd",
+			name:    "CP replicas 2 accepted (provider-owned range)",
 			cluster: makeCluster("v1.31.0", 3),
 			req: &UpdateRequest{
 				ResourceVersion: "12345",
 				ControlPlane:    &UpdateControlPlane{Replicas: int32Ptr(2)},
+			},
+			wantErrors: 0,
+		},
+		{
+			name:    "CP replicas 3 accepted (scale up to HA)",
+			cluster: makeCluster("v1.31.0", 1),
+			req: &UpdateRequest{
+				ResourceVersion: "12345",
+				ControlPlane:    &UpdateControlPlane{Replicas: int32Ptr(3)},
+			},
+			wantErrors: 0,
+		},
+		{
+			name:    "CP replicas 4 rejected (above max)",
+			cluster: makeCluster("v1.31.0", 3),
+			req: &UpdateRequest{
+				ResourceVersion: "12345",
+				ControlPlane:    &UpdateControlPlane{Replicas: int32Ptr(4)},
 			},
 			wantErrors: 1,
 		},
