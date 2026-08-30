@@ -754,10 +754,10 @@ func (h *ClusterHandler) validateUpdateRequest(cluster *unstructured.Unstructure
 
 	if req.ControlPlane != nil && req.ControlPlane.Replicas != nil {
 		replicas := *req.ControlPlane.Replicas
-		if replicas != 1 && replicas != 3 {
+		if replicas < 1 || replicas > 3 {
 			errs = append(errs, FieldError{
 				Field:  "spec.controlPlane.replicas",
-				Reason: "must be 1 or 3 (odd numbers required for etcd quorum)",
+				Reason: "must be between 1 and 3",
 			})
 		}
 		if replicas == 1 {
