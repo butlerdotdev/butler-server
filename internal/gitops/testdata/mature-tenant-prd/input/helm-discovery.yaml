@@ -1,0 +1,1107 @@
+gitopsEngine:
+  branch: main
+  components:
+  - helm-controller
+  - image-automation-controller
+  - image-reflector-controller
+  - kustomize-controller
+  - notification-controller
+  - sealed-secrets-controller
+  - source-controller
+  installed: true
+  path: ./clusters/mature-tenant-prd
+  provider: flux
+  ready: true
+  repository: example-group/platform/pipelines/live-infrastructure
+  version: v1.1.0
+matched: []
+unmatched:
+- appVersion: 0.37.0
+  category: apps
+  chart: sealed-secrets
+  chartVersion: 2.18.6
+  helmReleaseCRName: sealed-secrets
+  helmReleaseCRNamespace: flux-system
+  helmRepositoryCRName: sealed-secrets
+  helmRepositoryCRNamespace: flux-system
+  name: sealed-secrets-controller
+  namespace: flux-system
+  repoUrl: https://github.com/bitnami-labs/sealed-secrets
+  revision: 1
+  status: deployed
+- appVersion: 2.17.3
+  category: apps
+  chart: keda
+  chartInstallsCRDs: true
+  chartVersion: 2.17.3
+  helmReleaseCRName: keda
+  helmReleaseCRNamespace: keda-system
+  helmRepositoryCRName: kedacore
+  helmRepositoryCRNamespace: flux-system
+  name: keda
+  namespace: keda-system
+  repoUrl: https://github.com/kedacore/keda
+  revision: 1
+  status: deployed
+  values:
+    resources:
+      metricServer:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 100m
+          memory: 256Mi
+      operator:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 100m
+          memory: 256Mi
+      webhooks:
+        limits:
+          cpu: 250m
+          memory: 512Mi
+        requests:
+          cpu: 50m
+          memory: 128Mi
+- appVersion: v1.7.2
+  category: apps
+  chart: longhorn
+  chartInstallsCRDs: true
+  chartVersion: 1.7.2
+  name: longhorn
+  namespace: longhorn-system
+  repoUrl: https://github.com/longhorn/longhorn
+  revision: 4
+  status: deployed
+  values:
+    defaultSettings:
+      defaultDataPath: /var/lib/longhorn
+      defaultReplicaCount: 2
+- appVersion: v0.79.0
+  category: apps
+  chart: kube-prometheus-stack
+  chartVersion: 67.0.0
+  helmReleaseCRName: kube-prometheus-stack
+  helmReleaseCRNamespace: observability
+  helmRepositoryCRName: prometheus-community
+  helmRepositoryCRNamespace: flux-system
+  name: kube-prometheus-stack
+  namespace: observability
+  repoUrl: https://github.com/prometheus-community/helm-charts
+  revision: 1
+  status: deployed
+  values:
+    alertmanager:
+      enabled: false
+    grafana:
+      enabled: false
+    kube-state-metrics:
+      customResourceState:
+        config:
+          spec:
+            resources:
+            - groupVersionKind:
+                group: kustomize.toolkit.fluxcd.io
+                kind: Kustomization
+                version: v1
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux Kustomization resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  revision:
+                  - status
+                  - lastAppliedRevision
+                  source_name:
+                  - spec
+                  - sourceRef
+                  - name
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+            - groupVersionKind:
+                group: helm.toolkit.fluxcd.io
+                kind: HelmRelease
+                version: v2
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux HelmRelease resource.
+                labelsFromPath:
+                  chart_app_version:
+                  - status
+                  - history
+                  - "0"
+                  - appVersion
+                  chart_name:
+                  - status
+                  - history
+                  - "0"
+                  - chartName
+                  chart_ref_name:
+                  - spec
+                  - chartRef
+                  - name
+                  chart_source_name:
+                  - spec
+                  - chart
+                  - spec
+                  - sourceRef
+                  - name
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  revision:
+                  - status
+                  - history
+                  - "0"
+                  - chartVersion
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+            - groupVersionKind:
+                group: source.toolkit.fluxcd.io
+                kind: GitRepository
+                version: v1
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux GitRepository resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  revision:
+                  - status
+                  - artifact
+                  - revision
+                  suspended:
+                  - spec
+                  - suspend
+                  url:
+                  - spec
+                  - url
+                name: resource_info
+            - groupVersionKind:
+                group: source.toolkit.fluxcd.io
+                kind: HelmRepository
+                version: v1
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux HelmRepository resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  revision:
+                  - status
+                  - artifact
+                  - revision
+                  suspended:
+                  - spec
+                  - suspend
+                  url:
+                  - spec
+                  - url
+                name: resource_info
+            - groupVersionKind:
+                group: source.toolkit.fluxcd.io
+                kind: HelmChart
+                version: v1
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux HelmChart resource.
+                labelsFromPath:
+                  chart_name:
+                  - spec
+                  - chart
+                  chart_version:
+                  - spec
+                  - version
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  revision:
+                  - status
+                  - artifact
+                  - revision
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+            - groupVersionKind:
+                group: source.toolkit.fluxcd.io
+                kind: OCIRepository
+                version: v1beta2
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux OCIRepository resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  revision:
+                  - status
+                  - artifact
+                  - revision
+                  suspended:
+                  - spec
+                  - suspend
+                  url:
+                  - spec
+                  - url
+                name: resource_info
+            - groupVersionKind:
+                group: notification.toolkit.fluxcd.io
+                kind: Alert
+                version: v1beta3
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux Alert resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+            - groupVersionKind:
+                group: notification.toolkit.fluxcd.io
+                kind: Provider
+                version: v1beta3
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux Provider resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+            - groupVersionKind:
+                group: notification.toolkit.fluxcd.io
+                kind: Receiver
+                version: v1
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux Receiver resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  suspended:
+                  - spec
+                  - suspend
+                  webhook_path:
+                  - status
+                  - webhookPath
+                name: resource_info
+            - groupVersionKind:
+                group: image.toolkit.fluxcd.io
+                kind: ImageRepository
+                version: v1beta2
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux ImageRepository resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  image:
+                  - spec
+                  - image
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+            - groupVersionKind:
+                group: image.toolkit.fluxcd.io
+                kind: ImagePolicy
+                version: v1beta2
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux ImagePolicy resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  source_name:
+                  - spec
+                  - imageRepositoryRef
+                  - name
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+            - groupVersionKind:
+                group: image.toolkit.fluxcd.io
+                kind: ImageUpdateAutomation
+                version: v1beta2
+              metricNamePrefix: gotk
+              metrics:
+              - each:
+                  info:
+                    labelsFromPath:
+                      name:
+                      - metadata
+                      - name
+                  type: Info
+                help: The current state of a Flux ImageUpdateAutomation resource.
+                labelsFromPath:
+                  exported_namespace:
+                  - metadata
+                  - namespace
+                  ready:
+                  - status
+                  - conditions
+                  - '[type=Ready]'
+                  - status
+                  source_name:
+                  - spec
+                  - sourceRef
+                  - name
+                  suspended:
+                  - spec
+                  - suspend
+                name: resource_info
+        enabled: true
+      rbac:
+        extraRules:
+        - apiGroups:
+          - source.toolkit.fluxcd.io
+          - kustomize.toolkit.fluxcd.io
+          - helm.toolkit.fluxcd.io
+          - notification.toolkit.fluxcd.io
+          - image.toolkit.fluxcd.io
+          resources:
+          - gitrepositories
+          - buckets
+          - helmrepositories
+          - helmcharts
+          - ocirepositories
+          - kustomizations
+          - helmreleases
+          - alerts
+          - providers
+          - receivers
+          - imagerepositories
+          - imagepolicies
+          - imageupdateautomations
+          verbs:
+          - list
+          - watch
+    kubeStateMetrics:
+      enabled: true
+    nodeExporter:
+      enabled: true
+    prometheus:
+      enabled: true
+      prometheusSpec:
+        externalLabels:
+          cluster: mature-tenant-prd
+        podMonitorSelectorNilUsesHelmValues: false
+        remoteWrite:
+        - name: vector-pipeline-prd
+          url: http://vector.vector.svc:9000
+        replicas: 1
+        resources:
+          limits:
+            cpu: 2000m
+            memory: 4Gi
+          requests:
+            cpu: 500m
+            memory: 2Gi
+        retention: 2h
+        securityContext:
+          fsGroup: 65534
+          runAsNonRoot: true
+          runAsUser: 65534
+        serviceMonitorSelectorNilUsesHelmValues: false
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              accessModes:
+              - ReadWriteOnce
+              resources:
+                requests:
+                  storage: 50Gi
+              storageClassName: longhorn
+        walCompression: true
+    prometheusOperator:
+      admissionWebhooks:
+        enabled: false
+      resources:
+        limits:
+          cpu: 250m
+          memory: 256Mi
+        requests:
+          cpu: 100m
+          memory: 128Mi
+      tls:
+        enabled: false
+- appVersion: 10.0.42
+  category: apps
+  chart: reflector
+  chartVersion: 10.0.42
+  helmReleaseCRName: reflector
+  helmReleaseCRNamespace: reflector
+  helmRepositoryCRName: emberstack
+  helmRepositoryCRNamespace: flux-system
+  name: reflector
+  namespace: reflector
+  repoUrl: https://github.com/emberstack/kubernetes-reflector
+  revision: 1
+  status: deployed
+- appVersion: v3.3.3
+  category: apps
+  chart: traefik
+  chartVersion: 34.3.0
+  name: traefik
+  namespace: traefik
+  repoUrl: https://github.com/traefik/traefik-helm-chart
+  revision: 4
+  status: deployed
+  values:
+    commonLabels:
+      butler.butlerlabs.dev/platform-lb: "true"
+    ingressClass:
+      enabled: true
+      isDefaultClass: true
+    service:
+      type: LoadBalancer
+- appVersion: 0.55.0-distroless-libc
+  category: apps
+  chart: vector
+  chartVersion: 0.52.0
+  helmReleaseCRName: vector
+  helmReleaseCRNamespace: vector
+  helmRepositoryCRName: vector-repo
+  helmRepositoryCRNamespace: flux-system
+  name: vector
+  namespace: vector
+  repoUrl: https://vector.dev/
+  revision: 46
+  status: deployed
+  values:
+    autoscaling:
+      enabled: false
+      external: true
+      maxReplicas: 20
+      minReplicas: 5
+    containerPorts:
+    - containerPort: 8686
+      name: api
+      protocol: TCP
+    - containerPort: 9000
+      name: prometheus
+      protocol: TCP
+    - containerPort: 9162
+      name: snmp
+      protocol: TCP
+    - containerPort: 9601
+      name: syslog
+      protocol: TCP
+    - containerPort: 9602
+      name: syslog-udp
+      protocol: UDP
+    - containerPort: 8080
+      name: http-source
+      protocol: TCP
+    - containerPort: 4317
+      name: otlp-grpc
+      protocol: TCP
+    - containerPort: 4318
+      name: otlp-http
+      protocol: TCP
+    - containerPort: 9598
+      name: prom-exporter
+      protocol: TCP
+    customConfig:
+      api:
+        address: 0.0.0.0:8686
+        enabled: true
+      data_dir: /vector-data-dir
+      sinks:
+        loki_app_logs:
+          buffer:
+            max_size: 4294967296
+            type: disk
+            when_full: block
+          encoding:
+            codec: json
+          endpoint: https://logs-prd.example.com
+          inputs:
+          - filter_logs
+          - remap_self_logs
+          - kafka_logs
+          labels:
+            cluster: '{{ `{{cluster}}` }}'
+            env: prd
+            environment: '{{ `{{environment}}` }}'
+            pipeline: obs-pipelines-crop-prd
+            provider_type: '{{ `{{provider_type}}` }}'
+            service_name: vector
+            tenant_namespace: '{{ `{{tenant_namespace}}` }}'
+          out_of_order_action: accept
+          tenant_id: crop
+          tls:
+            verify_certificate: false
+            verify_hostname: false
+          type: loki
+        loki_snmp_trap:
+          encoding:
+            codec: json
+          endpoint: https://logs-prd.example.com
+          inputs:
+          - remap_snmp_trap
+          labels:
+            cluster: '{{ `{{cluster}}` }}'
+            env: prd
+            environment: '{{ `{{environment}}` }}'
+            event_type: snmp_trap
+            pipeline: obs-pipelines-crop-prd
+            provider_type: '{{ `{{provider_type}}` }}'
+            service_name: vector
+            tenant_namespace: '{{ `{{tenant_namespace}}` }}'
+          out_of_order_action: accept
+          tenant_id: crop
+          tls:
+            verify_certificate: false
+            verify_hostname: false
+          type: loki
+        loki_syslog_ome:
+          encoding:
+            codec: json
+          endpoint: https://logs-prd.example.com
+          inputs:
+          - remap_syslog_ome
+          labels:
+            cluster: '{{ `{{cluster}}` }}'
+            env: prd
+            environment: '{{ `{{environment}}` }}'
+            host: '{{ `{{host}}` }}'
+            log_type: syslog
+            pipeline: obs-pipelines-crop-prd
+            provider_type: '{{ `{{provider_type}}` }}'
+            service_name: vector
+            source: openmanage
+            tenant_namespace: '{{ `{{tenant_namespace}}` }}'
+          out_of_order_action: accept
+          tenant_id: crop
+          tls:
+            verify_certificate: false
+            verify_hostname: false
+          type: loki
+        loki_syslog_os:
+          encoding:
+            codec: json
+          endpoint: https://logs-prd.example.com
+          inputs:
+          - remap_syslog_os
+          labels:
+            cluster: '{{ `{{cluster}}` }}'
+            env: prd
+            environment: '{{ `{{environment}}` }}'
+            host: '{{ `{{host}}` }}'
+            log_type: syslog
+            pipeline: obs-pipelines-crop-prd
+            provider_type: '{{ `{{provider_type}}` }}'
+            service_name: vector
+            source: linux_syslog
+            tenant_namespace: '{{ `{{tenant_namespace}}` }}'
+          out_of_order_action: accept
+          tenant_id: crop
+          tls:
+            verify_certificate: false
+            verify_hostname: false
+          type: loki
+        prometheus_exporter:
+          address: 0.0.0.0:9598
+          inputs:
+          - self_metrics
+          type: prometheus_exporter
+        tempo_traces:
+          buffer:
+            max_size: 268435488
+            type: disk
+            when_full: drop_newest
+          inputs:
+          - otlp.traces
+          protocol:
+            encoding:
+              codec: otlp
+            method: post
+            type: http
+            uri: http://192.0.2.52:4318/v1/traces
+          type: opentelemetry
+        victoria_metrics:
+          buffer:
+            max_size: 9663676416
+            type: disk
+            when_full: block
+          endpoint: https://metrics-prd.example.com:8480/insert/0/prometheus/api/v1/write
+          inputs:
+          - self_metrics
+          - prometheus_remote_write_source
+          - kafka_metrics
+          request:
+            retry_attempts: 5
+            retry_initial_backoff_secs: 1
+            retry_max_duration_secs: 30
+            timeout_secs: 60
+          tls:
+            verify_certificate: false
+            verify_hostname: false
+          type: prometheus_remote_write
+      sources:
+        http_source:
+          acknowledgements:
+            enabled: true
+          address: 0.0.0.0:8080
+          type: http_server
+        kafka_logs:
+          acknowledgements:
+            enabled: true
+          bootstrap_servers: pipeline-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
+          decoding:
+            codec: json
+          group_id: vector-aggregator-logs
+          tls:
+            crt_file: /etc/vector/kafka-tls/user.crt
+            enabled: true
+            key_file: /etc/vector/kafka-tls/user.key
+            verify_certificate: false
+            verify_hostname: false
+          topics:
+          - pipeline.logs.k8s
+          type: kafka
+        kafka_metrics:
+          acknowledgements:
+            enabled: true
+          bootstrap_servers: pipeline-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
+          decoding:
+            codec: native_json
+          group_id: vector-aggregator-metrics
+          librdkafka_options:
+            fetch.max.bytes: "1048576"
+            max.partition.fetch.bytes: "262144"
+            queued.max.messages.kbytes: "4096"
+            queued.min.messages: "1000"
+          tls:
+            crt_file: /etc/vector/kafka-tls/user.crt
+            enabled: true
+            key_file: /etc/vector/kafka-tls/user.key
+            verify_certificate: false
+            verify_hostname: false
+          topics:
+          - pipeline.metrics
+          type: kafka
+        otlp:
+          acknowledgements:
+            enabled: true
+          grpc:
+            address: 0.0.0.0:4317
+            tls:
+              crt_file: /etc/vector/otlp-tls/tls.crt
+              enabled: true
+              key_file: /etc/vector/otlp-tls/tls.key
+          http:
+            address: 0.0.0.0:4318
+            tls:
+              crt_file: /etc/vector/otlp-tls/tls.crt
+              enabled: true
+              key_file: /etc/vector/otlp-tls/tls.key
+          type: opentelemetry
+          use_otlp_decoding: true
+        prometheus_remote_write_source:
+          acknowledgements:
+            enabled: true
+          address: 0.0.0.0:9000
+          type: prometheus_remote_write
+        self_logs:
+          type: internal_logs
+        self_metrics:
+          namespace: vector_obsrvpipe_self_metrics
+          scrape_interval_secs: 15
+          type: internal_metrics
+        snmp_trap:
+          acknowledgements:
+            enabled: true
+          address: 0.0.0.0:9162
+          type: http_server
+        sys_log:
+          acknowledgements:
+            enabled: true
+          address: 0.0.0.0:9601
+          mode: tcp
+          type: syslog
+        sys_log_udp:
+          address: 0.0.0.0:9602
+          mode: udp
+          type: syslog
+      transforms:
+        filter_logs:
+          condition: '!exists(.counter) && !exists(.gauge) && !exists(.aggregated_histogram)
+            && !exists(.aggregated_summary)'
+          inputs:
+          - remap
+          type: filter
+        remap:
+          inputs:
+          - http_source
+          source: |
+            . = parse_json!(.message)
+            if !exists(.cluster) { .cluster = "" }
+            if !exists(.tenant_namespace) { .tenant_namespace = "" }
+            if !exists(.environment) { .environment = "" }
+            if !exists(.provider_type) { .provider_type = "" }
+          type: remap
+        remap_self_logs:
+          inputs:
+          - self_logs
+          source: |
+            .cluster = ""
+            .tenant_namespace = ""
+            .environment = ""
+            .provider_type = ""
+          type: remap
+        remap_snmp_trap:
+          inputs:
+          - snmp_trap
+          source: |
+            parsed = parse_json!(.message)
+            . = parsed.metrics
+            .cluster = ""
+            .tenant_namespace = ""
+            .environment = ""
+            .provider_type = ""
+          type: remap
+        remap_syslog_ome:
+          inputs:
+          - sys_log_udp
+          source: |
+            .parsed = parse_syslog!(.message)
+            .host = .parsed.host
+            .cluster = ""
+            .tenant_namespace = ""
+            .environment = ""
+            .provider_type = ""
+          type: remap
+        remap_syslog_os:
+          inputs:
+          - sys_log
+          source: |
+            .parsed = parse_syslog!(.message)
+            .host = .parsed.host
+            .cluster = ""
+            .tenant_namespace = ""
+            .environment = ""
+            .provider_type = ""
+          type: remap
+    env:
+    - name: VECTOR_WATCH_CONFIG
+      value: "true"
+    - name: VECTOR_INTERNAL_LOG_RATE_LIMIT
+      value: "300"
+    extraVolumeMounts:
+    - mountPath: /etc/vector/kafka-tls
+      name: kafka-tls
+      readOnly: true
+    - mountPath: /etc/vector/otlp-tls
+      name: otlp-tls
+      readOnly: true
+    extraVolumes:
+    - name: kafka-tls
+      secret:
+        defaultMode: 256
+        secretName: vector-consumer
+    - name: otlp-tls
+      secret:
+        defaultMode: 256
+        secretName: vector-otlp-tls
+    image:
+      pullPolicy: IfNotPresent
+      repository: timberio/vector
+      tag: 0.55.0-alpine
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClassName: longhorn
+    podLabels:
+      vector.dev/exclude: "false"
+    podMonitor:
+      enabled: true
+    podSecurityContext:
+      fsGroup: 65534
+      runAsNonRoot: true
+    readinessProbe:
+      failureThreshold: 6
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      successThreshold: 1
+      tcpSocket:
+        port: http-source
+      timeoutSeconds: 5
+    resources:
+      limits:
+        cpu: 4000m
+        memory: 8Gi
+      requests:
+        cpu: 2000m
+        memory: 4Gi
+    role: Aggregator
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 65534
+    service:
+      enabled: true
+      ports:
+      - name: prometheus
+        port: 9000
+        protocol: TCP
+        targetPort: prometheus
+      - name: snmp
+        port: 9162
+        protocol: TCP
+        targetPort: snmp
+      - name: syslog
+        port: 9601
+        protocol: TCP
+        targetPort: syslog
+      - name: syslog-udp
+        port: 9602
+        protocol: UDP
+        targetPort: syslog-udp
+      - name: http-source
+        port: 8080
+        protocol: TCP
+        targetPort: http-source
+      - name: otlp-grpc
+        port: 4317
+        protocol: TCP
+        targetPort: otlp-grpc
+      - name: otlp-http
+        port: 4318
+        protocol: TCP
+        targetPort: otlp-http
+      type: LoadBalancer
+- appVersion: 1.17.0
+  category: apps
+  chart: cilium
+  chartVersion: 1.17.0
+  name: cilium
+  namespace: kube-system
+  repoUrl: https://cilium.io/
+  revision: 4
+  status: deployed
+  values:
+    cgroup:
+      autoMount:
+        enabled: false
+      hostRoot: /sys/fs/cgroup
+    hubble:
+      relay:
+        enabled: true
+      ui:
+        enabled: true
+    ipam:
+      mode: kubernetes
+    k8sServiceHost: 192.0.2.13
+    k8sServicePort: 6443
+    kubeProxyReplacement: true
+    securityContext:
+      capabilities:
+        ciliumAgent:
+        - CHOWN
+        - KILL
+        - NET_ADMIN
+        - NET_RAW
+        - IPC_LOCK
+        - SYS_ADMIN
+        - SYS_RESOURCE
+        - DAC_OVERRIDE
+        - FOWNER
+        - SETGID
+        - SETUID
+        cleanCiliumState:
+        - NET_ADMIN
+        - SYS_ADMIN
+        - SYS_RESOURCE
+- appVersion: v0.14.9
+  category: apps
+  chart: metallb
+  chartVersion: 0.14.9
+  name: metallb
+  namespace: metallb-system
+  repoUrl: https://metallb.universe.tf
+  revision: 4
+  status: deployed
+- appVersion: 1.0.0
+  category: apps
+  chart: strimzi-kafka-operator
+  chartVersion: 1.0.0
+  helmReleaseCRName: strimzi-kafka-operator
+  helmReleaseCRNamespace: strimzi-system
+  helmRepositoryCRName: strimzi
+  helmRepositoryCRNamespace: flux-system
+  name: strimzi-kafka-operator
+  namespace: strimzi-system
+  repoUrl: https://strimzi.io/
+  revision: 1
+  status: deployed
+  values:
+    resources:
+      limits:
+        cpu: 1
+        memory: 1Gi
+      requests:
+        cpu: 200m
+        memory: 512Mi
+    watchAnyNamespace: false
+    watchNamespaces:
+    - kafka
+- appVersion: v1.16.2
+  category: apps
+  chart: cert-manager
+  chartInstallsCRDs: true
+  chartVersion: v1.16.2
+  name: cert-manager
+  namespace: cert-manager
+  repoUrl: https://cert-manager.io
+  revision: 4
+  status: deployed
+  values:
+    crds:
+      enabled: true

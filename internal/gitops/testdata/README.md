@@ -14,13 +14,13 @@ or recorded as a new amendment to the note.
 
 ## Fixtures
 
-- **observability-pipeline-prd** — mature tenant cluster. Exercises:
+- **mature-tenant-prd** — mature tenant cluster. Exercises:
   helm matched/unmatched mix, native CRs (Kafka, KafkaTopic, KafkaUser,
   ScaledObject), tier-aware namespace placement (infrastructure-tier
   namespaces routed to `infrastructure/configs/`, app namespaces routed
   to `apps/<env>/`), namespace metadata preservation, and the
   base/env split with patches.
-- **loki-dev** — fresh tenant cluster. Exercises the
+- **fresh-tenant-dev** — fresh tenant cluster. Exercises the
   empty→populated `infrastructure/configs/` transition: the observability
   namespace lands there and is the only thing in `infrastructure/configs/`,
   so the cluster pointer files gain a synthesized `infra-configs` Flux

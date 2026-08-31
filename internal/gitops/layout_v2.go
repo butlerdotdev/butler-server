@@ -191,7 +191,7 @@ func releaseTier(rel *DiscoveredRelease) string {
 
 // emitInfrastructureRelease writes infrastructure/controllers/<name>.yaml
 // as a single consolidated file: optional Namespace, HelmRepository, and
-// HelmRelease joined by `---`. Matches butler-crop-live-infra's
+// HelmRelease joined by `---`. Matches the reference layout repository's
 // infrastructure/controllers/ shape.
 //
 // The file basename and the emitted HR/HelmRepository CR names come from

@@ -1,0 +1,16 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: loki-gateway
+  namespace: loki
+spec:
+  entryPoints:
+  - websecure
+  routes:
+  - kind: Rule
+    match: Host(`logs-dev.example.com`)
+    services:
+    - name: loki-gateway
+      port: 80
+  tls:
+    secretName: loki-gateway-tls

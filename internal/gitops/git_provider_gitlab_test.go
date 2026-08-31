@@ -271,8 +271,8 @@ func TestParseRepoURL_SelfHosted(t *testing.T) {
 		wantOwner string
 		wantRepo  string
 	}{
-		{"https://gitlab.corteva.com/infra/butler-gitops", "infra", "butler-gitops"},
-		{"https://gitlab.corteva.com/infra/butler-gitops.git", "infra", "butler-gitops"},
+		{"https://gitlab.example.com/infra/butler-gitops", "infra", "butler-gitops"},
+		{"https://gitlab.example.com/infra/butler-gitops.git", "infra", "butler-gitops"},
 		{"https://github.example.com/org/repo", "org", "repo"},
 		{"https://github.com/butlerdotdev/butler-cli", "butlerdotdev", "butler-cli"},
 		{"https://gitlab.com/group/project", "group", "project"},
