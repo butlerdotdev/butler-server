@@ -86,25 +86,34 @@ func (p *GitLabProvider) ValidateToken(ctx context.Context) (*TokenValidation, e
 }
 
 func (p *GitLabProvider) ListRepositories(ctx context.Context) ([]*Repository, error) {
-	const maxRepos = 200
-
 	if p.organization != "" {
-		return p.listGroupProjects(ctx, maxRepos)
+		return p.listGroupProjects(ctx)
 	}
-	return p.listAllProjects(ctx, maxRepos)
+	return p.listAllProjects(ctx)
 }
 
-// listGroupProjects uses the Groups API to list projects scoped to a group.
-func (p *GitLabProvider) listGroupProjects(ctx context.Context, maxRepos int) ([]*Repository, error) {
+// listGroupProjects uses the Groups API to list projects scoped to a group,
+// including every subgroup beneath it. It walks the whole result set: an
+// operator configuring a group expects to see the repositories in it, and a
+// listing that quietly stops part way is worse than one that fails.
+func (p *GitLabProvider) listGroupProjects(ctx context.Context) ([]*Repository, error) {
 	allRepos := make([]*Repository, 0)
 	opts := &gitlab.ListGroupProjectsOptions{
 		IncludeSubGroups: gitlab.Ptr(true),
 		OrderBy:          gitlab.Ptr("updated_at"),
 		Sort:             gitlab.Ptr("desc"),
-		ListOptions:      gitlab.ListOptions{PerPage: 100},
+		ListOptions:      gitlab.ListOptions{PerPage: repositoryPageSize},
 	}
 
-	for {
+	for pages := 0; ; pages++ {
+		if pages >= maxRepositoryPages {
+			return nil, &RepositoryListTooLargeError{
+				Scope:    p.organization,
+				Pages:    pages,
+				PageSize: repositoryPageSize,
+			}
+		}
+
 		projects, resp, err := p.client.Groups.ListGroupProjects(p.organization, opts, gitlab.WithContext(ctx))
 		if err != nil {
 			return nil, p.wrapError(err, resp)
@@ -112,9 +121,6 @@ func (p *GitLabProvider) listGroupProjects(ctx context.Context, maxRepos int) ([
 
 		for _, proj := range projects {
 			allRepos = append(allRepos, projectToRepository(proj))
-			if len(allRepos) >= maxRepos {
-				return allRepos, nil
-			}
 		}
 
 		if resp.NextPage == 0 {
@@ -126,19 +132,28 @@ func (p *GitLabProvider) listGroupProjects(ctx context.Context, maxRepos int) ([
 	return allRepos, nil
 }
 
-// listAllProjects lists all projects the token has access to.
-func (p *GitLabProvider) listAllProjects(ctx context.Context, maxRepos int) ([]*Repository, error) {
+// listAllProjects lists every project the token has access to, used when no
+// organization is configured.
+func (p *GitLabProvider) listAllProjects(ctx context.Context) ([]*Repository, error) {
 	allRepos := make([]*Repository, 0)
 	opts := &gitlab.ListProjectsOptions{
 		Membership: gitlab.Ptr(true),
 		OrderBy:    gitlab.Ptr("updated_at"),
 		Sort:       gitlab.Ptr("desc"),
 		ListOptions: gitlab.ListOptions{
-			PerPage: 100,
+			PerPage: repositoryPageSize,
 		},
 	}
 
-	for {
+	for pages := 0; ; pages++ {
+		if pages >= maxRepositoryPages {
+			return nil, &RepositoryListTooLargeError{
+				Scope:    "all accessible projects",
+				Pages:    pages,
+				PageSize: repositoryPageSize,
+			}
+		}
+
 		projects, resp, err := p.client.Projects.ListProjects(opts, gitlab.WithContext(ctx))
 		if err != nil {
 			return nil, p.wrapError(err, resp)
@@ -146,9 +161,6 @@ func (p *GitLabProvider) listAllProjects(ctx context.Context, maxRepos int) ([]*
 
 		for _, proj := range projects {
 			allRepos = append(allRepos, projectToRepository(proj))
-			if len(allRepos) >= maxRepos {
-				return allRepos, nil
-			}
 		}
 
 		if resp.NextPage == 0 {
@@ -266,8 +278,8 @@ func (p *GitLabProvider) commitActions(ctx context.Context, owner, repo, branch,
 	// Build a set of existing file paths with a single API call.
 	existing := make(map[string]bool)
 	opts := &gitlab.ListTreeOptions{
-		Ref:       gitlab.Ptr(branch),
-		Recursive: gitlab.Ptr(true),
+		Ref:         gitlab.Ptr(branch),
+		Recursive:   gitlab.Ptr(true),
 		ListOptions: gitlab.ListOptions{PerPage: 100},
 	}
 	for {
@@ -305,7 +317,7 @@ func (p *GitLabProvider) commitActions(ctx context.Context, owner, repo, branch,
 	commit, resp, err := p.client.Commits.CreateCommit(pid, &gitlab.CreateCommitOptions{
 		Branch:        gitlab.Ptr(branch),
 		CommitMessage: gitlab.Ptr(message),
-		Actions:        actions,
+		Actions:       actions,
 	}, gitlab.WithContext(ctx))
 	if err != nil {
 		return nil, p.wrapError(err, resp)

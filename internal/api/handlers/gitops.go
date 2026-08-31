@@ -431,6 +431,16 @@ func (h *GitOpsHandler) EnableGitOps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Record the repository against the provider Butler is actually configured
+	// for. Deriving this from the provider is what keeps a GitLab install from
+	// recording github.com URLs for its clusters.
+	repositoryURL, err := gitops.RepositoryWebURL(gitConfig.Type, gitConfig.URL, req.Repository)
+	if err != nil {
+		h.logger.Error("Failed to derive repository URL", "error", err, "cluster", name)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to derive repository URL: %v", err))
+		return
+	}
+
 	tc, err := h.k8sClient.GetTenantClusterTyped(ctx, namespace, name)
 	if err != nil {
 		h.logger.Warn("Failed to get TenantCluster for status update", "error", err)
@@ -439,7 +449,7 @@ func (h *GitOpsHandler) EnableGitOps(w http.ResponseWriter, r *http.Request) {
 			Provider: "fluxcd",
 			Version:  result.Version,
 			Repository: &butlerv1alpha1.GitRepositorySpec{
-				URL:    fmt.Sprintf("https://github.com/%s", req.Repository),
+				URL:    repositoryURL,
 				Branch: req.Branch,
 				Path:   req.Path,
 			},
@@ -459,7 +469,7 @@ func (h *GitOpsHandler) EnableGitOps(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, gitops.EnableGitOpsResponse{
 		Success:       true,
 		Message:       "GitOps enabled successfully",
-		RepositoryURL: fmt.Sprintf("https://github.com/%s", req.Repository),
+		RepositoryURL: repositoryURL,
 		Provider:      "fluxcd",
 		Version:       result.Version,
 		Path:          req.Path,
@@ -778,9 +788,9 @@ func (h *GitOpsHandler) ExportAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	owner, repo, err := parseGitHubURL(repoURL)
+	owner, repo, err := h.resolveStoredRepo(ctx, repoURL)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid repository URL: %v", err))
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1266,9 +1276,9 @@ func (h *GitOpsHandler) ExportAllAddons(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	owner, repo, err := parseGitHubURL(repoURL)
+	owner, repo, err := h.resolveStoredRepo(ctx, repoURL)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid repository URL: %v", err))
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1527,10 +1537,17 @@ func (h *GitOpsHandler) EnableManagementGitOps(w http.ResponseWriter, r *http.Re
 		"fluxVersion", result.Version,
 	)
 
+	mgmtRepositoryURL, err := gitops.RepositoryWebURL(mgmtGitConfig.Type, mgmtGitConfig.URL, req.Repository)
+	if err != nil {
+		h.logger.Error("Failed to derive repository URL", "error", err)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to derive repository URL: %v", err))
+		return
+	}
+
 	writeJSON(w, http.StatusOK, gitops.EnableGitOpsResponse{
 		Success:       true,
 		Message:       "GitOps enabled on management cluster",
-		RepositoryURL: fmt.Sprintf("https://github.com/%s", req.Repository),
+		RepositoryURL: mgmtRepositoryURL,
 		Provider:      "fluxcd",
 		Version:       result.Version,
 		Path:          req.Path,
@@ -2328,24 +2345,31 @@ func (h *GitOpsHandler) getGitClient(ctx context.Context) (gitops.GitProvider, e
 	return h.createGitClient(ctx, cfg)
 }
 
-func parseGitHubURL(url string) (owner, repo string, err error) {
-	url = strings.TrimSuffix(url, ".git")
-
-	if strings.HasPrefix(url, "git@") {
-		parts := strings.Split(url, ":")
-		if len(parts) != 2 {
-			return "", "", fmt.Errorf("invalid SSH URL format")
+// resolveStoredRepo turns a repository URL recorded for a cluster into the
+// owner and repository to address through the configured provider.
+//
+// It preserves the full path, so a nested GitLab group resolves to the project
+// ID the GitLab API expects. It refuses when the recorded repository is hosted
+// somewhere other than the configured provider: during a provider migration the
+// same path on the new host is either absent or somebody else's repository, so
+// writing there is never the right outcome.
+func (h *GitOpsHandler) resolveStoredRepo(ctx context.Context, repoURL string) (owner, repo string, err error) {
+	cfg, err := h.getGitProviderConfig(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	owner, repo, err = gitops.ResolveRepoForProvider(repoURL, cfg.Type, cfg.URL)
+	if err != nil {
+		var mismatch *gitops.ProviderHostMismatchError
+		if errors.As(err, &mismatch) {
+			h.logger.Warn("Refusing cross-provider repository write",
+				"repository", mismatch.RepositoryURL,
+				"repositoryHost", mismatch.RepositoryHost,
+				"providerHost", mismatch.ProviderHost,
+			)
 		}
-		return gitops.ParseRepoFullName(parts[1])
+		return "", "", err
 	}
-
-	parts := strings.Split(url, "/")
-	if len(parts) < 2 {
-		return "", "", fmt.Errorf("invalid URL format")
-	}
-
-	repo = parts[len(parts)-1]
-	owner = parts[len(parts)-2]
 	return owner, repo, nil
 }
 
