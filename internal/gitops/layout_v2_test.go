@@ -30,7 +30,7 @@ import (
 // shape.
 func TestLayoutV2ClusterFiles_EmptyConfigs(t *testing.T) {
 	tree, err := GenerateLayoutV2(ExportInput{
-		ClusterName: "usini2kpbtlrkn",
+		ClusterName: "mgmt-cluster-01",
 		Env:         "prd",
 		Helm:        &DiscoveryResult{},
 		Native:      &NativeDiscoveryResult{},
@@ -39,7 +39,7 @@ func TestLayoutV2ClusterFiles_EmptyConfigs(t *testing.T) {
 		t.Fatalf("GenerateLayoutV2: %v", err)
 	}
 
-	clusterKust := tree["clusters/usini2kpbtlrkn/kustomization.yaml"]
+	clusterKust := tree["clusters/mgmt-cluster-01/kustomization.yaml"]
 	if clusterKust == nil {
 		t.Fatalf("missing clusters/<name>/kustomization.yaml")
 	}
@@ -49,7 +49,7 @@ func TestLayoutV2ClusterFiles_EmptyConfigs(t *testing.T) {
 		t.Errorf("cluster kustomization missing pointers: %s", clusterKust)
 	}
 
-	infra := tree["clusters/usini2kpbtlrkn/infrastructure.yaml"]
+	infra := tree["clusters/mgmt-cluster-01/infrastructure.yaml"]
 	if !strings.Contains(string(infra), "name: infra-controllers") {
 		t.Errorf("infrastructure.yaml missing infra-controllers Kustomization: %s", infra)
 	}
@@ -60,7 +60,7 @@ func TestLayoutV2ClusterFiles_EmptyConfigs(t *testing.T) {
 		t.Errorf("infrastructure.yaml should NOT emit infra-configs when configs/ is empty (conditional emission): %s", infra)
 	}
 
-	apps := tree["clusters/usini2kpbtlrkn/apps.yaml"]
+	apps := tree["clusters/mgmt-cluster-01/apps.yaml"]
 	if !strings.Contains(string(apps), "name: apps") {
 		t.Errorf("apps.yaml missing apps Kustomization: %s", apps)
 	}
@@ -78,7 +78,7 @@ func TestLayoutV2ClusterFiles_EmptyConfigs(t *testing.T) {
 // are emitted, and apps.yaml depends on infra-configs.
 func TestLayoutV2ClusterFiles_WithConfigs(t *testing.T) {
 	in := ExportInput{
-		ClusterName: "usini2kpbtlrkn",
+		ClusterName: "mgmt-cluster-01",
 		Env:         "prd",
 		Helm:        &DiscoveryResult{},
 		Native: &NativeDiscoveryResult{
@@ -92,7 +92,7 @@ func TestLayoutV2ClusterFiles_WithConfigs(t *testing.T) {
 		t.Fatalf("GenerateLayoutV2: %v", err)
 	}
 
-	infra := tree["clusters/usini2kpbtlrkn/infrastructure.yaml"]
+	infra := tree["clusters/mgmt-cluster-01/infrastructure.yaml"]
 	if !strings.Contains(string(infra), "name: infra-controllers") {
 		t.Errorf("infrastructure.yaml missing infra-controllers Kustomization: %s", infra)
 	}
@@ -103,7 +103,7 @@ func TestLayoutV2ClusterFiles_WithConfigs(t *testing.T) {
 		t.Errorf("infrastructure.yaml missing wait: true: %s", infra)
 	}
 
-	apps := tree["clusters/usini2kpbtlrkn/apps.yaml"]
+	apps := tree["clusters/mgmt-cluster-01/apps.yaml"]
 	if !strings.Contains(string(apps), "name: infra-configs") {
 		t.Errorf("apps.yaml must dependsOn: infra-configs when infra-configs is emitted: %s", apps)
 	}

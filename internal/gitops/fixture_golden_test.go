@@ -39,11 +39,11 @@ import (
 // filtering, conditional infra-configs) WILL surface as a fixture diff.
 //
 // Scenarios:
-//   - observability-pipeline-prd: mature tenant, full inventory, exercises
+//   - mature-tenant-prd: mature tenant, full inventory, exercises
 //     every code path that emits content (Strimzi + KEDA + ClusterIssuer +
 //     StorageClass + SealedSecret + standalone Namespaces + all 3 native
 //     tiers + base/env split + Flux ownership filter).
-//   - loki-dev: near-empty fresh-bootstrap shape, exercises the
+//   - fresh-tenant-dev: near-empty fresh-bootstrap shape, exercises the
 //     conditional infra-configs gate (no infra-configs Flux Kustomization
 //     when there's no infra-configs content) and the minimal-tenant
 //     overlay path.
@@ -55,16 +55,16 @@ func TestFixtureGoldenLayout(t *testing.T) {
 		fixtureRoot string
 	}{
 		{
-			name:        "mature_observability_pipeline_prd",
-			cluster:     "observability-pipeline-prd",
+			name:        "mature_tenant_prd",
+			cluster:     "mature-tenant-prd",
 			env:         "prd",
-			fixtureRoot: "testdata/observability-pipeline-prd",
+			fixtureRoot: "testdata/mature-tenant-prd",
 		},
 		{
-			name:        "fresh_loki_dev",
-			cluster:     "loki-dev",
+			name:        "fresh_tenant_dev",
+			cluster:     "fresh-tenant-dev",
 			env:         "dev",
-			fixtureRoot: "testdata/loki-dev",
+			fixtureRoot: "testdata/fresh-tenant-dev",
 		},
 	}
 

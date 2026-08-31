@@ -11,12 +11,12 @@ Proposed — revision 3 (2026-05-23, post-cross-check refinement)
 ## Context
 
 ADR-016 designed the gitops export against the management cluster
-(usini2kpbtlrkn) with butler-crop-live-infra as the reference target
+(mgmt-cluster-01) with the reference layout repository as the reference target
 layout. The local-against-live validation loop confirmed the export
 produces a correct tree for that one cluster shape.
 
 Validating the same export against a real tenant cluster
-(observability-pipeline-prd) surfaced that the v1 design does not
+(mature-tenant-prd) surfaced that the v1 design does not
 generalize. The tenant produces a tree that captures roughly 19% of the
 gitops-managed objects Flux is reconciling, silently dropping user
 workload declarations (Kafka, KafkaTopic, KafkaUser, ScaledObject),
@@ -45,11 +45,11 @@ already fixed in code (commit 5733616) under the same
 sealed-secrets HR CR name fix established. They are recorded here
 for completeness but do not require ratification.
 
-### Evidence — local-against-live validation on observability-pipeline-prd
+### Evidence — local-against-live validation on mature-tenant-prd
 
 Discovery counts:
 
-| Source | Mgmt (usini2kpbtlrkn) | Tenant (observability-pipeline-prd) |
+| Source | Mgmt (mgmt-cluster-01) | Tenant (mature-tenant-prd) |
 |---|---|---|
 | Matched Helm releases | 6 | 0 (no AddonDefinitions registered) |
 | Unmatched Helm releases | 5 | 11 |
@@ -321,7 +321,7 @@ in a follow-on.
 Operational consistency: tenants and mgmt under the same gitops
 structure are easier to reason about, document, and review. The
 multi-Kustomization per-component pattern observed on
-observability-pipeline-prd is a valid Flux layout but not what the
+mature-tenant-prd is a valid Flux layout but not what the
 export emits — tenants using it will see the export propose a
 restructure, the operator decides whether to adopt it.
 
@@ -354,7 +354,7 @@ D4 extend the reference shape consistently for the broader tenant kinds
 this ADR covers; they are not contradicted by anything in the reference.
 
 **Observed divergence between the live tenant cluster
-(observability-pipeline-prd) and the reference shape:** the live
+(mature-tenant-prd) and the reference shape:** the live
 cluster has 9 Flux Kustomizations (`apps`, `flux-system`,
 `infra-controllers`, `infra-keda`, `infra-reflector`, `infra-storage`,
 `infra-strimzi`, `kafka-resources`, `scaledobjects`) — operators
@@ -506,16 +506,16 @@ butler-server only. On the existing feature branch
 Same shape as the mgmt loop (ADR-016 PR 2's local-against-live
 process):
 
-1. Run `-summary-only` against `observability-pipeline-prd` tenant.
+1. Run `-summary-only` against `mature-tenant-prd` tenant.
 2. Verify the produced tree matches the tenant reference layout (D4).
 3. Re-run the prune-safety property test against tenant's actual Flux
    inventory; bar is now near-100% coverage of in-scope items (after
    subtracting Flux self-management).
 4. Hold at Gate 1; surface scratch repo target.
 5. Real scratch-MR run.
-6. Record `testdata/observability-pipeline-prd/` golden fixtures.
+6. Record `testdata/mature-tenant-prd/` golden fixtures.
 
-The mgmt golden fixtures (`testdata/butler-crop-prd/`) should be
+The mgmt golden fixtures (`testdata/mature-tenant-prd/`) should be
 recorded in the same PR; the prune-safety property test in CI then
 runs against both shapes without live-cluster access.
 
@@ -608,7 +608,7 @@ runs against both shapes without live-cluster access.
   the existing tenant gitops reference repo D4's shape derives from
   (a Butler-managed tenant cluster running the Vector aggregator
   pattern; explicitly labeled "fork-and-deploy GitOps reference")
-- Local-against-live validation run on observability-pipeline-prd
+- Local-against-live validation run on mature-tenant-prd
   tenant, 2026-05-23 (note: live cluster has a 9-Kustomization
   per-component layout that diverged from butler-observability-pipeline-reference's
   3-tier shape post-fork; the export emits the reference shape)
