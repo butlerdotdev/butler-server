@@ -35,9 +35,11 @@ func Middleware(emitter *Emitter) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			method := r.Method
 
-			// Only audit mutations
+			// Audit mutations, plus the reads that hand out credentials
+			// or a full resource export.
 			if method != http.MethodPost && method != http.MethodPut &&
-				method != http.MethodPatch && method != http.MethodDelete {
+				method != http.MethodPatch && method != http.MethodDelete &&
+				!isAuditedRead(method, r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -115,9 +117,31 @@ func isAuthPath(path string) bool {
 		strings.HasPrefix(path, "/api/auth/set-password")
 }
 
+// isAuditedRead reports whether a GET request must be audited even
+// though it does not mutate anything. Kubeconfig downloads hand out
+// cluster-admin credentials and YAML exports hand out the full
+// TenantCluster spec; both belong in the audit trail.
+func isAuditedRead(method, path string) bool {
+	if method != http.MethodGet {
+		return false
+	}
+	if !strings.HasPrefix(path, "/api/clusters/") {
+		return false
+	}
+	return strings.HasSuffix(path, "/kubeconfig") || strings.HasSuffix(path, "/export")
+}
+
 // resolveAction maps HTTP method + path to a semantic action.
 func resolveAction(method, path string) string {
 	switch method {
+	case http.MethodGet:
+		if strings.HasSuffix(path, "/kubeconfig") {
+			return "download-kubeconfig"
+		}
+		if strings.HasSuffix(path, "/export") {
+			return "export"
+		}
+		return "get"
 	case http.MethodPost:
 		return "create"
 	case http.MethodPut:
