@@ -293,14 +293,25 @@ func (u *UserSession) HasRoleInTeam(teamName, role string) bool {
 	return membership.Role == role
 }
 
-// IsAdmin checks if the user has admin privileges.
-// Returns true if the user is a platform admin or an admin of any team.
-// Platform viewers do NOT pass this check.
+// IsPlatformAdminRole reports whether the session holds the platform
+// admin role. This is the only check that grants platform-wide write
+// authority; being an admin of one or more teams never satisfies it.
+//
+// The method cannot be named IsPlatformAdmin because UserSession keeps
+// a serialized IsPlatformAdmin field for pre-ADR-014 JWT compatibility.
+func (u *UserSession) IsPlatformAdminRole() bool {
+	return u.PlatformRole == RoleAdmin
+}
+
+// IsAdmin reports whether the user is a platform admin.
+//
+// Deprecated: team admins are not platform admins; use
+// IsPlatformAdminRole or IsAdminOfTeam. IsAdmin used to also return
+// true for an admin of any team, which let a team admin pass
+// platform-level and cross-team gates. It now means platform admin
+// only and is kept so out-of-tree callers fail closed.
 func (u *UserSession) IsAdmin() bool {
-	if u.PlatformRole == RoleAdmin {
-		return true
-	}
-	return u.HasRole(RoleAdmin)
+	return u.IsPlatformAdminRole()
 }
 
 // IsAdminOfTeam checks if the user is an admin of a specific team.
@@ -351,12 +362,12 @@ func (u *UserSession) CanViewTeam(teamName string) bool {
 // Platform viewers cannot operate unless they have an explicit higher
 // role in the selected team.
 func (u *UserSession) CanOperateInSelectedTeam() bool {
-	// No team selected - use legacy behavior
+	// No team selected: only a platform admin may operate. An admin or
+	// operator role in some team says nothing about the resource being
+	// touched, so it never grants header-less write access. Callers that
+	// know the resource's team should use CanOperateTeam(team).
 	if u.SelectedTeam == "" {
-		if u.PlatformRole == RoleAdmin {
-			return true
-		}
-		return u.HasRole(RoleAdmin) || u.HasRole(RoleOperator)
+		return u.IsPlatformAdminRole()
 	}
 
 	// Team selected - check role in that team
@@ -393,9 +404,12 @@ func (u *UserSession) effectiveEnvRole() string {
 // CanOperateInSelectedEnvironment checks if the user can mutate
 // resources scoped to the selected environment. Mirrors
 // CanOperateInSelectedTeam but uses the env-aware effective role. When
-// no env is selected this falls back to team-level semantics.
+// no env is selected this falls back to team-level semantics, so with
+// no team selected either, only a platform admin passes.
 func (u *UserSession) CanOperateInSelectedEnvironment() bool {
-	if u.SelectedEnvironment == "" {
+	// An environment is only meaningful inside a team. Without a team
+	// the env role cannot elevate anything; fall back to platform admin.
+	if u.SelectedEnvironment == "" || u.SelectedTeam == "" {
 		return u.CanOperateInSelectedTeam()
 	}
 	if u.PlatformRole == RoleAdmin {

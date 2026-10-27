@@ -81,10 +81,70 @@ type UpdateImageSyncRequest struct {
 
 // --- Image Sync CRUD ---
 
+// imageSyncTeam returns the team that owns an ImageSync namespace, or ""
+// when the namespace is not a team namespace (the system namespace and
+// anything else are platform-owned).
+func imageSyncTeam(namespace string) string {
+	if strings.HasPrefix(namespace, "team-") {
+		return strings.TrimPrefix(namespace, "team-")
+	}
+	return ""
+}
+
+// canViewImageSync is the ImageSync read rule. Platform viewers and
+// admins see every namespace. Everyone else sees the shared system
+// namespace plus the namespaces of teams they belong to; with a team
+// selected, only that team's namespace (and the system namespace).
+func canViewImageSync(user *auth.UserSession, namespace, systemNamespace string) bool {
+	if user == nil {
+		return false
+	}
+	if user.IsPlatformViewerOrAbove() {
+		return true
+	}
+	if namespace == systemNamespace {
+		return true
+	}
+	team := imageSyncTeam(namespace)
+	if team == "" {
+		return false
+	}
+	if user.SelectedTeam != "" {
+		return team == user.SelectedTeam
+	}
+	return user.HasTeamMembership(team)
+}
+
+// canMutateImageSync is the ImageSync write rule. Platform admins may
+// mutate anything. Otherwise the ImageSync must live in a team
+// namespace on which the caller holds an operate-capable role, and
+// with a team selected it must be that team. ImageSyncs in the system
+// namespace are shared by every team and are platform-admin only.
+func canMutateImageSync(user *auth.UserSession, namespace string) bool {
+	if user == nil {
+		return false
+	}
+	if user.IsPlatformAdminRole() {
+		return true
+	}
+	team := imageSyncTeam(namespace)
+	if team == "" {
+		return false
+	}
+	if user.SelectedTeam != "" && team != user.SelectedTeam {
+		return false
+	}
+	return user.CanOperateTeam(team)
+}
+
 // ListImageSyncs handles GET /api/image-syncs.
 // Supports query params: ?provider=name&status=Ready&schematic=abc123
 func (h *ImagesHandler) ListImageSyncs(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 	ctx := r.Context()
 
 	providerFilter := r.URL.Query().Get("provider")
@@ -101,15 +161,10 @@ func (h *ImagesHandler) ListImageSyncs(w http.ResponseWriter, r *http.Request) {
 
 	results := make([]map[string]interface{}, 0, len(imageSyncs.Items))
 	for _, is := range imageSyncs.Items {
-		// Filter by team access for non-admin users
-		if user != nil && !user.IsAdmin() {
-			isNamespace := is.GetNamespace()
-			if user.SelectedTeam != "" {
-				teamNS := "team-" + user.SelectedTeam
-				if isNamespace != teamNS && isNamespace != h.config.SystemNamespace {
-					continue
-				}
-			}
+		// Filter by read access (platform roles see all; others see the
+		// system namespace plus their teams' namespaces)
+		if !canViewImageSync(user, is.GetNamespace(), h.config.SystemNamespace) {
+			continue
 		}
 
 		// Apply query param filters
@@ -179,17 +234,22 @@ func (h *ImagesHandler) CreateImageSync(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Authorization: check operate permission if team context is set
-	if user != nil {
-		if user.SelectedTeam != "" {
-			if user.SelectedTeamRole == auth.RoleViewer {
-				writeError(w, http.StatusForbidden, "viewer role cannot create image syncs")
-				return
-			}
-		} else if !user.IsAdmin() {
-			writeError(w, http.StatusForbidden, "image sync creation requires admin role or team context")
+	// Authorization: with a team selected the ImageSync lands in that
+	// team's namespace and needs an operate-capable role there; without
+	// one it lands in the shared system namespace, which is platform
+	// admin only. Admin of some other team grants nothing here.
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if user.SelectedTeam != "" {
+		if !canMutateImageSync(user, "team-"+user.SelectedTeam) {
+			writeError(w, http.StatusForbidden, "viewer role cannot create image syncs")
 			return
 		}
+	} else if !user.IsPlatformAdminRole() {
+		writeError(w, http.StatusForbidden, "image sync creation requires platform admin or team context")
+		return
 	}
 
 	// Set defaults
@@ -208,7 +268,7 @@ func (h *ImagesHandler) CreateImageSync(w http.ResponseWriter, r *http.Request) 
 
 	// Determine the namespace for the ImageSync
 	namespace := h.config.SystemNamespace
-	if user != nil && user.SelectedTeam != "" {
+	if user.SelectedTeam != "" {
 		namespace = "team-" + user.SelectedTeam
 	}
 
@@ -268,9 +328,19 @@ func (h *ImagesHandler) CreateImageSync(w http.ResponseWriter, r *http.Request) 
 
 // GetImageSync handles GET /api/image-syncs/{namespace}/{name}.
 func (h *ImagesHandler) GetImageSync(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
 	namespace := chi.URLParam(r, "namespace")
 	name := chi.URLParam(r, "name")
 	ctx := r.Context()
+
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !canViewImageSync(user, namespace, h.config.SystemNamespace) {
+		writeError(w, http.StatusForbidden, "you don't have access to image syncs in this namespace")
+		return
+	}
 
 	imageSync, err := h.k8sClient.Dynamic().Resource(imageSyncGVR).Namespace(namespace).Get(
 		ctx, name, metav1.GetOptions{},
@@ -290,6 +360,18 @@ func (h *ImagesHandler) DeleteImageSync(w http.ResponseWriter, r *http.Request) 
 	name := chi.URLParam(r, "name")
 	ctx := r.Context()
 
+	// Authorization before the existence check so a caller cannot probe
+	// other teams' ImageSyncs. Operate role on the owning team, or
+	// platform admin; system-namespace ImageSyncs are platform admin only.
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !canMutateImageSync(user, namespace) {
+		writeError(w, http.StatusForbidden, "operator or admin role on the owning team, or platform admin, required to delete image syncs")
+		return
+	}
+
 	// Verify the ImageSync exists
 	_, err := h.k8sClient.Dynamic().Resource(imageSyncGVR).Namespace(namespace).Get(
 		ctx, name, metav1.GetOptions{},
@@ -297,19 +379,6 @@ func (h *ImagesHandler) DeleteImageSync(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("image sync not found: %v", err))
 		return
-	}
-
-	// Authorization: require admin or operator role
-	if user != nil {
-		if user.SelectedTeam != "" {
-			if user.SelectedTeamRole == auth.RoleViewer {
-				writeError(w, http.StatusForbidden, "viewer role cannot delete image syncs")
-				return
-			}
-		} else if !user.IsAdmin() {
-			writeError(w, http.StatusForbidden, "image sync deletion requires admin role or team context")
-			return
-		}
 	}
 
 	err = h.k8sClient.Dynamic().Resource(imageSyncGVR).Namespace(namespace).Delete(
@@ -332,6 +401,18 @@ func (h *ImagesHandler) UpdateImageSync(w http.ResponseWriter, r *http.Request) 
 	name := chi.URLParam(r, "name")
 	ctx := r.Context()
 
+	// Authorization before the existence check so a caller cannot probe
+	// other teams' ImageSyncs. Operate role on the owning team, or
+	// platform admin; system-namespace ImageSyncs are platform admin only.
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !canMutateImageSync(user, namespace) {
+		writeError(w, http.StatusForbidden, "operator or admin role on the owning team, or platform admin, required to update image syncs")
+		return
+	}
+
 	var req UpdateImageSyncRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -345,19 +426,6 @@ func (h *ImagesHandler) UpdateImageSync(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("image sync not found: %v", err))
 		return
-	}
-
-	// Authorization: require admin or operator role
-	if user != nil {
-		if user.SelectedTeam != "" {
-			if user.SelectedTeamRole == auth.RoleViewer {
-				writeError(w, http.StatusForbidden, "viewer role cannot update image syncs")
-				return
-			}
-		} else if !user.IsAdmin() {
-			writeError(w, http.StatusForbidden, "image sync update requires admin role or team context")
-			return
-		}
 	}
 
 	// Apply mutable field updates

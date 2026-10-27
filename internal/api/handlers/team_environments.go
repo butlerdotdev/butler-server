@@ -73,6 +73,23 @@ type EnvironmentRequest struct {
 	ClusterDefaults map[string]interface{} `json:"clusterDefaults,omitempty"`
 }
 
+// authorizeTeamEnvironmentChange gates adding, updating and removing a
+// team's environments. Platform admins and admins of the named team are
+// allowed; operators, viewers, platform viewers and admins of other
+// teams are not. The admission webhook still checks env limits on the
+// impersonated write, but it does not guard env existence, access lists
+// or cluster defaults, so the server decides first. A zero status means
+// allowed.
+func authorizeTeamEnvironmentChange(user *auth.UserSession, teamName string) (int, string) {
+	if user == nil {
+		return http.StatusUnauthorized, "Unauthorized"
+	}
+	if user.IsPlatformAdminRole() || user.IsAdminOfTeam(teamName) {
+		return 0, ""
+	}
+	return http.StatusForbidden, "Team admin of " + teamName + " or platform admin required to change environments"
+}
+
 // AddEnvironment appends an environment to Team.spec.environments[].
 // The Team admission webhook (ADR-009) gates spec.environments[].limits
 // mutations to team admins; spec.resourceLimits mutations require a
@@ -82,6 +99,10 @@ type EnvironmentRequest struct {
 func (h *TeamHandler) AddEnvironment(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	user := auth.UserFromContext(r.Context())
+	if status, msg := authorizeTeamEnvironmentChange(user, name); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
 
 	var req EnvironmentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -141,6 +162,10 @@ func (h *TeamHandler) UpdateEnvironment(w http.ResponseWriter, r *http.Request) 
 	name := chi.URLParam(r, "name")
 	envName := chi.URLParam(r, "env")
 	user := auth.UserFromContext(r.Context())
+	if status, msg := authorizeTeamEnvironmentChange(user, name); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
 
 	var req EnvironmentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -208,6 +233,10 @@ func (h *TeamHandler) RemoveEnvironment(w http.ResponseWriter, r *http.Request) 
 	name := chi.URLParam(r, "name")
 	envName := chi.URLParam(r, "env")
 	user := auth.UserFromContext(r.Context())
+	if status, msg := authorizeTeamEnvironmentChange(user, name); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
 
 	team, err := h.getTeam(r.Context(), name)
 	if err != nil {

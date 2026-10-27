@@ -139,6 +139,26 @@ func (h *WorkspaceHandler) List(w http.ResponseWriter, r *http.Request) {
 	namespace := chi.URLParam(r, "namespace")
 	clusterName := chi.URLParam(r, "name")
 
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	// The workspace list inherits the cluster's read rule, and only
+	// platform roles and admins of the cluster's own team see other
+	// users' workspaces. Admin of some other team grants nothing.
+	cluster, err := h.k8sClient.GetTenantCluster(r.Context(), namespace, clusterName)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster %s/%s not found", namespace, clusterName))
+		return
+	}
+	if err := checkClusterVisibility(user, cluster); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	clusterTeam, _, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+	seeAll := user.IsPlatformViewerOrAbove() || (clusterTeam != "" && user.IsAdminOfTeam(clusterTeam))
+
 	workspaces, err := h.k8sClient.Dynamic().Resource(WorkspaceGVR).Namespace(namespace).List(r.Context(), metav1.ListOptions{})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list workspaces: %v", err))
@@ -153,8 +173,8 @@ func (h *WorkspaceHandler) List(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Non-admins can only see their own workspaces unless they're team admins
-		if user != nil && !user.IsAdmin() && user.SelectedTeamRole != "admin" {
+		// Everyone else sees only their own workspaces
+		if !seeAll {
 			wsOwner, _, _ := unstructured.NestedString(ws.Object, "spec", "owner")
 			if wsOwner != user.Email {
 				continue
@@ -177,6 +197,11 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	namespace := chi.URLParam(r, "namespace")
 	clusterName := chi.URLParam(r, "name")
 
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
 	// Check operate permission
 	if user.SelectedTeamRole == "viewer" {
 		writeError(w, http.StatusForbidden, "viewer role cannot create workspaces")
@@ -198,6 +223,14 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	cluster, err := h.k8sClient.GetTenantCluster(r.Context(), namespace, clusterName)
 	if err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("cluster %s/%s not found", namespace, clusterName))
+		return
+	}
+
+	// Creating a workspace is a write on the cluster's team: operate
+	// role on that team (or platform admin), and with a team selected it
+	// must be the cluster's team.
+	if err := checkWorkspaceClusterOperate(user, cluster); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
 
@@ -370,7 +403,7 @@ func (h *WorkspaceHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.checkWorkspaceAccess(user, ws); err != nil {
+	if err := h.checkWorkspaceAccess(r.Context(), user, ws, false); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -390,7 +423,7 @@ func (h *WorkspaceHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.checkWorkspaceAccess(user, ws); err != nil {
+	if err := h.checkWorkspaceAccess(r.Context(), user, ws, true); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -415,7 +448,7 @@ func (h *WorkspaceHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.checkWorkspaceAccess(user, ws); err != nil {
+	if err := h.checkWorkspaceAccess(r.Context(), user, ws, true); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -449,7 +482,7 @@ func (h *WorkspaceHandler) Disconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.checkWorkspaceAccess(user, ws); err != nil {
+	if err := h.checkWorkspaceAccess(r.Context(), user, ws, true); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -483,7 +516,7 @@ func (h *WorkspaceHandler) StartWorkspace(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := h.checkWorkspaceAccess(user, ws); err != nil {
+	if err := h.checkWorkspaceAccess(r.Context(), user, ws, true); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -734,15 +767,23 @@ func (h *WorkspaceHandler) CreateTemplate(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Determine namespace based on scope
+	// Determine namespace based on scope. Cluster-scoped templates are
+	// platform admin only; team-scoped ones need an operate-capable role
+	// on the selected team (same rule as update and delete).
 	scope, _ := body["scope"].(string)
-	namespace := fmt.Sprintf("team-%s", user.SelectedTeam)
+	var namespace string
 	if scope == "cluster" {
-		if !user.IsAdmin() {
-			writeError(w, http.StatusForbidden, "only platform admins can create cluster-scoped templates")
+		namespace = "butler-system"
+	} else {
+		if user.SelectedTeam == "" {
+			writeError(w, http.StatusBadRequest, "team context required to create a team-scoped template")
 			return
 		}
-		namespace = "butler-system"
+		namespace = fmt.Sprintf("team-%s", user.SelectedTeam)
+	}
+	if err := checkTemplatePermission(user, namespace); err != nil {
+		writeError(w, http.StatusForbidden, err.Error())
+		return
 	}
 
 	template := &unstructured.Unstructured{
@@ -852,7 +893,7 @@ func (h *WorkspaceHandler) DeleteTemplate(w http.ResponseWriter, r *http.Request
 // platform admin. Team-scoped templates require team operator.
 func checkTemplatePermission(user *auth.UserSession, namespace string) error {
 	if namespace == "butler-system" {
-		if !user.IsAdmin() {
+		if !user.IsPlatformAdminRole() {
 			return fmt.Errorf("only platform admins can modify cluster-scoped templates")
 		}
 		return nil
@@ -861,14 +902,17 @@ func checkTemplatePermission(user *auth.UserSession, namespace string) error {
 	// Team-scoped: namespace is "team-{name}"
 	if strings.HasPrefix(namespace, "team-") {
 		teamName := strings.TrimPrefix(namespace, "team-")
+		if user.SelectedTeam != "" && user.SelectedTeam != teamName && !user.IsPlatformAdminRole() {
+			return fmt.Errorf("cannot modify templates for team '%s' while scoped to team '%s'", teamName, user.SelectedTeam)
+		}
 		if !user.CanOperateTeam(teamName) {
 			return fmt.Errorf("you don't have permission to modify templates for team '%s'", teamName)
 		}
 		return nil
 	}
 
-	// Unknown namespace pattern — require admin as a safe default
-	if !user.IsAdmin() {
+	// Unknown namespace pattern — require platform admin as a safe default
+	if !user.IsPlatformAdminRole() {
 		return fmt.Errorf("insufficient permissions to modify templates in namespace '%s'", namespace)
 	}
 	return nil
@@ -962,18 +1006,68 @@ func (h *WorkspaceHandler) GetMetrics(w http.ResponseWriter, r *http.Request) {
 
 // ---- Helper methods ----
 
-func (h *WorkspaceHandler) checkWorkspaceAccess(user *auth.UserSession, ws *unstructured.Unstructured) error {
-	if user.IsAdmin() {
+// checkWorkspaceClusterOperate is the write rule for creating a
+// workspace on a cluster: the cluster-mutation rule applied to the
+// cluster's team.
+func checkWorkspaceClusterOperate(user *auth.UserSession, cluster *unstructured.Unstructured) error {
+	if user.IsPlatformAdminRole() {
 		return nil
 	}
-	if user.SelectedTeamRole == "admin" {
+	clusterTeam, _, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+	if clusterTeam == "" {
+		return fmt.Errorf("forbidden: platform admin required for clusters without a team")
+	}
+	if user.SelectedTeam != "" && user.SelectedTeam != clusterTeam {
+		return fmt.Errorf("cannot create workspaces on team '%s' clusters while scoped to team '%s'", clusterTeam, user.SelectedTeam)
+	}
+	if !user.CanOperateTeam(clusterTeam) {
+		return fmt.Errorf("operator or admin role on team '%s' required to create workspaces", clusterTeam)
+	}
+	return nil
+}
+
+// checkWorkspaceAccess decides whether user may read (write=false) or
+// act on (write=true) a workspace. The owner always may. Otherwise the
+// caller needs platform admin, platform viewer for reads, or admin of
+// the team that owns the workspace's cluster. Being admin of the
+// selected team, or of any other team, grants nothing on a workspace
+// whose cluster belongs to a different team.
+func (h *WorkspaceHandler) checkWorkspaceAccess(ctx context.Context, user *auth.UserSession, ws *unstructured.Unstructured, write bool) error {
+	if user == nil {
+		return fmt.Errorf("unauthorized")
+	}
+	if user.IsPlatformAdminRole() {
 		return nil
 	}
 	owner, _, _ := unstructured.NestedString(ws.Object, "spec", "owner")
-	if owner != user.Email {
-		return fmt.Errorf("forbidden: workspace belongs to %s", owner)
+	if owner != "" && owner == user.Email {
+		return nil
 	}
-	return nil
+	if !write && user.IsPlatformViewerOrAbove() {
+		return nil
+	}
+	clusterName, _, _ := unstructured.NestedString(ws.Object, "spec", "clusterRef", "name")
+	if clusterName != "" {
+		if cluster, err := h.k8sClient.GetTenantCluster(ctx, ws.GetNamespace(), clusterName); err == nil {
+			clusterTeam, _, _ := unstructured.NestedString(cluster.Object, "spec", "teamRef", "name")
+			if workspaceTeamAdmin(user, clusterTeam) {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("forbidden: workspace belongs to %s", owner)
+}
+
+// workspaceTeamAdmin reports whether user administers clusterTeam in
+// the current header context.
+func workspaceTeamAdmin(user *auth.UserSession, clusterTeam string) bool {
+	if clusterTeam == "" {
+		return false
+	}
+	if user.SelectedTeam != "" && user.SelectedTeam != clusterTeam {
+		return false
+	}
+	return user.IsAdminOfTeam(clusterTeam)
 }
 
 func (h *WorkspaceHandler) resolveUserSSHKeys(ctx context.Context, email string) ([]string, error) {
@@ -1128,7 +1222,7 @@ func (h *WorkspaceHandler) SyncSSHKeys(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify access
-	if err := h.checkWorkspaceAccess(user, ws); err != nil {
+	if err := h.checkWorkspaceAccess(r.Context(), user, ws, true); err != nil {
 		writeError(w, http.StatusForbidden, err.Error())
 		return
 	}

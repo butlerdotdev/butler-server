@@ -248,7 +248,7 @@ func (v *PortalJWTVerifier) verifyClaimed(ctx context.Context, tokenString strin
 
 	// PlatformRole derives from the User CRD spec. IsPlatformAdmin is the
 	// back-compat field SessionService.CreateSession populates from the same
-	// source; mirror that here so downstream consumers (UserSession.IsAdmin()
+	// source; mirror that here so downstream consumers (UserSession.IsPlatformAdminRole()
 	// helpers, JSON serialization parity if a session is ever marshalled)
 	// see the same shape.
 	session := &UserSession{

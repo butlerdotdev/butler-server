@@ -256,9 +256,10 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 		PortalVerifier:           portalVerifier,
 		AllowHeaderImpersonation: cfg.Config.Auth.AllowHeaderImpersonation,
 	})
-	// adminMiddleware passes admins of any team; it stays on the team
-	// member and group-sync routes, whose handlers narrow it to the
-	// named team. Platform-level mutations use RequirePlatformAdmin.
+	// adminMiddleware admits platform admins only (it no longer passes
+	// admins of arbitrary teams). It guards the /admin team member and
+	// group-sync routes; their handlers additionally check the named
+	// team so a future relaxation of this gate cannot widen access.
 	adminMiddleware := auth.AdminMiddleware()
 	platformAdminMiddleware := auth.RequirePlatformAdmin()
 
@@ -510,11 +511,10 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			r.Post("/teams/{name}/providers/test", providerHandler.TestTeamConnection)
 			r.Delete("/teams/{name}/providers/{namespace}/{providerName}", providerHandler.DeleteTeamProvider)
 
-			// Team environment management (ADR-009). The Team admission
-			// webhook is the authoritative gate for mutation authority
-			// (team admin for env limits, platform admin for resource
-			// limits); these handlers impersonate the caller so the
-			// webhook sees the real identity.
+			// Team environment management (ADR-009). The handlers admit
+			// platform admins and admins of the named team only; the
+			// Team admission webhook still checks env and resource limits
+			// on the write, which is impersonated so it sees the caller.
 			r.Post("/teams/{name}/environments", teamHandler.AddEnvironment)
 			r.Put("/teams/{name}/environments/{env}", teamHandler.UpdateEnvironment)
 			r.Delete("/teams/{name}/environments/{env}", teamHandler.RemoveEnvironment)
@@ -545,8 +545,10 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 				// webhook URLs.
 				r.Get("/audit", auditHandler.ListAll)
 
-				// Team membership and group sync (platform admin, or admin of
-				// the named team; the handlers enforce the team scope)
+				// Team membership and group sync. This whole /admin subtree
+				// already requires a platform role, so a team admin without
+				// one never reached these routes; adminMiddleware now admits
+				// platform admins only and the handlers re-check the team.
 				r.Group(func(r chi.Router) {
 					r.Use(adminMiddleware)
 					r.Post("/teams/{name}/members", teamHandler.AddMember)

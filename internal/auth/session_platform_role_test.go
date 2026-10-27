@@ -255,7 +255,9 @@ func TestIsAdmin(t *testing.T) {
 	}{
 		{"platform admin", RoleAdmin, nil, true},
 		{"platform viewer", RoleViewer, nil, false},
-		{"no role, team admin", "", []TeamMembership{{Name: "acme", Role: RoleAdmin}}, true},
+		// A team admin is not a platform admin (IsAdmin is deprecated
+		// and now means platform admin only).
+		{"no role, team admin", "", []TeamMembership{{Name: "acme", Role: RoleAdmin}}, false},
 		{"no role, team viewer", "", []TeamMembership{{Name: "acme", Role: RoleViewer}}, false},
 		{"no role, no teams", "", nil, false},
 	}
@@ -264,6 +266,9 @@ func TestIsAdmin(t *testing.T) {
 			u := &UserSession{PlatformRole: tt.platformRole, Teams: tt.teams}
 			if got := u.IsAdmin(); got != tt.want {
 				t.Errorf("IsAdmin() = %v, want %v", got, tt.want)
+			}
+			if got := u.IsPlatformAdminRole(); got != tt.want {
+				t.Errorf("IsPlatformAdminRole() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -380,7 +385,10 @@ func TestCanOperateInSelectedTeam(t *testing.T) {
 	}{
 		{"admin no team selected", RoleAdmin, nil, "", "", true},
 		{"viewer no team selected", RoleViewer, nil, "", "", false},
-		{"no role, has operator team, no selection", "", []TeamMembership{{Name: "acme", Role: RoleOperator}}, "", "", true},
+		// With no team selected only a platform admin may operate; a
+		// role in some team does not carry over to an unnamed resource.
+		{"no role, has operator team, no selection", "", []TeamMembership{{Name: "acme", Role: RoleOperator}}, "", "", false},
+		{"no role, has admin team, no selection", "", []TeamMembership{{Name: "acme", Role: RoleAdmin}}, "", "", false},
 		{"admin with team selected", RoleAdmin, nil, "acme", RoleAdmin, true},
 		{"viewer with team selected as viewer", RoleViewer, nil, "acme", RoleViewer, false},
 		{

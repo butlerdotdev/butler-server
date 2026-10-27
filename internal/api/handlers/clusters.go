@@ -144,10 +144,16 @@ func (h *ClusterHandler) checkOperatePermission(user *auth.UserSession, teamRef 
 // optionally an environment) selected, the ADR-009 effective role is
 // used because SessionMiddleware already confirmed membership.
 func checkKubeconfigAccess(user *auth.UserSession, clusterTeam string) error {
-	if user.PlatformRole == auth.RoleAdmin {
+	if user.IsPlatformAdminRole() {
 		return nil
 	}
 	if user.SelectedTeam != "" {
+		// The selected-team role only speaks for the selected team's
+		// clusters. GetKubeconfig runs checkClusterVisibility first, but
+		// this rule must not rely on that ordering.
+		if clusterTeam != user.SelectedTeam {
+			return fmt.Errorf("cluster belongs to team '%s', not '%s'", clusterTeam, user.SelectedTeam)
+		}
 		if user.CanOperateInSelectedEnvironment() {
 			return nil
 		}
