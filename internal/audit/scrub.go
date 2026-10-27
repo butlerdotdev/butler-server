@@ -21,45 +21,69 @@ import (
 	"strings"
 )
 
-var sensitiveKeys = map[string]bool{
-	"password":       true,
-	"token":          true,
-	"secret":         true,
-	"kubeconfig":     true,
-	"clientsecret":   true,
-	"apikey":         true,
-	"privatekey":     true,
-	"accesskey":      true,
-	"secretaccesskey": true,
-	"serviceaccount": true,
+// secretKeyParts are matched case-insensitively as substrings of a JSON
+// key. This deliberately catches Butler's prefixed credential fields
+// (harvesterKubeconfig, nutanixPassword, proxmoxTokenSecret,
+// azureClientSecret, gcpServiceAccount, awsSecretAccessKey, ...), which an
+// exact-key list did not, so no provider or identity-provider credential is
+// retained in an audit request summary. It subsumes the old exact list.
+var secretKeyParts = []string{
+	"password",
+	"passwd",
+	"secret",
+	"token",
+	"kubeconfig",
+	"privatekey",
+	"serviceaccount",
+	"credential",
+	"apikey",
+	"accesskey",
 }
+
+// maxScrubInput bounds the body we will parse and scrub. A body larger
+// than this is summarized as omitted rather than parsed, both to bound
+// work and because a truncated JSON body cannot be safely scrubbed.
+const maxScrubInput = 256 * 1024
 
 const maxSummaryLength = 1024
 
-// ScrubRequestBody takes raw JSON bytes, redacts sensitive fields,
-// and returns a truncated string summary.
+// redactedValue replaces any secret-bearing value. The original length
+// and any prefix are not retained.
+const redactedValue = "[REDACTED]"
+
+func isSensitiveKey(key string) bool {
+	k := strings.ToLower(key)
+	for _, part := range secretKeyParts {
+		if strings.Contains(k, part) {
+			return true
+		}
+	}
+	return false
+}
+
+// ScrubRequestBody takes a raw request body, redacts every secret-bearing
+// field at any depth, and returns a bounded JSON summary. A body that is
+// not JSON is never returned raw: it may be a truncated or arbitrary
+// payload that still contains credentials, so it is summarized as omitted.
 func ScrubRequestBody(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
-
-	var data map[string]interface{}
-	if err := json.Unmarshal(body, &data); err != nil {
-		// Not valid JSON — truncate raw body
-		s := string(body)
-		if len(s) > maxSummaryLength {
-			return s[:maxSummaryLength]
-		}
-		return s
+	if len(body) > maxScrubInput {
+		return "[omitted: request body too large to summarize]"
 	}
 
-	scrubMap(data)
+	var data interface{}
+	if err := json.Unmarshal(body, &data); err != nil {
+		return "[omitted: request body was not JSON]"
+	}
 
-	result, err := json.Marshal(data)
+	scrubbed := scrubValue(data)
+
+	result, err := json.Marshal(scrubbed)
 	if err != nil {
 		return ""
 	}
-
 	s := string(result)
 	if len(s) > maxSummaryLength {
 		return s[:maxSummaryLength]
@@ -67,21 +91,26 @@ func ScrubRequestBody(body []byte) string {
 	return s
 }
 
-func scrubMap(m map[string]interface{}) {
-	for key, val := range m {
-		if sensitiveKeys[strings.ToLower(key)] {
-			m[key] = "[REDACTED]"
-			continue
-		}
-		switch v := val.(type) {
-		case map[string]interface{}:
-			scrubMap(v)
-		case []interface{}:
-			for _, item := range v {
-				if nested, ok := item.(map[string]interface{}); ok {
-					scrubMap(nested)
-				}
+// scrubValue walks maps and arrays, redacting the value of any
+// secret-bearing key and recursing into everything else. Top-level
+// arrays and scalars are handled too.
+func scrubValue(v interface{}) interface{} {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		for key, inner := range val {
+			if isSensitiveKey(key) {
+				val[key] = redactedValue
+				continue
 			}
+			val[key] = scrubValue(inner)
 		}
+		return val
+	case []interface{}:
+		for i, item := range val {
+			val[i] = scrubValue(item)
+		}
+		return val
+	default:
+		return v
 	}
 }
