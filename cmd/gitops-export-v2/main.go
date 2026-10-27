@@ -35,11 +35,11 @@ limitations under the License.
 // Usage:
 //
 //	gitops-export-v2 \
-//	  -kubeconfig ~/.butler/usini2kpbtlrkn-kubeconfig \
-//	  -cluster usini2kpbtlrkn \
+//	  -kubeconfig ~/.butler/mgmt-cluster-01-kubeconfig \
+//	  -cluster mgmt-cluster-01 \
 //	  -env prd \
 //	  -git-type gitlab \
-//	  -git-url https://gitlab.research.corteva.com \
+//	  -git-url https://gitlab.example.com \
 //	  -git-owner <scratch-namespace> \
 //	  -git-repo <scratch-project> \
 //	  -git-branch main \
@@ -72,9 +72,9 @@ func run() error {
 		clusterName    = flag.String("cluster", "", "cluster name used in clusters/<name>/ tree")
 		env            = flag.String("env", "prd", "apps overlay env name")
 		gitType        = flag.String("git-type", "", "git provider type: gitlab or github")
-		gitURL         = flag.String("git-url", "", "git provider base URL (e.g. https://gitlab.research.corteva.com)")
+		gitURL         = flag.String("git-url", "", "git provider base URL (e.g. https://gitlab.example.com)")
 		gitOwner       = flag.String("git-owner", "", "git owner / group / namespace")
-		gitRepo        = flag.String("git-repo", "", "git repo name (NEVER butler-crop-live-infra)")
+		gitRepo        = flag.String("git-repo", "", "git repo name; must be a scratch repository, never a live GitOps repository")
 		gitBranch      = flag.String("git-branch", "main", "git default branch")
 		gitTokenEnv    = flag.String("git-token-env", "", "env var holding the git provider token")
 		summaryOnly    = flag.Bool("summary-only", false, "print the layout file list and exit, do not push to git")

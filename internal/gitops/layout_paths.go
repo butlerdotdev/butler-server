@@ -255,7 +255,7 @@ func PathForNativeWithDefault(n *DiscoveredNative, env string) string {
 //     → rbac, apiextensions.k8s.io → apiextensions, networking.k8s.io
 //     → networking. The convention bundles k8s-machinery types by
 //     PURPOSE (the first segment), not by operator — confirmed in the
-//     live observability-pipeline-prd repo (infrastructure/storage/
+//     reference layout repository (infrastructure/storage/
 //     for StorageClass). Distinct from operator-CR grouping, which
 //     bundles by OPERATOR.
 //

@@ -12,7 +12,7 @@ Proposed
 
 The gitops export endpoint snapshots a live cluster's state into a Flux-style
 Git tree. Two structural gaps prevent the produced tree from sitting alongside
-a production reference repo (butler-crop-live-infra) without hand-reshaping.
+a production reference repo (the reference layout repository) without hand-reshaping.
 
 The first gap is resource coverage. `DiscoverHelmReleases()` in
 `internal/gitops/discovery.go:78-156` enumerates Helm releases via Kubernetes
@@ -52,7 +52,7 @@ configs are split under `infrastructure/`, apps split between `apps/base` and
 `apps/<env>` overlays, and the cluster pointer files reference Flux
 `Kustomization` CRs with a `dependsOn` chain plus `wait: true`. The export's
 output requires manual reshaping before it can be reconciled by Flux against
-the same layout butler-crop-live-infra uses.
+the same layout the reference layout repository uses.
 
 A third concern is a safety constraint, and it anchors the design. The export
 runs against live clusters whose root Flux `Kustomization` may already be
@@ -255,7 +255,7 @@ Platform configuration objects (identity, network, provider, CCP, metallb,
 sealed-secrets, gitops-config, steward) are prerequisites for apps and live
 under `infrastructure/configs`. Teams are tenant-scoped and per-env in
 multi-cluster repos; they live in `apps/<env>/teams/` to match
-butler-crop-live-infra's `apps/prd/teams/` precedent.
+the reference layout repository's `apps/prd/teams/` precedent.
 
 ### 4. Values splitter (base vs env)
 
@@ -288,7 +288,7 @@ Out of scope for v1. Three categories with related rationales:
   configuration, not controller-derived state.
 - **Raw-manifest controllers** — components delivered as hand-rolled
   Kubernetes manifests (CRDs + RBAC + Deployment) rather than as Helm
-  releases. butler-crop-live-infra's `infrastructure/controllers/capi-steward.yaml`
+  releases. the reference layout repository's `infrastructure/controllers/capi-steward.yaml`
   is the canonical instance: 9 raw docs that Flux applies directly. v1
   discovery only enumerates Helm releases and the named native CRDs, so
   raw-manifest components are neither captured nor pruned by the export
@@ -302,7 +302,7 @@ Out of scope for v1. Three categories with related rationales:
 The Helm release name (from the release secret's labels) is the chart's
 installation identity and is what discovery returns as `DiscoveredRelease.Name`.
 The Flux HelmRelease CR that owns the release can have a different
-`metadata.name`: butler-crop-live-infra's `sealed-secrets` HelmRelease
+`metadata.name`: the reference layout repository's `sealed-secrets` HelmRelease
 sets `spec.releaseName: sealed-secrets-controller`, so the Helm release
 name (`sealed-secrets-controller`) and the HR CR name (`sealed-secrets`)
 diverge.
@@ -411,9 +411,9 @@ the live mgmt cluster before opening for review.
 - `gitopsExportV2` feature flag. v1 stays default until the v2 path is
   validated; flag flip is a separate follow-up commit.
 - `compat.go` keeps v1 reachable for one release cycle.
-- Tests: unit + golden-file scenarios (`minimal`, `butler-crop-prd`,
+- Tests: unit + golden-file scenarios (`minimal`, `mature-tenant-prd`,
   `pre-existing-mismatch`) under `internal/gitops/testdata/`. The
-  `butler-crop-prd` scenario is recorded from local-against-live runs.
+  `mature-tenant-prd` scenario is recorded from local-against-live runs.
 - Prune-safety property test: enumerate the live cluster's resources
   across the in-scope namespaces and the cluster-scoped kinds in the
   discovery table; for each, assert the rendered tree contains a
@@ -427,7 +427,7 @@ the live mgmt cluster before opening for review.
 The bar for opening PR 2: the export, run from the dev workstation against
 the live mgmt cluster (read-only on cluster, write-only to a scratch git
 repo, feature-branch+MR path), produces a tree that matches
-butler-crop-live-infra's `apps/prd` + `infrastructure` shape AND the
+the reference layout repository's `apps/prd` + `infrastructure` shape AND the
 prune-safety property test passes against the live cluster's actual
 resource inventory. PR 2 may split if it grows unreviewable, but only
 along boundaries where each resulting MR leaves the feature end-to-end
@@ -489,7 +489,7 @@ functional.
   added, they are treated the same as user-applied CRDs that Flux does not
   manage: they remain on the cluster, but if Flux IS reconciling them via
   some other path, prune deletes them.
-- Raw-manifest controllers (e.g. butler-crop-live-infra's
+- Raw-manifest controllers (e.g. the reference layout repository's
   `infrastructure/controllers/capi-steward.yaml`, 9 raw docs delivered
   without a HelmRelease). v1 discovery only enumerates Helm releases and
   named native CRDs, so these are out of scope: the export does not
@@ -516,7 +516,7 @@ functional.
 - ADR-018 in butler-controller: ClusterCreationPolicy (kind added to
   discovery here)
 - butlerdotdev/butler-server#76
-- butler-crop-live-infra: reference target layout
+- the reference layout repository: reference target layout
 - Flux Kustomization inventory format (status.inventory.entries) — used
   by the prune-safety property test to enumerate live state in the
   cluster's reconciliation scope

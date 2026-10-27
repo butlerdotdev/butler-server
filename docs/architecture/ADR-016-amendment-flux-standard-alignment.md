@@ -186,7 +186,7 @@ Same directory as Clause 5's CRs. The per-release env kustomization at `apps/<en
 
 ## Divergences from the live butler/seed deployment
 
-The live `iocs-compute/butler/seed/live-infrastructure` repo at `clusters/butler/` is one real-world hand-maintained example. Comparing Butler's export to that repo as a check:
+The live `example-group/platform/live-infrastructure` repo at `clusters/butler/` is one real-world hand-maintained example. Comparing Butler's export to that repo as a check:
 
 | Item | Standard / Butler export | Live butler/seed | Decision |
 |---|---|---|---|
@@ -224,7 +224,7 @@ Future sessions land here to find the load-bearing functions for each clause. An
 - `internal/gitops/coverage.go`:
   - `CoverageReport.OmittedNamespaces` — the orphan-namespace surface (multi-owner-edge limitation documented above).
   - `BuildCoverage` — calls `AnalyzeNativePathCollisions` with the same `helmAppsOwnerByNamespace` map as emit; populates `OmittedNamespaces` from `helmOwnedNamespaces` diff against native Namespace items.
-- Golden fixtures under `internal/gitops/testdata/{loki-dev,observability-pipeline-prd}/expected/` — the standard-aligned tree per the rule above. Regenerate via `cmd/gitops-fixture-dump` if a future legitimate rule change requires rebaselining; see `testdata/README.md`.
+- Golden fixtures under `internal/gitops/testdata/{fresh-tenant-dev,mature-tenant-prd}/expected/` — the standard-aligned tree per the rule above. Regenerate via `cmd/gitops-fixture-dump` if a future legitimate rule change requires rebaselining; see `testdata/README.md`.
 
 ## Follow-up: per-CR ownership signals (resolves more, not all)
 

@@ -100,16 +100,22 @@ func (p *GitHubProvider) ValidateToken(ctx context.Context) (*TokenValidation, e
 
 // ListRepositories returns repositories accessible to the user.
 func (p *GitHubProvider) ListRepositories(ctx context.Context) ([]*Repository, error) {
-	const maxRepos = 200
-
 	allRepos := make([]*Repository, 0)
 	opts := &github.RepositoryListOptions{
 		Sort:        "updated",
 		Direction:   "desc",
-		ListOptions: github.ListOptions{PerPage: 100},
+		ListOptions: github.ListOptions{PerPage: repositoryPageSize},
 	}
 
-	for {
+	for pages := 0; ; pages++ {
+		if pages >= maxRepositoryPages {
+			return nil, &RepositoryListTooLargeError{
+				Scope:    p.organization,
+				Pages:    pages,
+				PageSize: repositoryPageSize,
+			}
+		}
+
 		repos, resp, err := p.client.Repositories.List(ctx, "", opts)
 		if err != nil {
 			return nil, p.wrapError(err, resp)
@@ -131,9 +137,6 @@ func (p *GitHubProvider) ListRepositories(ctx context.Context) ([]*Repository, e
 				HTMLURL:       r.GetHTMLURL(),
 				UpdatedAt:     r.GetUpdatedAt().Format("2006-01-02T15:04:05Z"),
 			})
-			if len(allRepos) >= maxRepos {
-				return allRepos, nil
-			}
 		}
 
 		if resp.NextPage == 0 {

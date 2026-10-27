@@ -18,6 +18,7 @@ package gitops
 
 import (
 	"context"
+	"fmt"
 )
 
 // GitProvider defines the interface for Git hosting providers (GitHub, GitLab, etc.).
@@ -95,4 +96,31 @@ type RateLimitError struct {
 
 func (e *RateLimitError) Error() string {
 	return "rate limit exceeded, resets at: " + e.ResetTime
+}
+
+// Repository listing walks every page of the provider's API. These bound the
+// walk so a pathological or looping response cannot spin forever, without
+// silently returning a partial universe: exceeding the bound is an error.
+const (
+	repositoryPageSize = 100
+	maxRepositoryPages = 200
+)
+
+// RepositoryListTooLargeError reports that a repository listing did not
+// terminate within the page bound. It is returned instead of a truncated list,
+// because a caller cannot tell a short list from a complete one.
+type RepositoryListTooLargeError struct {
+	Scope    string
+	Pages    int
+	PageSize int
+}
+
+func (e *RepositoryListTooLargeError) Error() string {
+	scope := e.Scope
+	if scope == "" {
+		scope = "the configured provider"
+	}
+	return fmt.Sprintf(
+		"repository listing for %s did not finish within %d pages of %d; refusing to return a partial list",
+		scope, e.Pages, e.PageSize)
 }

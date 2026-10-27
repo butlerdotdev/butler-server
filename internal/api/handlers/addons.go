@@ -1151,7 +1151,7 @@ func (h *AddonsHandler) checkOperatePermission(user *auth.UserSession, cluster *
 		return nil
 	}
 
-	if user.IsAdmin() {
+	if user.PlatformRole == auth.RoleAdmin {
 		return nil
 	}
 
