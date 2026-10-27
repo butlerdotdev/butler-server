@@ -64,7 +64,7 @@ func authorizeTeamCreate(user *auth.UserSession) (int, string) {
 	if user == nil {
 		return http.StatusUnauthorized, "Unauthorized"
 	}
-	if user.PlatformRole != auth.RoleAdmin {
+	if !user.IsPlatformAdminRole() {
 		return http.StatusForbidden, "Platform admin required to create teams"
 	}
 	return 0, ""
@@ -77,7 +77,7 @@ func authorizeTeamUpdate(user *auth.UserSession, teamName string, req *UpdateTea
 	if user == nil {
 		return http.StatusUnauthorized, "Unauthorized"
 	}
-	if user.PlatformRole == auth.RoleAdmin {
+	if user.IsPlatformAdminRole() {
 		return 0, ""
 	}
 	if !user.IsAdminOfTeam(teamName) {
@@ -95,7 +95,7 @@ func authorizeTeamDelete(user *auth.UserSession) (int, string) {
 	if user == nil {
 		return http.StatusUnauthorized, "Unauthorized"
 	}
-	if user.PlatformRole != auth.RoleAdmin {
+	if !user.IsPlatformAdminRole() {
 		return http.StatusForbidden, "Platform admin required to delete teams"
 	}
 	return 0, ""

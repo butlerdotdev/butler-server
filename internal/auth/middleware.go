@@ -33,6 +33,13 @@ func UserFromContext(ctx context.Context) *UserSession {
 	return user
 }
 
+// ContextWithUser returns ctx carrying user, as SessionMiddleware does.
+// It exists so tests outside this package can drive middleware and
+// handlers with a fixed session.
+func ContextWithUser(ctx context.Context, user *UserSession) context.Context {
+	return context.WithValue(ctx, userContextKey, user)
+}
+
 // PortalProofVerifier is the minimum interface SessionMiddleware needs from
 // a portal-proof validator. The interface seam exists so the claimed-is-
 // terminal guard inside SessionMiddleware has a testable boundary: a stub
@@ -361,8 +368,13 @@ func RequireTeam(teamName string) func(http.Handler) http.Handler {
 	}
 }
 
-// RequireAdmin creates middleware that requires admin role in any team.
-// Platform admins always pass this check.
+// RequireAdmin creates middleware that admits platform admins only.
+// It used to admit an admin of any team, which let a team admin reach
+// routes meant for the platform. Team-scoped admin checks belong in the
+// handler (IsAdminOfTeam with the team taken from the route), not in
+// route middleware that cannot see which team is being touched.
+//
+// Deprecated: use RequirePlatformAdmin, which this is now equivalent to.
 func RequireAdmin() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -372,8 +384,8 @@ func RequireAdmin() func(http.Handler) http.Handler {
 				return
 			}
 
-			if !user.IsAdmin() {
-				http.Error(w, `{"error":"forbidden: admin role required"}`, http.StatusForbidden)
+			if !user.IsPlatformAdminRole() {
+				http.Error(w, `{"error":"forbidden: platform admin required"}`, http.StatusForbidden)
 				return
 			}
 
@@ -394,7 +406,7 @@ func RequirePlatformAdmin() func(http.Handler) http.Handler {
 				return
 			}
 
-			if user.PlatformRole != RoleAdmin {
+			if !user.IsPlatformAdminRole() {
 				http.Error(w, `{"error":"forbidden: platform admin required"}`, http.StatusForbidden)
 				return
 			}
