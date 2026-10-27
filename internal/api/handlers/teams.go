@@ -101,6 +101,20 @@ func authorizeTeamDelete(user *auth.UserSession) (int, string) {
 	return 0, ""
 }
 
+// authorizeTeamMembershipChange allows platform admins and admins of
+// the named team to change its members and group syncs. The router's
+// any-team-admin middleware is not enough on its own: an admin of team
+// A must not edit team B.
+func authorizeTeamMembershipChange(user *auth.UserSession, teamName string) (int, string) {
+	if user == nil {
+		return http.StatusUnauthorized, "Unauthorized"
+	}
+	if !user.IsAdminOfTeam(teamName) {
+		return http.StatusForbidden, "Team admin of " + teamName + " or platform admin required"
+	}
+	return 0, ""
+}
+
 // TeamResponse represents a team in API responses.
 type TeamResponse struct {
 	Name            string                  `json:"name"`
@@ -787,6 +801,10 @@ type AddMemberRequest struct {
 // POST /api/admin/teams/{name}/members
 func (h *TeamHandler) AddMember(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
+	if status, msg := authorizeTeamMembershipChange(auth.UserFromContext(r.Context()), name); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
 
 	var req AddMemberRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -903,6 +921,10 @@ type UpdateMemberRoleRequest struct {
 // PATCH /api/admin/teams/{name}/members/{email}
 func (h *TeamHandler) UpdateMemberRole(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
+	if status, msg := authorizeTeamMembershipChange(auth.UserFromContext(r.Context()), name); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
 	email := chi.URLParam(r, "email")
 
 	decodedEmail, err := url.QueryUnescape(email)
@@ -989,6 +1011,10 @@ func (h *TeamHandler) UpdateMemberRole(w http.ResponseWriter, r *http.Request) {
 // DELETE /api/admin/teams/{name}/members/{email}
 func (h *TeamHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
+	if status, msg := authorizeTeamMembershipChange(auth.UserFromContext(r.Context()), name); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
 	email := chi.URLParam(r, "email")
 
 	decodedEmail, err := url.QueryUnescape(email)
@@ -1133,6 +1159,10 @@ type AddGroupSyncRequest struct {
 // POST /api/admin/teams/{name}/groups
 func (h *TeamHandler) AddGroupSync(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
+	if status, msg := authorizeTeamMembershipChange(auth.UserFromContext(r.Context()), name); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
 
 	var req AddGroupSyncRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1240,6 +1270,10 @@ func (h *TeamHandler) AddGroupSync(w http.ResponseWriter, r *http.Request) {
 // DELETE /api/admin/teams/{name}/groups/{groupName}?idp=<identityProvider>
 func (h *TeamHandler) RemoveGroupSync(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
+	if status, msg := authorizeTeamMembershipChange(auth.UserFromContext(r.Context()), name); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
 	groupName := chi.URLParam(r, "groupName")
 	idpFilter := r.URL.Query().Get("idp")
 
@@ -1321,6 +1355,10 @@ type UpdateGroupSyncRequest struct {
 // PATCH /api/admin/teams/{name}/groups/{groupName}?idp=<identityProvider>
 func (h *TeamHandler) UpdateGroupSyncRole(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
+	if status, msg := authorizeTeamMembershipChange(auth.UserFromContext(r.Context()), name); status != 0 {
+		writeError(w, status, msg)
+		return
+	}
 	groupName := chi.URLParam(r, "groupName")
 	idpFilter := r.URL.Query().Get("idp")
 
