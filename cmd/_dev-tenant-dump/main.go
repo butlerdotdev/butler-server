@@ -18,11 +18,11 @@ func main() {
 	// override defaults so this tool can target any tenant without recompiling.
 	kcPath := os.Getenv("DEV_DUMP_KUBECONFIG")
 	if kcPath == "" {
-		kcPath = os.Getenv("HOME") + "/.butler/observability-pipeline-prd-kubeconfig"
+		kcPath = os.Getenv("HOME") + "/.butler/example-tenant-kubeconfig"
 	}
 	clusterName := os.Getenv("DEV_DUMP_CLUSTER")
 	if clusterName == "" {
-		clusterName = "observability-pipeline-prd"
+		clusterName = "example-tenant"
 	}
 	env := os.Getenv("DEV_DUMP_ENV")
 	if env == "" {

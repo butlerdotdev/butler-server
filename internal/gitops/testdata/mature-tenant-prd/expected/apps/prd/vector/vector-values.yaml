@@ -1,0 +1,413 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: vector
+spec:
+  chart:
+    spec:
+      version: 0.52.0
+  values:
+    autoscaling:
+      enabled: false
+      external: true
+      maxReplicas: 20
+      minReplicas: 5
+    containerPorts:
+    - containerPort: 8686
+      name: api
+      protocol: TCP
+    - containerPort: 9000
+      name: prometheus
+      protocol: TCP
+    - containerPort: 9162
+      name: snmp
+      protocol: TCP
+    - containerPort: 9601
+      name: syslog
+      protocol: TCP
+    - containerPort: 9602
+      name: syslog-udp
+      protocol: UDP
+    - containerPort: 8080
+      name: http-source
+      protocol: TCP
+    - containerPort: 4317
+      name: otlp-grpc
+      protocol: TCP
+    - containerPort: 4318
+      name: otlp-http
+      protocol: TCP
+    - containerPort: 9598
+      name: prom-exporter
+      protocol: TCP
+    customConfig:
+      api:
+        address: 0.0.0.0:8686
+        enabled: true
+      data_dir: /vector-data-dir
+      sinks:
+        loki_app_logs:
+          buffer:
+            max_size: 4294967296
+            type: disk
+            when_full: block
+          encoding:
+            codec: json
+          endpoint: https://logs-prd.example.com
+          inputs:
+          - filter_logs
+          - remap_self_logs
+          - kafka_logs
+          labels:
+            cluster: '{{ `{{cluster}}` }}'
+            env: prd
+            environment: '{{ `{{environment}}` }}'
+            pipeline: obs-pipelines-crop-prd
+            provider_type: '{{ `{{provider_type}}` }}'
+            service_name: vector
+            tenant_namespace: '{{ `{{tenant_namespace}}` }}'
+          out_of_order_action: accept
+          tenant_id: crop
+          tls:
+            verify_certificate: false
+            verify_hostname: false
+          type: loki
+        loki_snmp_trap:
+          encoding:
+            codec: json
+          endpoint: https://logs-prd.example.com
+          inputs:
+          - remap_snmp_trap
+          labels:
+            cluster: '{{ `{{cluster}}` }}'
+            env: prd
+            environment: '{{ `{{environment}}` }}'
+            event_type: snmp_trap
+            pipeline: obs-pipelines-crop-prd
+            provider_type: '{{ `{{provider_type}}` }}'
+            service_name: vector
+            tenant_namespace: '{{ `{{tenant_namespace}}` }}'
+          out_of_order_action: accept
+          tenant_id: crop
+          tls:
+            verify_certificate: false
+            verify_hostname: false
+          type: loki
+        loki_syslog_ome:
+          encoding:
+            codec: json
+          endpoint: https://logs-prd.example.com
+          inputs:
+          - remap_syslog_ome
+          labels:
+            cluster: '{{ `{{cluster}}` }}'
+            env: prd
+            environment: '{{ `{{environment}}` }}'
+            host: '{{ `{{host}}` }}'
+            log_type: syslog
+            pipeline: obs-pipelines-crop-prd
+            provider_type: '{{ `{{provider_type}}` }}'
+            service_name: vector
+            source: openmanage
+            tenant_namespace: '{{ `{{tenant_namespace}}` }}'
+          out_of_order_action: accept
+          tenant_id: crop
+          tls:
+            verify_certificate: false
+            verify_hostname: false
+          type: loki
+        loki_syslog_os:
+          encoding:
+            codec: json
+          endpoint: https://logs-prd.example.com
+          inputs:
+          - remap_syslog_os
+          labels:
+            cluster: '{{ `{{cluster}}` }}'
+            env: prd
+            environment: '{{ `{{environment}}` }}'
+            host: '{{ `{{host}}` }}'
+            log_type: syslog
+            pipeline: obs-pipelines-crop-prd
+            provider_type: '{{ `{{provider_type}}` }}'
+            service_name: vector
+            source: linux_syslog
+            tenant_namespace: '{{ `{{tenant_namespace}}` }}'
+          out_of_order_action: accept
+          tenant_id: crop
+          tls:
+            verify_certificate: false
+            verify_hostname: false
+          type: loki
+        prometheus_exporter:
+          address: 0.0.0.0:9598
+          inputs:
+          - self_metrics
+          type: prometheus_exporter
+        tempo_traces:
+          buffer:
+            max_size: 268435488
+            type: disk
+            when_full: drop_newest
+          inputs:
+          - otlp.traces
+          protocol:
+            encoding:
+              codec: otlp
+            method: post
+            type: http
+            uri: http://192.0.2.52:4318/v1/traces
+          type: opentelemetry
+        victoria_metrics:
+          buffer:
+            max_size: 9663676416
+            type: disk
+            when_full: block
+          endpoint: https://metrics-prd.example.com:8480/insert/0/prometheus/api/v1/write
+          inputs:
+          - self_metrics
+          - prometheus_remote_write_source
+          - kafka_metrics
+          request:
+            retry_attempts: 5
+            retry_initial_backoff_secs: 1
+            retry_max_duration_secs: 30
+            timeout_secs: 60
+          tls:
+            verify_certificate: false
+            verify_hostname: false
+          type: prometheus_remote_write
+      sources:
+        http_source:
+          acknowledgements:
+            enabled: true
+          address: 0.0.0.0:8080
+          type: http_server
+        kafka_logs:
+          acknowledgements:
+            enabled: true
+          bootstrap_servers: pipeline-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
+          decoding:
+            codec: json
+          group_id: vector-aggregator-logs
+          tls:
+            crt_file: /etc/vector/kafka-tls/user.crt
+            enabled: true
+            key_file: /etc/vector/kafka-tls/user.key
+            verify_certificate: false
+            verify_hostname: false
+          topics:
+          - pipeline.logs.k8s
+          type: kafka
+        kafka_metrics:
+          acknowledgements:
+            enabled: true
+          bootstrap_servers: pipeline-kafka-kafka-bootstrap.kafka.svc.cluster.local:9092
+          decoding:
+            codec: native_json
+          group_id: vector-aggregator-metrics
+          librdkafka_options:
+            fetch.max.bytes: "1048576"
+            max.partition.fetch.bytes: "262144"
+            queued.max.messages.kbytes: "4096"
+            queued.min.messages: "1000"
+          tls:
+            crt_file: /etc/vector/kafka-tls/user.crt
+            enabled: true
+            key_file: /etc/vector/kafka-tls/user.key
+            verify_certificate: false
+            verify_hostname: false
+          topics:
+          - pipeline.metrics
+          type: kafka
+        otlp:
+          acknowledgements:
+            enabled: true
+          grpc:
+            address: 0.0.0.0:4317
+            tls:
+              crt_file: /etc/vector/otlp-tls/tls.crt
+              enabled: true
+              key_file: /etc/vector/otlp-tls/tls.key
+          http:
+            address: 0.0.0.0:4318
+            tls:
+              crt_file: /etc/vector/otlp-tls/tls.crt
+              enabled: true
+              key_file: /etc/vector/otlp-tls/tls.key
+          type: opentelemetry
+          use_otlp_decoding: true
+        prometheus_remote_write_source:
+          acknowledgements:
+            enabled: true
+          address: 0.0.0.0:9000
+          type: prometheus_remote_write
+        self_logs:
+          type: internal_logs
+        self_metrics:
+          namespace: vector_obsrvpipe_self_metrics
+          scrape_interval_secs: 15
+          type: internal_metrics
+        snmp_trap:
+          acknowledgements:
+            enabled: true
+          address: 0.0.0.0:9162
+          type: http_server
+        sys_log:
+          acknowledgements:
+            enabled: true
+          address: 0.0.0.0:9601
+          mode: tcp
+          type: syslog
+        sys_log_udp:
+          address: 0.0.0.0:9602
+          mode: udp
+          type: syslog
+      transforms:
+        filter_logs:
+          condition: '!exists(.counter) && !exists(.gauge) && !exists(.aggregated_histogram)
+            && !exists(.aggregated_summary)'
+          inputs:
+          - remap
+          type: filter
+        remap:
+          inputs:
+          - http_source
+          source: |
+            . = parse_json!(.message)
+            if !exists(.cluster) { .cluster = "" }
+            if !exists(.tenant_namespace) { .tenant_namespace = "" }
+            if !exists(.environment) { .environment = "" }
+            if !exists(.provider_type) { .provider_type = "" }
+          type: remap
+        remap_self_logs:
+          inputs:
+          - self_logs
+          source: |
+            .cluster = ""
+            .tenant_namespace = ""
+            .environment = ""
+            .provider_type = ""
+          type: remap
+        remap_snmp_trap:
+          inputs:
+          - snmp_trap
+          source: |
+            parsed = parse_json!(.message)
+            . = parsed.metrics
+            .cluster = ""
+            .tenant_namespace = ""
+            .environment = ""
+            .provider_type = ""
+          type: remap
+        remap_syslog_ome:
+          inputs:
+          - sys_log_udp
+          source: |
+            .parsed = parse_syslog!(.message)
+            .host = .parsed.host
+            .cluster = ""
+            .tenant_namespace = ""
+            .environment = ""
+            .provider_type = ""
+          type: remap
+        remap_syslog_os:
+          inputs:
+          - sys_log
+          source: |
+            .parsed = parse_syslog!(.message)
+            .host = .parsed.host
+            .cluster = ""
+            .tenant_namespace = ""
+            .environment = ""
+            .provider_type = ""
+          type: remap
+    env:
+    - name: VECTOR_WATCH_CONFIG
+      value: "true"
+    - name: VECTOR_INTERNAL_LOG_RATE_LIMIT
+      value: "300"
+    extraVolumeMounts:
+    - mountPath: /etc/vector/kafka-tls
+      name: kafka-tls
+      readOnly: true
+    - mountPath: /etc/vector/otlp-tls
+      name: otlp-tls
+      readOnly: true
+    extraVolumes:
+    - name: kafka-tls
+      secret:
+        defaultMode: 256
+        secretName: vector-consumer
+    - name: otlp-tls
+      secret:
+        defaultMode: 256
+        secretName: vector-otlp-tls
+    image:
+      pullPolicy: IfNotPresent
+      repository: timberio/vector
+      tag: 0.55.0-alpine
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClassName: longhorn
+    podLabels:
+      vector.dev/exclude: "false"
+    podMonitor:
+      enabled: true
+    podSecurityContext:
+      fsGroup: 65534
+      runAsNonRoot: true
+    readinessProbe:
+      failureThreshold: 6
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      successThreshold: 1
+      tcpSocket:
+        port: http-source
+      timeoutSeconds: 5
+    resources:
+      limits:
+        cpu: 4000m
+        memory: 8Gi
+      requests:
+        cpu: 2000m
+        memory: 4Gi
+    role: Aggregator
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      runAsUser: 65534
+    service:
+      enabled: true
+      ports:
+      - name: prometheus
+        port: 9000
+        protocol: TCP
+        targetPort: prometheus
+      - name: snmp
+        port: 9162
+        protocol: TCP
+        targetPort: snmp
+      - name: syslog
+        port: 9601
+        protocol: TCP
+        targetPort: syslog
+      - name: syslog-udp
+        port: 9602
+        protocol: UDP
+        targetPort: syslog-udp
+      - name: http-source
+        port: 8080
+        protocol: TCP
+        targetPort: http-source
+      - name: otlp-grpc
+        port: 4317
+        protocol: TCP
+        targetPort: otlp-grpc
+      - name: otlp-http
+        port: 4318
+        protocol: TCP
+        targetPort: otlp-http
+      type: LoadBalancer

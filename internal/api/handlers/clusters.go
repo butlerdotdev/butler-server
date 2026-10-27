@@ -81,14 +81,15 @@ func checkClusterVisibility(user *auth.UserSession, cluster *unstructured.Unstru
 		return nil
 	}
 
-	// No team context - use legacy behavior
-	// Admins can access all clusters
-	if user.IsAdmin() {
+	// No team context: platform roles see every cluster; everyone else
+	// sees the clusters of teams they belong to. Being an admin of some
+	// other team grants nothing here.
+	if user.IsPlatformViewerOrAbove() {
 		return nil
 	}
 
 	// If cluster has no teamRef, it's a platform-level cluster
-	// Only admins should see these (already checked above)
+	// Only platform roles should see these (already checked above)
 	if !found || clusterTeam == "" {
 		return fmt.Errorf("forbidden: cluster is not associated with any team")
 	}
@@ -117,8 +118,9 @@ func (h *ClusterHandler) checkOperatePermission(user *auth.UserSession, teamRef 
 		return nil
 	}
 
-	// No team context - use legacy behavior
-	if user.IsAdmin() {
+	// No team context: platform admins may operate on any cluster;
+	// everyone else needs an operate-capable role on the cluster's team.
+	if user.PlatformRole == auth.RoleAdmin {
 		return nil
 	}
 
@@ -169,8 +171,8 @@ func (h *ClusterHandler) List(w http.ResponseWriter, r *http.Request) {
 				if clusterTeam != user.SelectedTeam {
 					continue
 				}
-			} else if !user.IsAdmin() {
-				// No team context and not admin - filter by team membership
+			} else if !user.IsPlatformViewerOrAbove() {
+				// No team context and no platform role - filter by team membership
 				if clusterTeam == "" {
 					continue
 				}
@@ -760,10 +762,10 @@ func (h *ClusterHandler) validateUpdateRequest(cluster *unstructured.Unstructure
 
 	if req.ControlPlane != nil && req.ControlPlane.Replicas != nil {
 		replicas := *req.ControlPlane.Replicas
-		if replicas != 1 && replicas != 3 {
+		if replicas < 1 || replicas > 3 {
 			errs = append(errs, FieldError{
 				Field:  "spec.controlPlane.replicas",
-				Reason: "must be 1 or 3 (odd numbers required for etcd quorum)",
+				Reason: "must be between 1 and 3",
 			})
 		}
 		if replicas == 1 {
