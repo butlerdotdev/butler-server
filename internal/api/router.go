@@ -504,7 +504,7 @@ func NewRouter(cfg RouterConfig) (http.Handler, error) {
 			// Team provider management (team members can list, team admins can create/delete)
 			r.Get("/teams/{name}/providers", providerHandler.ListTeamProviders)
 			r.Post("/teams/{name}/providers", providerHandler.CreateTeamProvider)
-			r.Post("/teams/{name}/providers/test", providerHandler.TestConnection)
+			r.Post("/teams/{name}/providers/test", providerHandler.TestTeamConnection)
 			r.Delete("/teams/{name}/providers/{namespace}/{providerName}", providerHandler.DeleteTeamProvider)
 
 			// Team environment management (ADR-009). The Team admission

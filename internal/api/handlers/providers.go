@@ -185,6 +185,24 @@ func (h *ProvidersHandler) Get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, provider.Object)
 }
 
+// TestTeamConnection tests provider credentials on behalf of a team.
+// Same body as TestConnection, but the caller must be able to manage
+// the named team's providers; the platform-scoped route is gated by
+// middleware instead.
+func (h *ProvidersHandler) TestTeamConnection(w http.ResponseWriter, r *http.Request) {
+	teamName := chi.URLParam(r, "name")
+	user := auth.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if !user.CanOperateTeam(teamName) {
+		writeError(w, http.StatusForbidden, fmt.Sprintf("you don't have permission to manage providers for team '%s'", teamName))
+		return
+	}
+	h.TestConnection(w, r)
+}
+
 // TestConnection tests provider credentials without creating anything.
 func (h *ProvidersHandler) TestConnection(w http.ResponseWriter, r *http.Request) {
 	var req CreateProviderRequest
